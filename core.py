@@ -5,11 +5,17 @@ GUIから呼び出すほか、単体テストにも使用する。
 """
 import io
 import os
+import re
 import sys
 import json
+import time
+import uuid
 import wave
+import zipfile
 import tempfile
 import subprocess
+from html.parser import HTMLParser
+from xml.etree import ElementTree
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
@@ -19,6 +25,10 @@ IS_MAC = sys.platform == "darwin"
 
 IMG_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".gif"}
 PDF_EXT = {".pdf"}
+TXT_EXT = {".txt"}
+DOCX_EXT = {".docx"}
+EPUB_EXT = {".epub"}
+DOC_EXT = TXT_EXT | DOCX_EXT | EPUB_EXT  # OCR不要のテキスト系入力
 
 CREATE_NO_WINDOW = 0x08000000 if IS_WIN else 0  # Winでサブプロセスのコンソール窓を出さない
 
@@ -167,6 +177,130 @@ def clean_text(raw: str, mode: str = "sentence",
 
 
 # ============================================================
+#  テキスト系ファイル（.txt / .docx / .epub）の読み込み
+# ============================================================
+_AOZORA_RUBY = re.compile(r"《[^》]*》")          # ルビ本体
+_AOZORA_NOTE = re.compile(r"［＃[^］]*］")        # 入力者注（傍点・字下げ指定等）
+_AOZORA_BAR = "｜"                                # ルビ範囲の開始記号
+
+
+def strip_aozora(text: str) -> str:
+    """青空文庫形式の注記を除去する（ルビ《…》・｜・［＃…］）。
+    通常のテキストにはまず現れない記号のため、常に適用して安全。"""
+    text = _AOZORA_RUBY.sub("", text)
+    text = _AOZORA_NOTE.sub("", text)
+    return text.replace(_AOZORA_BAR, "")
+
+
+def read_txt(path: str) -> str:
+    """テキストファイルを読む。UTF-8 → CP932(Shift_JIS) → UTF-16 の順で試す。"""
+    with open(path, "rb") as f:
+        data = f.read()
+    for enc in ("utf-8-sig", "cp932", "utf-16"):
+        try:
+            return data.decode(enc)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+_DOCX_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def extract_docx(path: str) -> str:
+    """Word文書(.docx)から段落テキストを抽出する（追加ライブラリ不要）。"""
+    with zipfile.ZipFile(path) as z:
+        xml = z.read("word/document.xml")
+    root = ElementTree.fromstring(xml)
+    paras = []
+    for p in root.iter(_DOCX_NS + "p"):
+        parts = []
+        for node in p.iter():
+            if node.tag == _DOCX_NS + "t" and node.text:
+                parts.append(node.text)
+            elif node.tag in (_DOCX_NS + "br", _DOCX_NS + "cr"):
+                parts.append("\n")
+            elif node.tag == _DOCX_NS + "tab":
+                parts.append(" ")
+        text = "".join(parts).strip()
+        if text:
+            paras.append(text)
+    return "\n".join(paras)
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """EPUB内のXHTMLから本文テキストを取り出す。<rt>(ルビ読み)や<script>等は捨てる。"""
+    _SKIP = {"script", "style", "rt", "rp", "head", "title"}
+    _BLOCK = {"p", "div", "br", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+              "tr", "section", "article", "blockquote"}
+
+    def __init__(self):
+        super().__init__()
+        self._out = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip_depth += 1
+        elif tag in self._BLOCK:
+            self._out.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._skip_depth > 0:
+            self._skip_depth -= 1
+        elif tag in self._BLOCK and tag != "br":
+            # brは単なる改行（開始タグ分のみ）。他のブロック要素は
+            # 開始+終了で改行2つ→空行1つ＝段落区切りになる
+            self._out.append("\n")
+
+    def handle_data(self, data):
+        if self._skip_depth == 0:
+            self._out.append(data)
+
+    def text(self) -> str:
+        raw = "".join(self._out)
+        lines = [ln.strip() for ln in raw.split("\n")]
+        out = []
+        for ln in lines:
+            if ln:
+                out.append(ln)
+            elif out and out[-1] != "":
+                out.append("")  # 空行は1つに詰める
+        return "\n".join(out).strip()
+
+
+def extract_epub(path: str) -> str:
+    """EPUBから本文テキストを抽出する（spine順・追加ライブラリ不要）。"""
+    ns_c = "{urn:oasis:names:tc:opendocument:xmlns:container}"
+    ns_o = "{http://www.idpf.org/2007/opf}"
+    with zipfile.ZipFile(path) as z:
+        container = ElementTree.fromstring(z.read("META-INF/container.xml"))
+        rootfile = container.find(f".//{ns_c}rootfile")
+        opf_path = rootfile.get("full-path")
+        opf_dir = os.path.dirname(opf_path)
+        opf = ElementTree.fromstring(z.read(opf_path))
+        items = {}
+        for it in opf.iter(ns_o + "item"):
+            items[it.get("id")] = it.get("href")
+        chapters = []
+        for ref in opf.iter(ns_o + "itemref"):
+            href = items.get(ref.get("idref"))
+            if not href:
+                continue
+            full = (opf_dir + "/" + href) if opf_dir else href
+            try:
+                html = z.read(full).decode("utf-8", errors="replace")
+            except KeyError:
+                continue
+            p = _HTMLTextExtractor()
+            p.feed(html)
+            t = p.text()
+            if t:
+                chapters.append(t)
+    return "\n\n".join(chapters)
+
+
+# ============================================================
 #  画像前処理 + OCR
 # ============================================================
 def preprocess_image(img, enable: bool = True, max_side: int = 4000):
@@ -250,7 +384,7 @@ def _find_powershell():
 def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                   lang="ja", progress_cb=None):
     """
-    複数ファイル（PDF/画像）からテキストを抽出して結合文字列を返す。
+    複数ファイル（PDF/画像/テキスト/Word/EPUB）からテキストを抽出して結合文字列を返す。
     pdf_mode: "auto"（テキスト層→無ければOCR） / "ocr"（常にOCR）
     戻り値: (text, warnings:list)
     """
@@ -308,6 +442,15 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                 png = os.path.join(tmpdir, f"img_{idx}.png")
                 img.save(png)
                 ocr_jobs.append((key, png))
+            elif ext in TXT_EXT:
+                order.append(path)
+                text_parts[path] = strip_aozora(read_txt(path))
+            elif ext in DOCX_EXT:
+                order.append(path)
+                text_parts[path] = extract_docx(path)
+            elif ext in EPUB_EXT:
+                order.append(path)
+                text_parts[path] = strip_aozora(extract_epub(path))
             else:
                 warnings.append(f"未対応の形式をスキップ: {os.path.basename(path)}")
         except Exception as e:
@@ -387,19 +530,46 @@ def can_play():
     return False
 
 
-def play_wav_blocking(wav_bytes):
-    """WAVバイト列を同期再生する（ワーカースレッドから呼ぶ想定）。"""
+def wav_duration(wav_bytes) -> float:
+    """WAVバイト列の再生時間（秒）を返す。"""
+    with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+        return w.getnframes() / float(w.getframerate())
+
+
+def play_wav_blocking(wav_bytes, stop_event=None):
+    """WAVバイト列を同期再生する（ワーカースレッドから呼ぶ想定）。
+    stop_event (threading.Event) がセットされたら途中で再生を打ち切る。"""
     if IS_WIN:
         import winsound
-        # winsound は SND_MEMORY と SND_ASYNC を併用不可。同期再生でよい。
-        winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+        if stop_event is None:
+            # SND_MEMORY 同期再生（従来どおり）
+            winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+            return
+        # 非同期再生し、停止要求を監視しながら再生時間ぶん待つ
+        dur = wav_duration(wav_bytes)
+        winsound.PlaySound(wav_bytes, winsound.SND_MEMORY | winsound.SND_ASYNC)
+        deadline = time.monotonic() + dur
+        while time.monotonic() < deadline:
+            if stop_event.is_set():
+                winsound.PlaySound(None, winsound.SND_PURGE)
+                return
+            time.sleep(0.05)
         return
     if IS_MAC:
         fd, path = tempfile.mkstemp(prefix="t2v_prev_", suffix=".wav")
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(wav_bytes)
-            subprocess.run(["/usr/bin/afplay", path], check=False)
+            if stop_event is None:
+                subprocess.run(["/usr/bin/afplay", path], check=False)
+            else:
+                proc = subprocess.Popen(["/usr/bin/afplay", path])
+                while proc.poll() is None:
+                    if stop_event.is_set():
+                        proc.terminate()
+                        proc.wait()
+                        break
+                    time.sleep(0.05)
         finally:
             try:
                 os.remove(path)
@@ -425,15 +595,17 @@ def vv_check(base_url, timeout=3):
 
 
 def vv_speakers(base_url, timeout=10):
-    """[(label, speaker_id)] のリストを返す。"""
+    """[(label, style_id, speaker_uuid)] のリストを返す。
+    speaker_uuid は .vvproj 出力の voice.speakerId に使う。"""
     import requests
     r = requests.get(base_url + "/speakers", timeout=timeout)
     r.raise_for_status()
     out = []
     for sp in r.json():
         name = sp.get("name", "")
+        sp_uuid = sp.get("speaker_uuid", "")
         for st in sp.get("styles", []):
-            out.append((f"{name}（{st.get('name','')}）", st.get("id")))
+            out.append((f"{name}（{st.get('name','')}）", st.get("id"), sp_uuid))
     return out
 
 
@@ -475,3 +647,101 @@ def concat_wavs(wav_bytes_list, gap_sec=0.4):
             if i < len(frames) - 1:
                 w.writeframes(silence)
     return out.getvalue()
+
+
+# ============================================================
+#  VOICEVOX ユーザー辞書（読み方の登録）
+# ============================================================
+def hira_to_kata(s: str) -> str:
+    """ひらがなを全角カタカナに変換する（辞書の読みはカタカナ必須のため）。"""
+    return "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in s)
+def vv_dict_list(base_url, timeout=10):
+    """登録済みユーザー辞書を [(uuid, surface, pronunciation, accent_type)] で返す。"""
+    import requests
+    r = requests.get(base_url + "/user_dict", timeout=timeout)
+    r.raise_for_status()
+    out = []
+    for word_uuid, w in r.json().items():
+        out.append((word_uuid, w.get("surface", ""),
+                    w.get("pronunciation", ""), w.get("accent_type", 0)))
+    out.sort(key=lambda x: x[1])
+    return out
+
+
+def vv_dict_add(base_url, surface, pronunciation, accent_type=0, timeout=10):
+    """単語を登録し、word_uuid を返す。pronunciation は全角カタカナ。"""
+    import requests
+    r = requests.post(base_url + "/user_dict_word",
+                      params={"surface": surface,
+                              "pronunciation": pronunciation,
+                              "accent_type": int(accent_type)},
+                      timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+def vv_dict_delete(base_url, word_uuid, timeout=10):
+    """登録済み単語を削除する。"""
+    import requests
+    r = requests.delete(base_url + f"/user_dict_word/{word_uuid}", timeout=timeout)
+    r.raise_for_status()
+
+
+# ============================================================
+#  VOICEVOX プロジェクトファイル (.vvproj) 出力
+# ============================================================
+# 公式VOICEVOXエンジンのID。旧形式(0.14)プロジェクトの engineId として使う。
+VV_ENGINE_ID = "074fc39e-678b-4c13-8916-ffca8d505d1d"
+
+
+def make_vvproj(lines, style_id, speaker_uuid, engine_id=VV_ENGINE_ID):
+    """
+    行リストから VOICEVOX エディタで開けるプロジェクト(JSON文字列)を作る。
+    appVersion 0.22.0 形式（talk/song 構造・query なし）で出力する:
+    ・0.22未満と偽ると query 必須のマイグレーションでエディタが落ちる
+    ・0.22以降のスキーマ追加（phonemeTimingEditData 等）はエディタ側の
+      マイグレーションが自動補完するため、この形式が安全な最小構成
+    speaker_uuid: vv_speakers() が返す話者UUID（voice.speakerId に入る）
+    """
+    audio_keys = []
+    audio_items = {}
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        key = str(uuid.uuid4())
+        audio_keys.append(key)
+        audio_items[key] = {
+            "text": ln,
+            "voice": {
+                "engineId": engine_id,
+                "speakerId": speaker_uuid,
+                "styleId": int(style_id),
+            },
+        }
+    track_id = str(uuid.uuid4())
+    proj = {
+        "appVersion": "0.22.0",
+        "talk": {
+            "audioKeys": audio_keys,
+            "audioItems": audio_items,
+        },
+        "song": {
+            "tpqn": 480,
+            "tempos": [{"position": 0, "bpm": 120}],
+            "timeSignatures": [{"measureNumber": 1, "beats": 4, "beatType": 4}],
+            "tracks": {track_id: {
+                "name": "トラック1",
+                "keyRangeAdjustment": 0,
+                "volumeRangeAdjustment": 0,
+                "notes": [],
+                "pitchEditData": [],
+                "solo": False,
+                "mute": False,
+                "gain": 1,
+                "pan": 0,
+            }},
+            "trackOrder": [track_id],
+        },
+    }
+    return json.dumps(proj, ensure_ascii=False, indent=2)

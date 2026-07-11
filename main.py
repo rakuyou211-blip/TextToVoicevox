@@ -31,7 +31,7 @@ except Exception:
 
 APP_TITLE = "テキスト抽出 → VOICEVOX  (オフライン)"
 VOICEVOX_DEFAULT = "http://127.0.0.1:50021"
-ALL_EXT = sorted(core.IMG_EXT | core.PDF_EXT)
+ALL_EXT = sorted(core.IMG_EXT | core.PDF_EXT | core.DOC_EXT)
 
 # OS別のUIフォント（Noneなら環境の既定フォントを使う）
 if core.IS_WIN:
@@ -60,6 +60,9 @@ class App(_Base):
         self._previewing = False
         self._preview_buf = None        # 再生中WAVの参照保持（GC防止）
         self._saved_speaker = None      # 設定から復元する話者ラベル
+        self._playall_stop = None       # 連続再生の停止イベント
+        self.replace_rules = []         # 保存済み置換ルール [[find, repl], ...]
+        self._dict_win = None           # ユーザー辞書ダイアログ
 
         self._build_ui()
         self._load_settings()
@@ -158,6 +161,9 @@ class App(_Base):
                    command=self.save_txt).pack(side="left", padx=2)
         ttk.Button(vrow1, text="クリップボードにコピー",
                    command=self.copy_clip).pack(side="left", padx=2)
+        self.vvproj_btn = ttk.Button(vrow1, text="プロジェクト保存(.vvproj)",
+                                     command=self.save_vvproj, state="disabled")
+        self.vvproj_btn.pack(side="left", padx=2)
         ttk.Separator(vrow1, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Button(vrow1, text="VOICEVOX起動", command=self.launch_voicevox).pack(side="left", padx=2)
         ttk.Label(vrow1, text="URL:").pack(side="left", padx=(8, 0))
@@ -178,12 +184,27 @@ class App(_Base):
         self.combine_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(vrow2, text="全文を1つのWAVに結合",
                         variable=self.combine_var).pack(side="left", padx=10)
-        self.preview_btn = ttk.Button(vrow2, text="▶ 試聴(カーソル行)",
+        ttk.Label(vrow2, text="文間の無音(秒):").pack(side="left", padx=(4, 0))
+        self.gap_var = tk.DoubleVar(value=0.4)
+        ttk.Spinbox(vrow2, from_=0.0, to=3.0, increment=0.1, width=5,
+                    textvariable=self.gap_var).pack(side="left")
+
+        vrow3 = ttk.Frame(bottom); vrow3.pack(fill="x", padx=6, pady=3)
+        self.preview_btn = ttk.Button(vrow3, text="▶ 試聴(カーソル行)",
                                        command=self.preview_selected, state="disabled")
         self.preview_btn.pack(side="left", padx=4)
-        self.synth_btn = ttk.Button(vrow2, text="🔊 音声を生成(WAV)",
+        self.playall_btn = ttk.Button(vrow3, text="▶▶ 連続再生(カーソル行から)",
+                                      command=self.play_all, state="disabled")
+        self.playall_btn.pack(side="left", padx=4)
+        self.stop_btn = ttk.Button(vrow3, text="■ 停止",
+                                   command=self.stop_playall, state="disabled")
+        self.stop_btn.pack(side="left", padx=4)
+        self.synth_btn = ttk.Button(vrow3, text="🔊 音声を生成(WAV)",
                                     command=self.start_synth, state="disabled")
-        self.synth_btn.pack(side="left", padx=4)
+        self.synth_btn.pack(side="left", padx=12)
+        self.dict_btn = ttk.Button(vrow3, text="読み方辞書...",
+                                   command=self.open_dict_dialog, state="disabled")
+        self.dict_btn.pack(side="left", padx=4)
 
         # === 結果テキスト（編集可能）=== 残りスペースを埋める（最後にpack）
         mid = ttk.LabelFrame(self, text="3. 抽出結果（手動で修正できます）")
@@ -203,6 +224,14 @@ class App(_Base):
         ttk.Button(rep, text="すべて置換", command=self.replace_all_text).pack(side="left", padx=4)
         fe.bind("<Return>", lambda e: self.replace_all_text())
         re_.bind("<Return>", lambda e: self.replace_all_text())
+        ttk.Separator(rep, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Label(rep, text="保存ルール:").pack(side="left")
+        self.rule_cb = ttk.Combobox(rep, width=16, state="readonly", values=[])
+        self.rule_cb.pack(side="left", padx=2)
+        self.rule_cb.bind("<<ComboboxSelected>>", self._rule_selected)
+        ttk.Button(rep, text="登録", width=4, command=self.add_rule).pack(side="left", padx=1)
+        ttk.Button(rep, text="削除", width=4, command=self.del_rule).pack(side="left", padx=1)
+        ttk.Button(rep, text="全ルール適用", command=self.apply_all_rules).pack(side="left", padx=4)
 
         body = ttk.Frame(mid)
         body.pack(fill="both", expand=True)
@@ -217,6 +246,7 @@ class App(_Base):
     def add_files(self):
         ft = [("対応ファイル", " ".join("*" + e for e in ALL_EXT)),
               ("PDF", "*.pdf"), ("画像", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp *.gif"),
+              ("テキスト・文書", "*.txt *.docx *.epub"),
               ("すべて", "*.*")]
         for p in filedialog.askopenfilenames(title="ファイルを選択", filetypes=ft):
             self._add_one(p)
@@ -374,10 +404,11 @@ class App(_Base):
         self._set_busy(True)
         self.progress.config(mode="determinate", maximum=len(lines), value=0)
         threading.Thread(target=self._synth_worker,
-                         args=(lines, speaker_id, speed, target, self.combine_var.get()),
+                         args=(lines, speaker_id, speed, target, self.combine_var.get(),
+                               self.gap_var.get()),
                          daemon=True).start()
 
-    def _synth_worker(self, lines, speaker_id, speed, target, combine):
+    def _synth_worker(self, lines, speaker_id, speed, target, combine, gap):
         try:
             wavs = []
             for i, ln in enumerate(lines):
@@ -390,7 +421,7 @@ class App(_Base):
                     with open(fn, "wb") as f:
                         f.write(wb)
             if combine:
-                merged = core.concat_wavs(wavs)
+                merged = core.concat_wavs(wavs, gap_sec=gap)
                 with open(target, "wb") as f:
                     f.write(merged)
                 self.q.put(("synth_done", f"結合WAVを保存しました:\n{target}"))
@@ -422,6 +453,31 @@ class App(_Base):
         self.clipboard_clear()
         self.clipboard_append(text)
         self.status_var.set("クリップボードにコピーしました。")
+
+    def save_vvproj(self):
+        text = self.text.get("1.0", "end").strip()
+        if not text:
+            messagebox.showinfo("情報", "保存するテキストがありません。")
+            return
+        if not self.speakers or self.speaker_cb.current() < 0:
+            messagebox.showinfo("情報", "話者を選択してください（先にエンジン接続確認）。")
+            return
+        out = filedialog.asksaveasfilename(
+            title="VOICEVOXプロジェクトを保存", defaultextension=".vvproj",
+            filetypes=[("VOICEVOXプロジェクト", "*.vvproj")],
+            initialfile="voicevox_project.vvproj")
+        if not out:
+            return
+        sp = self.speakers[self.speaker_cb.current()]
+        style_id, speaker_uuid = sp[1], sp[2]
+        lines = [ln for ln in text.split("\n") if ln.strip()]
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(core.make_vvproj(lines, style_id, speaker_uuid))
+        messagebox.showinfo("保存完了",
+                            f"保存しました:\n{out}\n\n"
+                            "VOICEVOXの「ファイル → プロジェクト読み込み」で開くと、\n"
+                            "1行 = 1ブロックとして読み込まれ、行ごとに話者や\n"
+                            "イントネーションを調整できます。")
 
     # ---------------- クリップボード画像OCR ----------------
     def clipboard_ocr(self):
@@ -465,6 +521,96 @@ class App(_Base):
         except Exception:
             self.q.put(("error", traceback.format_exc()))
 
+    # ---------------- ユーザー辞書（読み方の登録） ----------------
+    def open_dict_dialog(self):
+        if self._dict_win is not None and self._dict_win.winfo_exists():
+            self._dict_win.lift()
+            return
+        win = tk.Toplevel(self)
+        win.title("読み方辞書（VOICEVOXユーザー辞書）")
+        win.geometry("560x420")
+        self._dict_win = win
+
+        ttk.Label(win, text="固有名詞などの読み間違いを登録できます。"
+                            "登録した読みはVOICEVOX全体で使われます。").pack(anchor="w", padx=8, pady=(8, 2))
+
+        cols = ("surface", "pron", "accent")
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=10)
+        tree.heading("surface", text="単語")
+        tree.heading("pron", text="読み（カタカナ）")
+        tree.heading("accent", text="アクセント核")
+        tree.column("surface", width=180)
+        tree.column("pron", width=220)
+        tree.column("accent", width=90, anchor="center")
+        tree.pack(fill="both", expand=True, padx=8, pady=4)
+        self._dict_tree = tree
+
+        form = ttk.Frame(win); form.pack(fill="x", padx=8, pady=4)
+        ttk.Label(form, text="単語:").pack(side="left")
+        self._dict_surface = tk.StringVar()
+        ttk.Entry(form, textvariable=self._dict_surface, width=14).pack(side="left", padx=2)
+        ttk.Label(form, text="読み:").pack(side="left", padx=(8, 0))
+        self._dict_pron = tk.StringVar()
+        ttk.Entry(form, textvariable=self._dict_pron, width=18).pack(side="left", padx=2)
+        ttk.Label(form, text="ｱｸｾﾝﾄ核:").pack(side="left", padx=(8, 0))
+        self._dict_accent = tk.IntVar(value=0)
+        ttk.Spinbox(form, from_=0, to=30, width=4,
+                    textvariable=self._dict_accent).pack(side="left", padx=2)
+
+        btns = ttk.Frame(win); btns.pack(fill="x", padx=8, pady=(2, 8))
+        ttk.Button(btns, text="追加", command=self._dict_add).pack(side="left", padx=2)
+        ttk.Button(btns, text="選択を削除", command=self._dict_delete).pack(side="left", padx=2)
+        ttk.Button(btns, text="再読込", command=self._dict_refresh).pack(side="left", padx=2)
+        ttk.Label(btns, text="※読みはひらがなでもOK（自動でカタカナに変換）。"
+                            "ｱｸｾﾝﾄ核0=平板").pack(side="left", padx=8)
+        self._dict_refresh()
+
+    def _dict_refresh(self):
+        threading.Thread(target=self._dict_list_worker, daemon=True).start()
+
+    def _dict_list_worker(self):
+        try:
+            rows = core.vv_dict_list(self.base_url)
+            self.q.put(("dict_list", rows))
+        except Exception as e:
+            self.q.put(("dict_status", f"辞書の取得に失敗: {e}"))
+
+    def _dict_add(self):
+        surface = self._dict_surface.get().strip()
+        pron = core.hira_to_kata(self._dict_pron.get().strip())
+        if not surface or not pron:
+            self.status_var.set("単語と読みを入力してください。")
+            return
+        accent = self._dict_accent.get()
+
+        def worker():
+            try:
+                core.vv_dict_add(self.base_url, surface, pron, accent)
+                self.q.put(("dict_status", f"登録しました：{surface} → {pron}"))
+                rows = core.vv_dict_list(self.base_url)
+                self.q.put(("dict_list", rows))
+            except Exception as e:
+                self.q.put(("dict_status", f"登録に失敗: {e}（読みは全角カタカナのみ）"))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _dict_delete(self):
+        sel = self._dict_tree.selection()
+        if not sel:
+            self.status_var.set("削除する単語を選択してください。")
+            return
+        uuids = list(sel)  # iid = word_uuid
+
+        def worker():
+            try:
+                for u in uuids:
+                    core.vv_dict_delete(self.base_url, u)
+                self.q.put(("dict_status", f"{len(uuids)}件削除しました。"))
+                rows = core.vv_dict_list(self.base_url)
+                self.q.put(("dict_list", rows))
+            except Exception as e:
+                self.q.put(("dict_status", f"削除に失敗: {e}"))
+        threading.Thread(target=worker, daemon=True).start()
+
     # ---------------- 試聴 ----------------
     def preview_selected(self):
         if self._previewing or self.busy:
@@ -503,6 +649,59 @@ class App(_Base):
         except Exception:
             self.q.put(("preview_done", False, traceback.format_exc()))
 
+    # ---------------- 連続再生（カーソル行から最後まで） ----------------
+    def play_all(self):
+        if self._previewing or self.busy:
+            return
+        if not self.speakers or self.speaker_cb.current() < 0:
+            messagebox.showinfo("情報", "話者を選択してください（先にエンジン接続確認）。")
+            return
+        if not core.can_play():
+            messagebox.showinfo("情報", "この環境では再生を利用できません。")
+            return
+        # (行番号, テキスト) を集め、カーソル行以降を再生対象にする
+        all_lines = self.text.get("1.0", "end-1c").split("\n")
+        numbered = [(i, ln.strip()) for i, ln in enumerate(all_lines, start=1) if ln.strip()]
+        if not numbered:
+            self.status_var.set("再生するテキストがありません。")
+            return
+        cur = int(self.text.index("insert").split(".")[0])
+        start = next((k for k, (no, _) in enumerate(numbered) if no >= cur), 0)
+        targets = numbered[start:]
+        speaker_id = self.speakers[self.speaker_cb.current()][1]
+        speed = self.speed_var.get()
+        self._playall_stop = threading.Event()
+        self._previewing = True
+        self.preview_btn.config(state="disabled")
+        self.playall_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
+        threading.Thread(target=self._playall_worker,
+                         args=(targets, speaker_id, speed), daemon=True).start()
+
+    def stop_playall(self):
+        if self._playall_stop is not None:
+            self._playall_stop.set()
+        self.stop_btn.config(state="disabled")
+        self.status_var.set("停止しています...")
+
+    def _playall_worker(self, targets, speaker_id, speed):
+        stop = self._playall_stop
+        played = 0
+        try:
+            for lineno, ln in targets:
+                if stop.is_set():
+                    break
+                self.q.put(("playall_line", lineno, ln, played, len(targets)))
+                wb = core.vv_synthesize_one(self.base_url, ln, speaker_id, speed=speed)
+                if stop.is_set():
+                    break
+                self._preview_buf = wb
+                core.play_wav_blocking(wb, stop_event=stop)
+                played += 1
+            self.q.put(("playall_done", True, stop.is_set(), played))
+        except Exception:
+            self.q.put(("playall_done", False, traceback.format_exc(), played))
+
     # ---------------- 一括置換 ----------------
     def replace_all_text(self):
         find = self.find_var.get()
@@ -520,6 +719,63 @@ class App(_Base):
         self.text.insert("1.0", content.replace(find, repl))
         self.status_var.set(f"{count}件置換しました：「{find}」→「{repl}」")
 
+    # ---------------- 置換ルールの保存・適用 ----------------
+    def _rule_labels(self):
+        return [f"{f} → {r}" for f, r in self.replace_rules]
+
+    def _refresh_rules(self):
+        self.rule_cb.config(values=self._rule_labels())
+
+    def _rule_selected(self, event=None):
+        i = self.rule_cb.current()
+        if 0 <= i < len(self.replace_rules):
+            f, r = self.replace_rules[i]
+            self.find_var.set(f)
+            self.repl_var.set(r)
+
+    def add_rule(self):
+        find = self.find_var.get()
+        if not find:
+            self.status_var.set("登録する検索文字を入力してください。")
+            return
+        rule = [find, self.repl_var.get()]
+        if rule in self.replace_rules:
+            self.status_var.set("同じルールが登録済みです。")
+            return
+        self.replace_rules.append(rule)
+        self._refresh_rules()
+        self.rule_cb.current(len(self.replace_rules) - 1)
+        self.status_var.set(f"ルールを登録しました：「{rule[0]}」→「{rule[1]}」（次回起動時も使えます）")
+
+    def del_rule(self):
+        i = self.rule_cb.current()
+        if not (0 <= i < len(self.replace_rules)):
+            self.status_var.set("削除するルールを選択してください。")
+            return
+        f, r = self.replace_rules.pop(i)
+        self._refresh_rules()
+        self.rule_cb.set("")
+        self.status_var.set(f"ルールを削除しました：「{f}」→「{r}」")
+
+    def apply_all_rules(self):
+        if not self.replace_rules:
+            self.status_var.set("保存済みのルールがありません（「登録」で追加できます）。")
+            return
+        content = self.text.get("1.0", "end-1c")
+        total = 0
+        for f, r in self.replace_rules:
+            c = content.count(f)
+            if c:
+                content = content.replace(f, r)
+                total += c
+        if total == 0:
+            self.status_var.set("置換対象が見つかりませんでした。")
+            return
+        self.text.edit_separator()  # Undo境界（Ctrl+Zで戻せる）
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", content)
+        self.status_var.set(f"全{len(self.replace_rules)}ルールで計{total}件置換しました。")
+
     # ---------------- 設定の保存/復元 ----------------
     def _settings_dict(self):
         return {
@@ -528,6 +784,8 @@ class App(_Base):
             "blank": self.blank_var.get(), "ascii": self.ascii_var.get(),
             "join": self.join_var.get(), "combine": self.combine_var.get(),
             "speed": self.speed_var.get(), "speaker": self.speaker_cb.get(),
+            "gap": self.gap_var.get(),
+            "replace_rules": self.replace_rules,
             "base_url": self.url_var.get().strip() or self.base_url,
             "geometry": self.geometry(),
         }
@@ -548,6 +806,12 @@ class App(_Base):
             self.join_var.set(bool(s.get("join", False)))
             self.combine_var.set(bool(s.get("combine", False)))
             self.speed_var.set(float(s.get("speed", 1.0)))
+            self.gap_var.set(float(s.get("gap", 0.4)))
+            rules = s.get("replace_rules", [])
+            if isinstance(rules, list):
+                self.replace_rules = [[str(x[0]), str(x[1])] for x in rules
+                                      if isinstance(x, (list, tuple)) and len(x) == 2]
+                self._refresh_rules()
             self._saved_speaker = s.get("speaker") or None
             if s.get("base_url"):
                 self.base_url = s["base_url"]
@@ -565,6 +829,8 @@ class App(_Base):
             pass
 
     def _on_close(self):
+        if self._playall_stop is not None:
+            self._playall_stop.set()  # 連続再生中でも即終了できるように
         self._save_settings()
         self.destroy()
 
@@ -600,6 +866,8 @@ class App(_Base):
                                 idx = labels.index(self._saved_speaker)
                             self.speaker_cb.current(idx)
                         self.engine_var.set(f"エンジン: 接続OK (v{ver})")
+                        self.dict_btn.config(state="normal")
+                        self.vvproj_btn.config(state="normal")
                     else:
                         self.engine_var.set("エンジン: 未接続（VOICEVOXを起動してください）")
                     self._set_busy(False)
@@ -623,11 +891,48 @@ class App(_Base):
                     self._previewing = False
                     if self.speakers and not self.busy:
                         self.preview_btn.config(state="normal")
+                        self.playall_btn.config(state="normal")
                     if ok:
                         self.status_var.set("試聴 完了")
                     else:
                         self.status_var.set("試聴エラー")
                         messagebox.showerror("エラー", info[-1500:])
+                elif kind == "playall_line":
+                    _, lineno, line, done, total = msg
+                    # 再生中の行にカーソルを移してハイライト表示
+                    self.text.tag_remove("playing", "1.0", "end")
+                    self.text.tag_add("playing", f"{lineno}.0", f"{lineno}.end")
+                    self.text.tag_config("playing", background="#cde8ff")
+                    self.text.mark_set("insert", f"{lineno}.0")
+                    self.text.see(f"{lineno}.0")
+                    self.status_var.set(f"連続再生中 {done+1}/{total}: {line[:30]}")
+                elif kind == "playall_done":
+                    _, ok, info, played = msg
+                    self._previewing = False
+                    self._playall_stop = None
+                    self.text.tag_remove("playing", "1.0", "end")
+                    self.stop_btn.config(state="disabled")
+                    if self.speakers and not self.busy:
+                        self.preview_btn.config(state="normal")
+                        self.playall_btn.config(state="normal")
+                    if ok:
+                        self.status_var.set(
+                            f"連続再生を停止しました（{played}行再生）" if info
+                            else f"連続再生 完了（{played}行）")
+                    else:
+                        self.status_var.set("連続再生エラー")
+                        messagebox.showerror("エラー", info[-1500:])
+                elif kind == "dict_list":
+                    _, rows = msg
+                    if self._dict_win is not None and self._dict_win.winfo_exists():
+                        tree = self._dict_tree
+                        tree.delete(*tree.get_children())
+                        for word_uuid, surface, pron, accent in rows:
+                            tree.insert("", "end", iid=word_uuid,
+                                        values=(surface, pron, accent))
+                elif kind == "dict_status":
+                    _, info = msg
+                    self.status_var.set(info)
                 elif kind == "synth_done":
                     _, info = msg
                     self.status_var.set("音声生成 完了")
@@ -650,9 +955,12 @@ class App(_Base):
         if busy:
             self.synth_btn.config(state="disabled")
             self.preview_btn.config(state="disabled")
+            self.playall_btn.config(state="disabled")
         elif self.speakers:
             self.synth_btn.config(state="normal")
-            self.preview_btn.config(state="normal")
+            if not self._previewing:
+                self.preview_btn.config(state="normal")
+                self.playall_btn.config(state="normal")
 
 
 if __name__ == "__main__":

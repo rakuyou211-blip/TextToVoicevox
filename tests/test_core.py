@@ -276,3 +276,224 @@ class TestPlatformBehaviorOnLinux:
 def test_run_ocr_empty_list_returns_empty_dict():
     # 空リストはOS判定より前に {} を返す（全OS共通）
     assert core.run_ocr([]) == {}
+
+
+# ============================================================
+#  strip_aozora（青空文庫注記の除去）
+# ============================================================
+class TestStripAozora:
+    def test_ruby_removed(self):
+        assert core.strip_aozora("吾輩《わがはい》は猫である") == "吾輩は猫である"
+
+    def test_ruby_bar_removed(self):
+        assert core.strip_aozora("｜東京《とうきょう》の空") == "東京の空"
+
+    def test_note_removed(self):
+        assert core.strip_aozora("本文［＃「本文」に傍点］です") == "本文です"
+
+    def test_plain_text_unchanged(self):
+        assert core.strip_aozora("普通のテキストはそのまま。") == "普通のテキストはそのまま。"
+
+    def test_multiple_annotations(self):
+        s = "彼女《かのじょ》は｜薔薇《ばら》を見た。［＃改ページ］次の章。"
+        assert core.strip_aozora(s) == "彼女は薔薇を見た。次の章。"
+
+
+# ============================================================
+#  read_txt（文字コード自動判定）
+# ============================================================
+class TestReadTxt:
+    def _write(self, tmp_path, data: bytes):
+        p = tmp_path / "t.txt"
+        p.write_bytes(data)
+        return str(p)
+
+    def test_utf8(self, tmp_path):
+        p = self._write(tmp_path, "こんにちは。\n".encode("utf-8"))
+        assert core.read_txt(p) == "こんにちは。\n"
+
+    def test_utf8_with_bom(self, tmp_path):
+        p = self._write(tmp_path, b"\xef\xbb\xbf" + "こんにちは。".encode("utf-8"))
+        assert core.read_txt(p) == "こんにちは。"
+
+    def test_cp932(self, tmp_path):
+        p = self._write(tmp_path, "日本語のシフトJISテキスト。".encode("cp932"))
+        assert core.read_txt(p) == "日本語のシフトJISテキスト。"
+
+
+# ============================================================
+#  extract_docx（最小のdocxを合成して検証）
+# ============================================================
+def _make_docx(path, paragraphs):
+    """テスト用の最小docxを生成する。"""
+    import zipfile
+    ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    body = ""
+    for runs in paragraphs:
+        rxml = "".join(f"<w:r><w:t>{t}</w:t></w:r>" for t in runs)
+        body += f"<w:p>{rxml}</w:p>"
+    doc = f'<?xml version="1.0" encoding="UTF-8"?><w:document {ns}><w:body>{body}</w:body></w:document>'
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("[Content_Types].xml",
+                   '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+        z.writestr("word/document.xml", doc)
+
+
+class TestExtractDocx:
+    def test_paragraphs_extracted(self, tmp_path):
+        p = str(tmp_path / "t.docx")
+        _make_docx(p, [["最初の段落。"], ["二つ目の", "段落。"]])
+        assert core.extract_docx(p) == "最初の段落。\n二つ目の段落。"
+
+    def test_empty_paragraph_skipped(self, tmp_path):
+        p = str(tmp_path / "t.docx")
+        _make_docx(p, [["本文。"], [], ["次。"]])
+        assert core.extract_docx(p) == "本文。\n次。"
+
+
+# ============================================================
+#  extract_epub（最小のepubを合成して検証）
+# ============================================================
+def _make_epub(path, chapters):
+    """テスト用の最小epubを生成する。chapters: [(filename, html), ...]"""
+    import zipfile
+    container = ('<?xml version="1.0"?>'
+                 '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                 '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+                 '</rootfiles></container>')
+    items = "".join(f'<item id="c{i}" href="{fn}" media-type="application/xhtml+xml"/>'
+                    for i, (fn, _) in enumerate(chapters))
+    refs = "".join(f'<itemref idref="c{i}"/>' for i in range(len(chapters)))
+    opf = ('<?xml version="1.0"?>'
+           '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+           f'<manifest>{items}</manifest><spine>{refs}</spine></package>')
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("mimetype", "application/epub+zip")
+        z.writestr("META-INF/container.xml", container)
+        z.writestr("OEBPS/content.opf", opf)
+        for fn, html in chapters:
+            z.writestr(f"OEBPS/{fn}", html)
+
+
+class TestExtractEpub:
+    def test_chapters_in_spine_order(self, tmp_path):
+        p = str(tmp_path / "t.epub")
+        _make_epub(p, [("a.xhtml", "<html><body><p>第一章。</p></body></html>"),
+                       ("b.xhtml", "<html><body><p>第二章。</p></body></html>")])
+        assert core.extract_epub(p) == "第一章。\n\n第二章。"
+
+    def test_ruby_rt_dropped(self, tmp_path):
+        p = str(tmp_path / "t.epub")
+        html = "<html><body><p><ruby>吾輩<rt>わがはい</rt></ruby>は猫である</p></body></html>"
+        _make_epub(p, [("a.xhtml", html)])
+        assert core.extract_epub(p) == "吾輩は猫である"
+
+    def test_script_style_title_dropped(self, tmp_path):
+        p = str(tmp_path / "t.epub")
+        html = ("<html><head><title>タイトル</title><style>p{}</style></head>"
+                "<body><script>var x=1;</script><p>本文だけ。</p></body></html>")
+        _make_epub(p, [("a.xhtml", html)])
+        assert core.extract_epub(p) == "本文だけ。"
+
+    def test_block_tags_become_newlines(self, tmp_path):
+        p = str(tmp_path / "t.epub")
+        html = "<html><body><h1>見出し</h1><p>一行目。<br/>二行目。</p></body></html>"
+        _make_epub(p, [("a.xhtml", html)])
+        # ブロック要素の境界は段落区切りとして空行1つになる（<br/>は改行のみ）
+        assert core.extract_epub(p) == "見出し\n\n一行目。\n二行目。"
+
+
+# ============================================================
+#  hira_to_kata
+# ============================================================
+class TestHiraToKata:
+    def test_basic(self):
+        assert core.hira_to_kata("わがはい") == "ワガハイ"
+
+    def test_katakana_unchanged(self):
+        assert core.hira_to_kata("ワガハイ") == "ワガハイ"
+
+    def test_mixed_and_choon(self):
+        assert core.hira_to_kata("らーめん") == "ラーメン"
+
+    def test_small_kana(self):
+        assert core.hira_to_kata("きゃりー") == "キャリー"
+
+
+# ============================================================
+#  make_vvproj
+# ============================================================
+_SP_UUID = "7ffcb7ce-00ec-4bdc-82cd-45a8889e43ff"  # テスト用の話者UUID
+
+
+class TestMakeVvproj:
+    def test_structure(self):
+        import json
+        proj = json.loads(core.make_vvproj(["一行目。", "二行目。"], 2, _SP_UUID))
+        # 0.22.0形式: これ未満だとqueryなしaudioItemがマイグレーションで落ちる
+        assert proj["appVersion"] == "0.22.0"
+        talk = proj["talk"]
+        assert len(talk["audioKeys"]) == 2
+        assert set(talk["audioKeys"]) == set(talk["audioItems"].keys())
+        items = [talk["audioItems"][k] for k in talk["audioKeys"]]
+        assert items[0]["text"] == "一行目。"
+        assert items[1]["text"] == "二行目。"
+        for it in items:
+            assert it["voice"] == {"engineId": core.VV_ENGINE_ID,
+                                   "speakerId": _SP_UUID, "styleId": 2}
+        # songセクション: 0.22スキーマの必須項目が揃っていること
+        song = proj["song"]
+        assert song["tpqn"] == 480
+        assert song["trackOrder"] == list(song["tracks"].keys())
+        track = song["tracks"][song["trackOrder"][0]]
+        for field in ("name", "keyRangeAdjustment", "volumeRangeAdjustment",
+                      "notes", "pitchEditData", "solo", "mute", "gain", "pan"):
+            assert field in track
+
+    def test_empty_lines_skipped(self):
+        import json
+        proj = json.loads(core.make_vvproj(["", "  ", "本文。"], 0, _SP_UUID))
+        assert len(proj["talk"]["audioKeys"]) == 1
+
+    def test_keys_are_unique_uuids(self):
+        import json, uuid as uuid_mod
+        proj = json.loads(core.make_vvproj(["あ"] * 5, 1, _SP_UUID))
+        keys = proj["talk"]["audioKeys"]
+        assert len(set(keys)) == 5
+        for k in keys:
+            uuid_mod.UUID(k)  # 不正なUUIDなら例外
+
+
+# ============================================================
+#  extract_files のテキスト系ファイル対応
+# ============================================================
+class TestExtractFilesTextFormats:
+    def test_txt_with_aozora(self, tmp_path):
+        p = tmp_path / "novel.txt"
+        p.write_text("吾輩《わがはい》は猫である。", encoding="utf-8")
+        text, warnings = core.extract_files([str(p)])
+        assert text == "吾輩は猫である。"
+        assert warnings == []
+
+    def test_docx(self, tmp_path):
+        p = str(tmp_path / "t.docx")
+        _make_docx(p, [["段落テキスト。"]])
+        text, warnings = core.extract_files([p])
+        assert text == "段落テキスト。"
+        assert warnings == []
+
+    def test_mixed_txt_and_epub_order(self, tmp_path):
+        t = tmp_path / "a.txt"
+        t.write_text("テキスト側。", encoding="utf-8")
+        e = str(tmp_path / "b.epub")
+        _make_epub(e, [("a.xhtml", "<html><body><p>EPUB側。</p></body></html>")])
+        text, _ = core.extract_files([str(t), e])
+        assert text == "テキスト側。\n\nEPUB側。"
+
+
+# ============================================================
+#  wav_duration
+# ============================================================
+def test_wav_duration():
+    wav = _make_wav(duration_sec=0.5)
+    assert abs(core.wav_duration(wav) - 0.5) < 0.01
