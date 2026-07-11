@@ -590,3 +590,76 @@ class TestEncodeAudio:
     def test_encoders_shape(self):
         enc = core.audio_encoders()
         assert set(enc.keys()) <= {"m4a", "mp3"}
+
+
+# ============================================================
+#  make_srt（字幕タイミング）
+# ============================================================
+class TestMakeSrt:
+    def test_basic_timing(self):
+        srt = core.make_srt(["一行目。", "二行目。"], [1.5, 2.0], gap_sec=0.5)
+        blocks = srt.strip().split("\n\n")
+        assert len(blocks) == 2
+        assert blocks[0].split("\n") == [
+            "1", "00:00:00,000 --> 00:00:01,500", "一行目。"]
+        # 2行目は 1.5 + 0.5(gap) = 2.0秒から
+        assert blocks[1].split("\n") == [
+            "2", "00:00:02,000 --> 00:00:04,000", "二行目。"]
+
+    def test_no_gap(self):
+        srt = core.make_srt(["あ", "い"], [1.0, 1.0])
+        assert "00:00:01,000 --> 00:00:02,000" in srt
+
+    def test_hour_rollover(self):
+        srt = core.make_srt(["長い本の終わり。"], [10.0], gap_sec=0.0)
+        assert srt.startswith("1\n00:00:00,000 --> 00:00:10,000")
+        # 3661.5秒 = 1時間1分1.5秒
+        assert core._srt_ts(3661.5) == "01:01:01,500"
+
+    def test_millisecond_rounding(self):
+        assert core._srt_ts(0.9996) == "00:00:01,000"
+
+
+# ============================================================
+#  cli.py の引数解析
+# ============================================================
+class TestCli:
+    def _parse(self, argv):
+        import cli
+        return cli.build_parser().parse_args(argv)
+
+    def test_minimal(self):
+        a = self._parse(["input.pdf", "-o", "out"])
+        assert a.inputs == ["input.pdf"]
+        assert a.out == "out"
+        assert not a.wav and a.format == "wav" and a.mode == "sentence"
+
+    def test_full_options(self):
+        a = self._parse(["a.pdf", "b.txt", "-o", "out", "--wav", "--format", "m4a",
+                         "--speaker", "ずんだもん", "--speed", "1.3",
+                         "--combine", "--gap", "0.2", "--srt", "--join-wrapped"])
+        assert a.inputs == ["a.pdf", "b.txt"]
+        assert a.wav and a.format == "m4a" and a.speaker == "ずんだもん"
+        assert a.combine and a.srt and abs(a.gap - 0.2) < 1e-9
+
+    def test_pick_speaker_default_and_named(self):
+        import cli
+        sps = [("四国めたん（ノーマル）", 2, "u1"), ("ずんだもん（ノーマル）", 3, "u2")]
+        assert cli.pick_speaker("", sps)[1] == 2
+        assert cli.pick_speaker("ずんだもん", sps)[1] == 3
+
+    def test_pick_speaker_unknown_exits(self):
+        import cli
+        with pytest.raises(SystemExit):
+            cli.pick_speaker("いない人", [("四国めたん（ノーマル）", 2, "u1")])
+
+    def test_cli_txt_only_end_to_end(self, tmp_path):
+        # エンジン不要のtxt出力パスを実行
+        import cli
+        src = tmp_path / "novel.txt"
+        src.write_text("吾輩《わがはい》は猫である。名前はまだ無い。", encoding="utf-8")
+        out = tmp_path / "out"
+        rc = cli.main([str(src), "-o", str(out)])
+        assert rc == 0
+        result = (out / "voicevox_text.txt").read_text(encoding="utf-8")
+        assert result == "吾輩は猫である。\n名前はまだ無い。"

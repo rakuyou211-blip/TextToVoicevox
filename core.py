@@ -785,6 +785,29 @@ def vv_dict_delete(base_url, word_uuid, timeout=10):
 
 
 # ============================================================
+#  SRT字幕の生成
+# ============================================================
+def _srt_ts(sec: float) -> str:
+    """秒を SRT のタイムスタンプ形式 HH:MM:SS,mmm にする。"""
+    ms = int(round(sec * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def make_srt(lines, durations, gap_sec=0.0) -> str:
+    """行テキストと各行の音声長(秒)から SRT 字幕文字列を作る。
+    結合音声と同じ並び・同じ無音間隔(gap_sec)を前提にタイミングを刻む。"""
+    cues = []
+    t = 0.0
+    for i, (ln, dur) in enumerate(zip(lines, durations), start=1):
+        cues.append(f"{i}\n{_srt_ts(t)} --> {_srt_ts(t + dur)}\n{ln}\n")
+        t += dur + gap_sec
+    return "\n".join(cues)
+
+
+# ============================================================
 #  VOICEVOX プロジェクトファイル (.vvproj) 出力
 # ============================================================
 # 公式VOICEVOXエンジンのID。旧形式(0.14)プロジェクトの engineId として使う。

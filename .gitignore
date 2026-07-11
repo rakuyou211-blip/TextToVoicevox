@@ -9,6 +9,7 @@ __pycache__/
 
 # ユーザー個別の設定（初回起動時に自動生成される）
 settings.json
+last_text.txt
 
 # OS が生成するファイル
 .DS_Store

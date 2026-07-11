@@ -18,6 +18,7 @@ from PIL import ImageGrab
 import core
 
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+TEXT_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_text.txt")
 
 # ドラッグ＆ドロップ対応（tkinterdnd2 が無くてもアプリは動く）
 try:
@@ -46,6 +47,10 @@ else:
 
 
 class App(_Base):
+    # 出力単位: 内部キー → 表示ラベル（コンボボックスの並び順と一致させる）
+    _UNITS = {"each": "1行=1ファイル", "combine": "全文を結合",
+              "nlines": "N行ごと", "para": "段落ごと"}
+
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
@@ -70,6 +75,7 @@ class App(_Base):
 
         self._build_ui()
         self._load_settings()
+        self._restore_text_cache()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._poll_queue)
 
@@ -219,13 +225,22 @@ class App(_Base):
                                    values=self._format_choices())
         self.fmt_cb.current(0)
         self.fmt_cb.pack(side="left", padx=2)
-        self.combine_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(vrow2c, text="全文を1つのファイルに結合",
-                        variable=self.combine_var).pack(side="left", padx=10)
-        ttk.Label(vrow2c, text="文間の無音(秒):").pack(side="left", padx=(4, 0))
+        ttk.Label(vrow2c, text="出力単位:").pack(side="left", padx=(10, 0))
+        self.unit_cb = ttk.Combobox(vrow2c, width=13, state="readonly",
+                                    values=list(self._UNITS.values()))
+        self.unit_cb.current(0)
+        self.unit_cb.pack(side="left", padx=2)
+        self.nlines_var = tk.IntVar(value=50)
+        ttk.Spinbox(vrow2c, from_=2, to=1000, increment=10, width=5,
+                    textvariable=self.nlines_var).pack(side="left", padx=(2, 0))
+        ttk.Label(vrow2c, text="行").pack(side="left")
+        ttk.Label(vrow2c, text="文間の無音(秒):").pack(side="left", padx=(10, 0))
         self.gap_var = tk.DoubleVar(value=0.4)
         ttk.Spinbox(vrow2c, from_=0.0, to=3.0, increment=0.1, width=5,
                     textvariable=self.gap_var).pack(side="left")
+        self.srt_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(vrow2c, text="字幕(.srt)も保存",
+                        variable=self.srt_var).pack(side="left", padx=10)
 
         vrow3 = ttk.Frame(bottom); vrow3.pack(fill="x", padx=6, pady=3)
         self.preview_btn = ttk.Button(vrow3, text="▶ 試聴(カーソル行)",
@@ -276,12 +291,28 @@ class App(_Base):
 
         body = ttk.Frame(mid)
         body.pack(fill="both", expand=True)
-        text_opts = {"font": TEXT_FONT} if TEXT_FONT else {}
-        self.text = tk.Text(body, wrap="word", undo=True, **text_opts)
+        from tkinter import font as tkfont
+        self.text_font = tkfont.Font(font=(TEXT_FONT or "TkTextFont"))
+        self.text = tk.Text(body, wrap="word", undo=True, font=self.text_font)
         self.text.pack(side="left", fill="both", expand=True, padx=4, pady=4)
         tsb = ttk.Scrollbar(body, command=self.text.yview)
         tsb.pack(side="right", fill="y")
         self.text.config(yscrollcommand=tsb.set)
+
+        # ショートカット: 検索(Ctrl/Cmd+F)・文字サイズ(Ctrl/Cmd + = / - / 0)
+        self._font_size0 = int(self.text_font.cget("size"))  # リセット用の既定サイズ
+        for mod in ("Control", "Command"):
+            try:
+                self.bind_all(f"<{mod}-f>", lambda e: self.open_search())
+                self.bind_all(f"<{mod}-equal>", lambda e: self.change_font(+1))
+                self.bind_all(f"<{mod}-plus>", lambda e: self.change_font(+1))
+                self.bind_all(f"<{mod}-minus>", lambda e: self.change_font(-1))
+                self.bind_all(f"<{mod}-0>", lambda e: self.change_font(0))
+            except tk.TclError:
+                pass  # Command修飾子はmacOS以外に無い
+        self._search_win = None
+        self._search_hits = []
+        self._search_idx = -1
 
     # ---------------- 合成パラメータ・行別話者ヘルパー ----------------
     def _format_choices(self):
@@ -295,6 +326,11 @@ class App(_Base):
     def _out_format(self):
         v = (self.fmt_cb.get() or "WAV").lower()
         return v if v in ("wav", "m4a", "mp3") else "wav"
+
+    def _unit(self):
+        i = self.unit_cb.current()
+        keys = list(self._UNITS.keys())
+        return keys[i] if 0 <= i < len(keys) else "each"
 
     def _voice_params(self):
         return dict(speed=self.speed_var.get(), pitch=self.pitch_var.get(),
@@ -458,21 +494,40 @@ class App(_Base):
         if not self.speakers or self.speaker_cb.current() < 0:
             messagebox.showinfo("情報", "話者を選択してください（先にエンジン接続確認）。")
             return
-        # 行別話者を解決して (テキスト, style_id) のジョブ一覧を作る
+        # 行別話者を解決して (テキスト, style_id, 段落番号) のジョブ一覧を作る
         default_id = self.speakers[self.speaker_cb.current()][1]
         jobs = []
+        para = 0
         for ln in text.split("\n"):
             if not ln.strip():
+                para += 1
                 continue
             spoken, sp = self._resolve_line(ln)
             if not spoken.strip():
                 continue  # タグのみの行
-            jobs.append((spoken, sp[1] if sp else default_id))
+            jobs.append((spoken, sp[1] if sp else default_id, para))
         if not jobs:
             messagebox.showinfo("情報", "テキストがありません。")
             return
         fmt = self._out_format()
-        if self.combine_var.get():
+        unit = self._unit()
+        # 出力単位ごとにジョブをグループ化（グループ = 1出力ファイル）
+        if unit == "combine":
+            groups = [list(range(len(jobs)))]
+        elif unit == "nlines":
+            n = max(2, self.nlines_var.get())
+            groups = [list(range(i, min(i + n, len(jobs))))
+                      for i in range(0, len(jobs), n)]
+        elif unit == "para":
+            groups = []
+            for i, j in enumerate(jobs):
+                if groups and jobs[groups[-1][-1]][2] == j[2]:
+                    groups[-1].append(i)
+                else:
+                    groups.append([i])
+        else:  # each
+            groups = [[i] for i in range(len(jobs))]
+        if unit == "combine":
             out = filedialog.asksaveasfilename(
                 title=f"結合{fmt.upper()}の保存先", defaultextension=f".{fmt}",
                 filetypes=[(f"{fmt.upper()}ファイル", f"*.{fmt}")],
@@ -488,18 +543,18 @@ class App(_Base):
         self._set_busy(True)
         self.progress.config(mode="determinate", maximum=len(jobs), value=0)
         threading.Thread(target=self._synth_worker,
-                         args=(jobs, self._voice_params(), target,
-                               self.combine_var.get(), self.gap_var.get(), fmt),
+                         args=(jobs, groups, self._voice_params(), target, unit,
+                               self.gap_var.get(), fmt, self.srt_var.get()),
                          daemon=True).start()
 
-    def _synth_worker(self, jobs, voice, target, combine, gap, fmt):
+    def _synth_worker(self, jobs, groups, voice, target, unit, gap, fmt, srt):
         try:
             from concurrent.futures import ThreadPoolExecutor
             done_count = [0]
             lock = threading.Lock()
 
             def synth(job):
-                text, spk = job
+                text, spk, _para = job
                 wb = core.vv_synthesize_one(self.base_url, text, spk, **voice)
                 with lock:
                     done_count[0] += 1
@@ -511,16 +566,31 @@ class App(_Base):
             with ThreadPoolExecutor(max_workers=3) as ex:
                 wavs = list(ex.map(synth, jobs))
 
-            if combine:
-                merged = core.concat_wavs(wavs, gap_sec=gap)
-                core.encode_audio(merged, target, fmt, self.encoders)
-                self.q.put(("synth_done", f"結合{fmt.upper()}を保存しました:\n{target}"))
-            else:
-                for i, wb in enumerate(wavs):
-                    fn = os.path.join(target, f"{i+1:03d}.{fmt}")
-                    core.encode_audio(wb, fn, fmt, self.encoders)
+            srt_count = 0
+            for gi, idxs in enumerate(groups):
+                if unit == "combine":
+                    out_path = target
+                else:
+                    out_path = os.path.join(target, f"{gi+1:03d}.{fmt}")
+                group_wavs = [wavs[i] for i in idxs]
+                merged = (group_wavs[0] if len(group_wavs) == 1
+                          else core.concat_wavs(group_wavs, gap_sec=gap))
+                core.encode_audio(merged, out_path, fmt, self.encoders)
+                if srt:
+                    lines = [jobs[i][0] for i in idxs]
+                    durations = [core.wav_duration(wavs[i]) for i in idxs]
+                    srt_path = os.path.splitext(out_path)[0] + ".srt"
+                    with open(srt_path, "w", encoding="utf-8") as f:
+                        f.write(core.make_srt(lines, durations, gap_sec=gap))
+                    srt_count += 1
+
+            note = f"（字幕{srt_count}件も保存）" if srt_count else ""
+            if unit == "combine":
                 self.q.put(("synth_done",
-                            f"{len(wavs)}個の{fmt.upper()}を保存しました:\n{target}"))
+                            f"結合{fmt.upper()}を保存しました{note}:\n{target}"))
+            else:
+                self.q.put(("synth_done",
+                            f"{len(groups)}個の{fmt.upper()}を保存しました{note}:\n{target}"))
         except Exception:
             self.q.put(("error", traceback.format_exc()))
 
@@ -907,6 +977,108 @@ class App(_Base):
         self.text.insert("1.0", content)
         self.status_var.set(f"全{len(self.replace_rules)}ルールで計{total}件置換しました。")
 
+    # ---------------- テキスト検索（Ctrl/Cmd+F） ----------------
+    def open_search(self):
+        if self._search_win is not None and self._search_win.winfo_exists():
+            self._search_win.lift()
+            self._search_entry.focus_set()
+            return
+        win = tk.Toplevel(self)
+        win.title("検索")
+        win.geometry("360x40")
+        win.transient(self)
+        self._search_win = win
+        row = ttk.Frame(win); row.pack(fill="x", padx=6, pady=6)
+        self._search_var = tk.StringVar()
+        self._search_entry = ttk.Entry(row, textvariable=self._search_var, width=22)
+        self._search_entry.pack(side="left", padx=2)
+        self._search_entry.focus_set()
+        ttk.Button(row, text="↓次", width=4,
+                   command=lambda: self._search_jump(+1)).pack(side="left", padx=1)
+        ttk.Button(row, text="↑前", width=4,
+                   command=lambda: self._search_jump(-1)).pack(side="left", padx=1)
+        self._search_count = tk.StringVar(value="")
+        ttk.Label(row, textvariable=self._search_count).pack(side="left", padx=6)
+        self._search_entry.bind("<Return>", lambda e: self._search_jump(+1))
+        self._search_var.trace_add("write", lambda *a: self._search_refresh())
+        win.protocol("WM_DELETE_WINDOW", self._close_search)
+        win.bind("<Escape>", lambda e: self._close_search())
+
+    def _close_search(self):
+        self.text.tag_remove("hit", "1.0", "end")
+        self.text.tag_remove("curhit", "1.0", "end")
+        if self._search_win is not None and self._search_win.winfo_exists():
+            self._search_win.destroy()
+        self._search_win = None
+
+    def _search_refresh(self):
+        word = self._search_var.get()
+        self.text.tag_remove("hit", "1.0", "end")
+        self.text.tag_remove("curhit", "1.0", "end")
+        self._search_hits = []
+        self._search_idx = -1
+        if not word:
+            self._search_count.set("")
+            return
+        pos = "1.0"
+        while True:
+            pos = self.text.search(word, pos, stopindex="end")
+            if not pos:
+                break
+            end = f"{pos}+{len(word)}c"
+            self.text.tag_add("hit", pos, end)
+            self._search_hits.append(pos)
+            pos = end
+        self.text.tag_config("hit", background="#fff3a3")
+        self.text.tag_config("curhit", background="#ffb347")
+        self._search_count.set(f"{len(self._search_hits)}件")
+
+    def _search_jump(self, direction):
+        if not self._search_hits:
+            self._search_refresh()
+            if not self._search_hits:
+                return
+        self._search_idx = (self._search_idx + direction) % len(self._search_hits)
+        pos = self._search_hits[self._search_idx]
+        word = self._search_var.get()
+        self.text.tag_remove("curhit", "1.0", "end")
+        self.text.tag_add("curhit", pos, f"{pos}+{len(word)}c")
+        self.text.mark_set("insert", pos)
+        self.text.see(pos)
+        self._search_count.set(f"{self._search_idx + 1}/{len(self._search_hits)}件")
+
+    # ---------------- 文字サイズ（Ctrl/Cmd + = / - / 0） ----------------
+    def change_font(self, delta):
+        size = int(self.text_font.cget("size"))
+        if delta == 0:
+            size = self._font_size0
+        else:
+            size = max(8, min(40, size + delta))
+        self.text_font.config(size=size)
+        self.status_var.set(f"文字サイズ: {size}")
+
+    # ---------------- テキストの自動保存・復元 ----------------
+    def _save_text_cache(self):
+        text = self.text.get("1.0", "end-1c")
+        try:
+            if text.strip():
+                with open(TEXT_CACHE_PATH, "w", encoding="utf-8") as f:
+                    f.write(text)
+            elif os.path.exists(TEXT_CACHE_PATH):
+                os.remove(TEXT_CACHE_PATH)
+        except Exception:
+            pass
+
+    def _restore_text_cache(self):
+        try:
+            with open(TEXT_CACHE_PATH, encoding="utf-8") as f:
+                cached = f.read()
+        except Exception:
+            return
+        if cached.strip() and not self.text.get("1.0", "end").strip():
+            self.text.insert("1.0", cached)
+            self.status_var.set("前回のテキストを復元しました（しおりの「⏵ 続きから」も使えます）。")
+
     # ---------------- 声プリセット ----------------
     def _preset_labels(self):
         return [p["name"] for p in self.presets]
@@ -964,7 +1136,10 @@ class App(_Base):
             "mode": self.mode_var.get(), "pdf": self.pdf_var.get(),
             "dpi": self.dpi_var.get(), "preprocess": self.pre_var.get(),
             "blank": self.blank_var.get(), "ascii": self.ascii_var.get(),
-            "join": self.join_var.get(), "combine": self.combine_var.get(),
+            "join": self.join_var.get(),
+            "unit": self._unit(), "nlines": self.nlines_var.get(),
+            "srt": self.srt_var.get(),
+            "font_size": int(self.text_font.cget("size")),
             "speed": self.speed_var.get(), "speaker": self.speaker_cb.get(),
             "pitch": self.pitch_var.get(), "intonation": self.into_var.get(),
             "volume": self.vol_var.get(),
@@ -993,7 +1168,17 @@ class App(_Base):
             self.blank_var.set(bool(s.get("blank", True)))
             self.ascii_var.set(bool(s.get("ascii", True)))
             self.join_var.set(bool(s.get("join", False)))
-            self.combine_var.set(bool(s.get("combine", False)))
+            unit = s.get("unit")
+            if unit is None and s.get("combine"):
+                unit = "combine"  # 旧設定(combine: true)からの引き継ぎ
+            keys = list(self._UNITS.keys())
+            if unit in keys:
+                self.unit_cb.current(keys.index(unit))
+            self.nlines_var.set(int(s.get("nlines", 50)))
+            self.srt_var.set(bool(s.get("srt", False)))
+            fs = s.get("font_size")
+            if isinstance(fs, (int, float)) and 8 <= int(fs) <= 40:
+                self.text_font.config(size=int(fs))
             self.speed_var.set(float(s.get("speed", 1.0)))
             self.pitch_var.set(float(s.get("pitch", 0.0)))
             self.into_var.set(float(s.get("intonation", 1.0)))
@@ -1036,6 +1221,7 @@ class App(_Base):
         if self._playall_stop is not None:
             self._playall_stop.set()  # 連続再生中でも即終了できるように
         self._save_settings()
+        self._save_text_cache()
         self.destroy()
 
     # ---------------- キュー処理（UIスレッド） ----------------
