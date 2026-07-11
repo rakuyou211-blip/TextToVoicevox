@@ -609,8 +609,10 @@ def vv_speakers(base_url, timeout=10):
     return out
 
 
-def vv_synthesize_one(base_url, text, speaker_id, speed=1.0, timeout=60):
-    """1文を合成してWAVバイト列を返す。"""
+def vv_synthesize_one(base_url, text, speaker_id, speed=1.0,
+                      pitch=0.0, intonation=1.0, volume=1.0, timeout=60):
+    """1文を合成してWAVバイト列を返す。
+    speed=話速(0.5〜2) / pitch=音高(-0.15〜0.15) / intonation=抑揚(0〜2) / volume=音量(0〜2)"""
     import requests
     q = requests.post(base_url + "/audio_query",
                       params={"text": text, "speaker": speaker_id}, timeout=timeout)
@@ -618,6 +620,12 @@ def vv_synthesize_one(base_url, text, speaker_id, speed=1.0, timeout=60):
     query = q.json()
     if speed and speed != 1.0:
         query["speedScale"] = float(speed)
+    if pitch:
+        query["pitchScale"] = float(pitch)
+    if intonation != 1.0:
+        query["intonationScale"] = float(intonation)
+    if volume != 1.0:
+        query["volumeScale"] = float(volume)
     s = requests.post(base_url + "/synthesis",
                       params={"speaker": speaker_id},
                       json=query,
@@ -647,6 +655,95 @@ def concat_wavs(wav_bytes_list, gap_sec=0.4):
             if i < len(frames) - 1:
                 w.writeframes(silence)
     return out.getvalue()
+
+
+# ============================================================
+#  行ごとの話者割り当て（@タグ / セリフ検出）
+# ============================================================
+_SPEAKER_TAG = re.compile(r"^@([^:：]+)[:：]\s*(.*)$")
+
+
+def parse_speaker_tag(line: str):
+    """行頭の話者タグ「@話者名: テキスト」を解析して (話者名 or None, テキスト) を返す。
+    タグが無ければ (None, 元の行)。区切りは半角/全角コロン両対応。"""
+    m = _SPEAKER_TAG.match(line.strip())
+    if not m:
+        return None, line
+    return m.group(1).strip(), m.group(2).strip()
+
+
+def is_dialogue_line(line: str) -> bool:
+    """セリフ行（「…」『…』で始まる行）か。会話文の自動話者振り分けに使う。"""
+    s = line.strip()
+    return s.startswith("「") or s.startswith("『")
+
+
+def resolve_speaker(name: str, speakers):
+    """話者名からvv_speakers()の要素を探す。
+    完全一致 → 前方一致（スタイル省略時は最初のスタイル） → 部分一致 の順。"""
+    if not name:
+        return None
+    for sp in speakers:
+        if sp[0] == name:
+            return sp
+    for sp in speakers:
+        if sp[0].startswith(name):
+            return sp
+    for sp in speakers:
+        if name in sp[0]:
+            return sp
+    return None
+
+
+# ============================================================
+#  音声エンコード（WAV → M4A / MP3）
+# ============================================================
+def audio_encoders():
+    """この環境で使える出力形式と変換コマンドを {"m4a": ..., "mp3": ...} で返す。
+    Mac: afconvert(OS標準)でM4A。ffmpegがあればMP3も。Win/その他: ffmpegがあれば両方。"""
+    import shutil
+    enc = {}
+    if IS_MAC and os.path.exists("/usr/bin/afconvert"):
+        enc["m4a"] = "afconvert"
+    ff = shutil.which("ffmpeg")
+    if ff:
+        enc.setdefault("m4a", ff)
+        enc["mp3"] = ff
+    return enc
+
+
+def encode_audio(wav_bytes, out_path, fmt, encoders=None):
+    """WAVバイト列を M4A/MP3 に変換して out_path に保存する。fmt="wav"はそのまま保存。"""
+    if fmt == "wav":
+        with open(out_path, "wb") as f:
+            f.write(wav_bytes)
+        return
+    if encoders is None:
+        encoders = audio_encoders()
+    cmd_or_path = encoders.get(fmt)
+    if not cmd_or_path:
+        raise RuntimeError(f"{fmt.upper()}への変換ツールが見つかりません。")
+    fd, tmp = tempfile.mkstemp(prefix="t2v_enc_", suffix=".wav")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(wav_bytes)
+        if cmd_or_path == "afconvert":
+            cmd = ["/usr/bin/afconvert", tmp, "-f", "m4af", "-d", "aac", out_path]
+        elif fmt == "mp3":
+            cmd = [cmd_or_path, "-y", "-loglevel", "error", "-i", tmp,
+                   "-codec:a", "libmp3lame", "-q:a", "2", out_path]
+        else:  # ffmpegでm4a
+            cmd = [cmd_or_path, "-y", "-loglevel", "error", "-i", tmp,
+                   "-codec:a", "aac", out_path]
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              creationflags=CREATE_NO_WINDOW)
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            raise RuntimeError(f"変換失敗: {proc.stderr or proc.stdout or 'unknown'}")
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 # ============================================================
@@ -702,21 +799,29 @@ def make_vvproj(lines, style_id, speaker_uuid, engine_id=VV_ENGINE_ID):
     ・0.22以降のスキーマ追加（phonemeTimingEditData 等）はエディタ側の
       マイグレーションが自動補完するため、この形式が安全な最小構成
     speaker_uuid: vv_speakers() が返す話者UUID（voice.speakerId に入る）
+    lines の要素は文字列、または行別話者の (text, style_id, speaker_uuid) タプル
+    （タプルの style_id/speaker_uuid が None なら既定値を使う）
     """
     audio_keys = []
     audio_items = {}
     for ln in lines:
-        ln = ln.strip()
-        if not ln:
+        if isinstance(ln, (tuple, list)):
+            text, sid, sp_uuid = ln
+            sid = style_id if sid is None else sid
+            sp_uuid = speaker_uuid if sp_uuid is None else sp_uuid
+        else:
+            text, sid, sp_uuid = ln, style_id, speaker_uuid
+        text = text.strip()
+        if not text:
             continue
         key = str(uuid.uuid4())
         audio_keys.append(key)
         audio_items[key] = {
-            "text": ln,
+            "text": text,
             "voice": {
                 "engineId": engine_id,
-                "speakerId": speaker_uuid,
-                "styleId": int(style_id),
+                "speakerId": sp_uuid,
+                "styleId": int(sid),
             },
         }
     track_id = str(uuid.uuid4())

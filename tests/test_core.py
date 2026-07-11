@@ -497,3 +497,96 @@ class TestExtractFilesTextFormats:
 def test_wav_duration():
     wav = _make_wav(duration_sec=0.5)
     assert abs(core.wav_duration(wav) - 0.5) < 0.01
+
+
+# ============================================================
+#  parse_speaker_tag / is_dialogue_line / resolve_speaker
+# ============================================================
+_SPEAKERS = [("ずんだもん（ノーマル）", 3, "uuid-z"),
+             ("ずんだもん（あまあま）", 1, "uuid-z"),
+             ("四国めたん（ノーマル）", 2, "uuid-m")]
+
+
+class TestSpeakerTag:
+    def test_tag_parsed(self):
+        assert core.parse_speaker_tag("@ずんだもん: こんにちは") == ("ずんだもん", "こんにちは")
+
+    def test_fullwidth_colon(self):
+        assert core.parse_speaker_tag("@四国めたん：やあ") == ("四国めたん", "やあ")
+
+    def test_no_tag(self):
+        assert core.parse_speaker_tag("ただの本文です。") == (None, "ただの本文です。")
+
+    def test_at_without_colon_is_not_tag(self):
+        assert core.parse_speaker_tag("@everyone 集合")[0] is None
+
+    def test_resolve_exact(self):
+        assert core.resolve_speaker("ずんだもん（あまあま）", _SPEAKERS)[1] == 1
+
+    def test_resolve_prefix_takes_first_style(self):
+        # スタイル省略時は最初のスタイル
+        assert core.resolve_speaker("ずんだもん", _SPEAKERS)[1] == 3
+
+    def test_resolve_partial(self):
+        assert core.resolve_speaker("めたん", _SPEAKERS)[1] == 2
+
+    def test_resolve_unknown(self):
+        assert core.resolve_speaker("存在しない話者", _SPEAKERS) is None
+
+
+class TestIsDialogueLine:
+    def test_kagi_bracket(self):
+        assert core.is_dialogue_line("「おはよう」と彼は言った")
+
+    def test_double_bracket(self):
+        assert core.is_dialogue_line("『本のタイトル』")
+
+    def test_narration(self):
+        assert not core.is_dialogue_line("彼は「おはよう」と言った")
+
+
+# ============================================================
+#  make_vvproj の行別話者
+# ============================================================
+class TestMakeVvprojPerLine:
+    def test_tuple_entries_override_default(self):
+        import json
+        entries = [("地の文。", None, None), ("「セリフ」", 2, "uuid-m")]
+        proj = json.loads(core.make_vvproj(entries, 3, "uuid-z"))
+        items = [proj["talk"]["audioItems"][k] for k in proj["talk"]["audioKeys"]]
+        assert items[0]["voice"]["styleId"] == 3
+        assert items[0]["voice"]["speakerId"] == "uuid-z"
+        assert items[1]["voice"]["styleId"] == 2
+        assert items[1]["voice"]["speakerId"] == "uuid-m"
+
+    def test_str_entries_still_work(self):
+        import json
+        proj = json.loads(core.make_vvproj(["そのまま。"], 0, "uuid-z"))
+        it = list(proj["talk"]["audioItems"].values())[0]
+        assert it["voice"]["styleId"] == 0
+
+
+# ============================================================
+#  audio_encoders / encode_audio
+# ============================================================
+class TestEncodeAudio:
+    def test_wav_passthrough(self, tmp_path):
+        wav = _make_wav(duration_sec=0.1)
+        out = str(tmp_path / "o.wav")
+        core.encode_audio(wav, out, "wav")
+        assert open(out, "rb").read() == wav
+
+    def test_unknown_format_raises(self, tmp_path):
+        with pytest.raises(RuntimeError):
+            core.encode_audio(_make_wav(0.1), str(tmp_path / "o.ogg"), "ogg", encoders={})
+
+    @pytest.mark.skipif(not core.IS_MAC, reason="afconvertはmacOSのみ")
+    def test_m4a_with_afconvert(self, tmp_path):
+        out = str(tmp_path / "o.m4a")
+        core.encode_audio(_make_wav(0.2), out, "m4a")
+        data = open(out, "rb").read()
+        assert len(data) > 100 and b"ftyp" in data[:16]  # MP4コンテナ
+
+    def test_encoders_shape(self):
+        enc = core.audio_encoders()
+        assert set(enc.keys()) <= {"m4a", "mp3"}

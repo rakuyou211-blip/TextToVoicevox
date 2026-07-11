@@ -63,6 +63,10 @@ class App(_Base):
         self._playall_stop = None       # 連続再生の停止イベント
         self.replace_rules = []         # 保存済み置換ルール [[find, repl], ...]
         self._dict_win = None           # ユーザー辞書ダイアログ
+        self.presets = []               # 声プリセット [{name, speaker, speed, ...}]
+        self._bookmark = None           # 連続再生のしおり（最後に再生した行番号）
+        self._saved_dlg_speaker = None  # 設定から復元するセリフ話者ラベル
+        self.encoders = core.audio_encoders()  # 使える音声変換 {"m4a":..., "mp3":...}
 
         self._build_ui()
         self._load_settings()
@@ -175,18 +179,52 @@ class App(_Base):
 
         vrow2 = ttk.Frame(bottom); vrow2.pack(fill="x", padx=6, pady=3)
         ttk.Label(vrow2, text="話者:").pack(side="left")
-        self.speaker_cb = ttk.Combobox(vrow2, width=34, state="disabled")
+        self.speaker_cb = ttk.Combobox(vrow2, width=30, state="disabled")
         self.speaker_cb.pack(side="left", padx=4)
-        ttk.Label(vrow2, text="話速:").pack(side="left", padx=(10, 0))
+        ttk.Label(vrow2, text="話速:").pack(side="left", padx=(8, 0))
         self.speed_var = tk.DoubleVar(value=1.0)
         ttk.Spinbox(vrow2, from_=0.5, to=2.0, increment=0.1, width=5,
                     textvariable=self.speed_var).pack(side="left")
+        ttk.Label(vrow2, text="音高:").pack(side="left", padx=(8, 0))
+        self.pitch_var = tk.DoubleVar(value=0.0)
+        ttk.Spinbox(vrow2, from_=-0.15, to=0.15, increment=0.01, width=6,
+                    textvariable=self.pitch_var).pack(side="left")
+        ttk.Label(vrow2, text="抑揚:").pack(side="left", padx=(8, 0))
+        self.into_var = tk.DoubleVar(value=1.0)
+        ttk.Spinbox(vrow2, from_=0.0, to=2.0, increment=0.1, width=5,
+                    textvariable=self.into_var).pack(side="left")
+        ttk.Label(vrow2, text="音量:").pack(side="left", padx=(8, 0))
+        self.vol_var = tk.DoubleVar(value=1.0)
+        ttk.Spinbox(vrow2, from_=0.0, to=2.0, increment=0.1, width=5,
+                    textvariable=self.vol_var).pack(side="left")
+
+        vrow2b = ttk.Frame(bottom); vrow2b.pack(fill="x", padx=6, pady=3)
+        ttk.Label(vrow2b, text="プリセット:").pack(side="left")
+        self.preset_cb = ttk.Combobox(vrow2b, width=14, state="readonly", values=[])
+        self.preset_cb.pack(side="left", padx=2)
+        self.preset_cb.bind("<<ComboboxSelected>>", self._preset_selected)
+        ttk.Button(vrow2b, text="保存", width=4, command=self.save_preset).pack(side="left", padx=1)
+        ttk.Button(vrow2b, text="削除", width=4, command=self.del_preset).pack(side="left", padx=1)
+        ttk.Separator(vrow2b, orient="vertical").pack(side="left", fill="y", padx=8)
+        self.dlg_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(vrow2b, text="セリフ行(「」開始)を別話者:",
+                        variable=self.dlg_var).pack(side="left")
+        self.dlg_speaker_cb = ttk.Combobox(vrow2b, width=24, state="disabled")
+        self.dlg_speaker_cb.pack(side="left", padx=2)
+        ttk.Label(vrow2b, text="※行頭「@話者名:」でも指定可").pack(side="left", padx=6)
+
+        vrow2c = ttk.Frame(bottom); vrow2c.pack(fill="x", padx=6, pady=3)
+        ttk.Label(vrow2c, text="出力形式:").pack(side="left")
+        self.fmt_cb = ttk.Combobox(vrow2c, width=6, state="readonly",
+                                   values=self._format_choices())
+        self.fmt_cb.current(0)
+        self.fmt_cb.pack(side="left", padx=2)
         self.combine_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(vrow2, text="全文を1つのWAVに結合",
+        ttk.Checkbutton(vrow2c, text="全文を1つのファイルに結合",
                         variable=self.combine_var).pack(side="left", padx=10)
-        ttk.Label(vrow2, text="文間の無音(秒):").pack(side="left", padx=(4, 0))
+        ttk.Label(vrow2c, text="文間の無音(秒):").pack(side="left", padx=(4, 0))
         self.gap_var = tk.DoubleVar(value=0.4)
-        ttk.Spinbox(vrow2, from_=0.0, to=3.0, increment=0.1, width=5,
+        ttk.Spinbox(vrow2c, from_=0.0, to=3.0, increment=0.1, width=5,
                     textvariable=self.gap_var).pack(side="left")
 
         vrow3 = ttk.Frame(bottom); vrow3.pack(fill="x", padx=6, pady=3)
@@ -196,10 +234,13 @@ class App(_Base):
         self.playall_btn = ttk.Button(vrow3, text="▶▶ 連続再生(カーソル行から)",
                                       command=self.play_all, state="disabled")
         self.playall_btn.pack(side="left", padx=4)
+        self.resume_btn = ttk.Button(vrow3, text="⏵ 続きから",
+                                     command=self.play_from_bookmark, state="disabled")
+        self.resume_btn.pack(side="left", padx=4)
         self.stop_btn = ttk.Button(vrow3, text="■ 停止",
                                    command=self.stop_playall, state="disabled")
         self.stop_btn.pack(side="left", padx=4)
-        self.synth_btn = ttk.Button(vrow3, text="🔊 音声を生成(WAV)",
+        self.synth_btn = ttk.Button(vrow3, text="🔊 音声を生成",
                                     command=self.start_synth, state="disabled")
         self.synth_btn.pack(side="left", padx=12)
         self.dict_btn = ttk.Button(vrow3, text="読み方辞書...",
@@ -241,6 +282,37 @@ class App(_Base):
         tsb = ttk.Scrollbar(body, command=self.text.yview)
         tsb.pack(side="right", fill="y")
         self.text.config(yscrollcommand=tsb.set)
+
+    # ---------------- 合成パラメータ・行別話者ヘルパー ----------------
+    def _format_choices(self):
+        choices = ["WAV"]
+        if "m4a" in self.encoders:
+            choices.append("M4A")
+        if "mp3" in self.encoders:
+            choices.append("MP3")
+        return choices
+
+    def _out_format(self):
+        v = (self.fmt_cb.get() or "WAV").lower()
+        return v if v in ("wav", "m4a", "mp3") else "wav"
+
+    def _voice_params(self):
+        return dict(speed=self.speed_var.get(), pitch=self.pitch_var.get(),
+                    intonation=self.into_var.get(), volume=self.vol_var.get())
+
+    def _resolve_line(self, line):
+        """行から (読み上げテキスト, speakerタプル or None=既定話者) を返す。
+        優先度: 行頭の@タグ > セリフ自動振り分け > 既定話者"""
+        name, rest = core.parse_speaker_tag(line)
+        if name is not None:
+            sp = core.resolve_speaker(name, self.speakers)
+            if sp:
+                return rest, sp
+            return line, None  # 未解決タグは行全体を既定話者で読む（気づけるように）
+        if (self.dlg_var.get() and core.is_dialogue_line(line)
+                and self.dlg_speaker_cb.current() >= 0):
+            return line, self.speakers[self.dlg_speaker_cb.current()]
+        return line, None
 
     # ---------------- ファイル操作 ----------------
     def add_files(self):
@@ -386,47 +458,69 @@ class App(_Base):
         if not self.speakers or self.speaker_cb.current() < 0:
             messagebox.showinfo("情報", "話者を選択してください（先にエンジン接続確認）。")
             return
-        lines = [ln for ln in text.split("\n") if ln.strip()]
+        # 行別話者を解決して (テキスト, style_id) のジョブ一覧を作る
+        default_id = self.speakers[self.speaker_cb.current()][1]
+        jobs = []
+        for ln in text.split("\n"):
+            if not ln.strip():
+                continue
+            spoken, sp = self._resolve_line(ln)
+            if not spoken.strip():
+                continue  # タグのみの行
+            jobs.append((spoken, sp[1] if sp else default_id))
+        if not jobs:
+            messagebox.showinfo("情報", "テキストがありません。")
+            return
+        fmt = self._out_format()
         if self.combine_var.get():
             out = filedialog.asksaveasfilename(
-                title="結合WAVの保存先", defaultextension=".wav",
-                filetypes=[("WAVファイル", "*.wav")], initialfile="voicevox_output.wav")
+                title=f"結合{fmt.upper()}の保存先", defaultextension=f".{fmt}",
+                filetypes=[(f"{fmt.upper()}ファイル", f"*.{fmt}")],
+                initialfile=f"voicevox_output.{fmt}")
             if not out:
                 return
             target = out
         else:
-            d = filedialog.askdirectory(title="WAVの出力フォルダ")
+            d = filedialog.askdirectory(title=f"{fmt.upper()}の出力フォルダ")
             if not d:
                 return
             target = d
-        speaker_id = self.speakers[self.speaker_cb.current()][1]
-        speed = self.speed_var.get()
         self._set_busy(True)
-        self.progress.config(mode="determinate", maximum=len(lines), value=0)
+        self.progress.config(mode="determinate", maximum=len(jobs), value=0)
         threading.Thread(target=self._synth_worker,
-                         args=(lines, speaker_id, speed, target, self.combine_var.get(),
-                               self.gap_var.get()),
+                         args=(jobs, self._voice_params(), target,
+                               self.combine_var.get(), self.gap_var.get(), fmt),
                          daemon=True).start()
 
-    def _synth_worker(self, lines, speaker_id, speed, target, combine, gap):
+    def _synth_worker(self, jobs, voice, target, combine, gap, fmt):
         try:
-            wavs = []
-            for i, ln in enumerate(lines):
-                self.q.put(("progress", i, len(lines), f"音声生成中 {i+1}/{len(lines)}"))
-                wb = core.vv_synthesize_one(self.base_url, ln, speaker_id, speed=speed)
-                if combine:
-                    wavs.append(wb)
-                else:
-                    fn = os.path.join(target, f"{i+1:03d}.wav")
-                    with open(fn, "wb") as f:
-                        f.write(wb)
+            from concurrent.futures import ThreadPoolExecutor
+            done_count = [0]
+            lock = threading.Lock()
+
+            def synth(job):
+                text, spk = job
+                wb = core.vv_synthesize_one(self.base_url, text, spk, **voice)
+                with lock:
+                    done_count[0] += 1
+                    n = done_count[0]
+                self.q.put(("progress", n, len(jobs), f"音声生成中 {n}/{len(jobs)}"))
+                return wb
+
+            # エンジンへ3並列で投げる（順序はexecutor.mapが保持する）
+            with ThreadPoolExecutor(max_workers=3) as ex:
+                wavs = list(ex.map(synth, jobs))
+
             if combine:
                 merged = core.concat_wavs(wavs, gap_sec=gap)
-                with open(target, "wb") as f:
-                    f.write(merged)
-                self.q.put(("synth_done", f"結合WAVを保存しました:\n{target}"))
+                core.encode_audio(merged, target, fmt, self.encoders)
+                self.q.put(("synth_done", f"結合{fmt.upper()}を保存しました:\n{target}"))
             else:
-                self.q.put(("synth_done", f"{len(lines)}個のWAVを保存しました:\n{target}"))
+                for i, wb in enumerate(wavs):
+                    fn = os.path.join(target, f"{i+1:03d}.{fmt}")
+                    core.encode_audio(wb, fn, fmt, self.encoders)
+                self.q.put(("synth_done",
+                            f"{len(wavs)}個の{fmt.upper()}を保存しました:\n{target}"))
         except Exception:
             self.q.put(("error", traceback.format_exc()))
 
@@ -468,11 +562,16 @@ class App(_Base):
             initialfile="voicevox_project.vvproj")
         if not out:
             return
-        sp = self.speakers[self.speaker_cb.current()]
-        style_id, speaker_uuid = sp[1], sp[2]
-        lines = [ln for ln in text.split("\n") if ln.strip()]
+        default = self.speakers[self.speaker_cb.current()]
+        entries = []
+        for ln in text.split("\n"):
+            if not ln.strip():
+                continue
+            spoken, sp = self._resolve_line(ln.strip())
+            if spoken.strip():
+                entries.append((spoken, sp[1] if sp else None, sp[2] if sp else None))
         with open(out, "w", encoding="utf-8") as f:
-            f.write(core.make_vvproj(lines, style_id, speaker_uuid))
+            f.write(core.make_vvproj(entries, default[1], default[2]))
         messagebox.showinfo("保存完了",
                             f"保存しました:\n{out}\n\n"
                             "VOICEVOXの「ファイル → プロジェクト読み込み」で開くと、\n"
@@ -630,17 +729,22 @@ class App(_Base):
         if not line:
             self.status_var.set("試聴するテキストがありません。")
             return
-        speaker_id = self.speakers[self.speaker_cb.current()][1]
-        speed = self.speed_var.get()
+        spoken, sp = self._resolve_line(line)
+        if not spoken.strip():
+            self.status_var.set("試聴するテキストがありません。")
+            return
+        speaker_id = sp[1] if sp else self.speakers[self.speaker_cb.current()][1]
         self._previewing = True
         self.preview_btn.config(state="disabled")
+        self.playall_btn.config(state="disabled")
         self.status_var.set("試聴を生成中...")
         threading.Thread(target=self._preview_worker,
-                         args=(line, speaker_id, speed), daemon=True).start()
+                         args=(spoken, speaker_id, self._voice_params()),
+                         daemon=True).start()
 
-    def _preview_worker(self, line, speaker_id, speed):
+    def _preview_worker(self, line, speaker_id, voice):
         try:
-            wb = core.vv_synthesize_one(self.base_url, line, speaker_id, speed=speed)
+            wb = core.vv_synthesize_one(self.base_url, line, speaker_id, **voice)
             self._preview_buf = wb
             self.q.put(("preview_playing", line))
             # ワーカースレッドなので同期再生でブロックして問題ない
@@ -659,24 +763,41 @@ class App(_Base):
         if not core.can_play():
             messagebox.showinfo("情報", "この環境では再生を利用できません。")
             return
-        # (行番号, テキスト) を集め、カーソル行以降を再生対象にする
+        # (行番号, 読み上げテキスト, style_id) を集め、カーソル行以降を再生対象にする
+        default_id = self.speakers[self.speaker_cb.current()][1]
         all_lines = self.text.get("1.0", "end-1c").split("\n")
-        numbered = [(i, ln.strip()) for i, ln in enumerate(all_lines, start=1) if ln.strip()]
+        numbered = []
+        for i, ln in enumerate(all_lines, start=1):
+            if not ln.strip():
+                continue
+            spoken, sp = self._resolve_line(ln.strip())
+            if spoken.strip():
+                numbered.append((i, spoken, sp[1] if sp else default_id))
         if not numbered:
             self.status_var.set("再生するテキストがありません。")
             return
         cur = int(self.text.index("insert").split(".")[0])
-        start = next((k for k, (no, _) in enumerate(numbered) if no >= cur), 0)
+        start = next((k for k, t in enumerate(numbered) if t[0] >= cur), 0)
         targets = numbered[start:]
-        speaker_id = self.speakers[self.speaker_cb.current()][1]
-        speed = self.speed_var.get()
         self._playall_stop = threading.Event()
         self._previewing = True
         self.preview_btn.config(state="disabled")
         self.playall_btn.config(state="disabled")
+        self.resume_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         threading.Thread(target=self._playall_worker,
-                         args=(targets, speaker_id, speed), daemon=True).start()
+                         args=(targets, self._voice_params()), daemon=True).start()
+
+    def play_from_bookmark(self):
+        """しおり（最後に再生した行）から連続再生を再開する。"""
+        if self._bookmark is None:
+            self.status_var.set("しおりがありません（連続再生すると自動で記憶されます）。")
+            return
+        last = int(self.text.index("end-1c").split(".")[0])
+        line = min(self._bookmark, last)
+        self.text.mark_set("insert", f"{line}.0")
+        self.text.see(f"{line}.0")
+        self.play_all()
 
     def stop_playall(self):
         if self._playall_stop is not None:
@@ -684,20 +805,30 @@ class App(_Base):
         self.stop_btn.config(state="disabled")
         self.status_var.set("停止しています...")
 
-    def _playall_worker(self, targets, speaker_id, speed):
+    def _playall_worker(self, targets, voice):
         stop = self._playall_stop
         played = 0
         try:
-            for lineno, ln in targets:
-                if stop.is_set():
-                    break
-                self.q.put(("playall_line", lineno, ln, played, len(targets)))
-                wb = core.vv_synthesize_one(self.base_url, ln, speaker_id, speed=speed)
-                if stop.is_set():
-                    break
-                self._preview_buf = wb
-                core.play_wav_blocking(wb, stop_event=stop)
-                played += 1
+            from concurrent.futures import ThreadPoolExecutor
+
+            def synth(t):
+                return core.vv_synthesize_one(self.base_url, t[1], t[2], **voice)
+
+            # 再生中に次の行を裏で合成しておく（行間の待ちをほぼゼロに）
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                nxt = ex.submit(synth, targets[0])
+                for k, (lineno, ln, _sid) in enumerate(targets):
+                    if stop.is_set():
+                        break
+                    self.q.put(("playall_line", lineno, ln, played, len(targets)))
+                    wb = nxt.result()
+                    if k + 1 < len(targets):
+                        nxt = ex.submit(synth, targets[k + 1])
+                    if stop.is_set():
+                        break
+                    self._preview_buf = wb
+                    core.play_wav_blocking(wb, stop_event=stop)
+                    played += 1
             self.q.put(("playall_done", True, stop.is_set(), played))
         except Exception:
             self.q.put(("playall_done", False, traceback.format_exc(), played))
@@ -776,6 +907,57 @@ class App(_Base):
         self.text.insert("1.0", content)
         self.status_var.set(f"全{len(self.replace_rules)}ルールで計{total}件置換しました。")
 
+    # ---------------- 声プリセット ----------------
+    def _preset_labels(self):
+        return [p["name"] for p in self.presets]
+
+    def _refresh_presets(self):
+        self.preset_cb.config(values=self._preset_labels())
+
+    def _preset_selected(self, event=None):
+        i = self.preset_cb.current()
+        if not (0 <= i < len(self.presets)):
+            return
+        p = self.presets[i]
+        self.speed_var.set(p.get("speed", 1.0))
+        self.pitch_var.set(p.get("pitch", 0.0))
+        self.into_var.set(p.get("intonation", 1.0))
+        self.vol_var.set(p.get("volume", 1.0))
+        # 話者はエンジン接続済みでラベルが一致するときだけ切り替える
+        labels = list(self.speaker_cb["values"])
+        if p.get("speaker") in labels:
+            self.speaker_cb.current(labels.index(p["speaker"]))
+        self.status_var.set(f"プリセット「{p['name']}」を適用しました。")
+
+    def save_preset(self):
+        from tkinter import simpledialog
+        name = simpledialog.askstring("プリセット保存", "プリセット名:", parent=self)
+        if not name:
+            return
+        name = name.strip()
+        preset = {"name": name, "speaker": self.speaker_cb.get(),
+                  "speed": self.speed_var.get(), "pitch": self.pitch_var.get(),
+                  "intonation": self.into_var.get(), "volume": self.vol_var.get()}
+        for i, p in enumerate(self.presets):
+            if p["name"] == name:
+                self.presets[i] = preset  # 同名は上書き
+                break
+        else:
+            self.presets.append(preset)
+        self._refresh_presets()
+        self.preset_cb.set(name)
+        self.status_var.set(f"プリセット「{name}」を保存しました（次回起動時も使えます）。")
+
+    def del_preset(self):
+        i = self.preset_cb.current()
+        if not (0 <= i < len(self.presets)):
+            self.status_var.set("削除するプリセットを選択してください。")
+            return
+        p = self.presets.pop(i)
+        self._refresh_presets()
+        self.preset_cb.set("")
+        self.status_var.set(f"プリセット「{p['name']}」を削除しました。")
+
     # ---------------- 設定の保存/復元 ----------------
     def _settings_dict(self):
         return {
@@ -784,8 +966,15 @@ class App(_Base):
             "blank": self.blank_var.get(), "ascii": self.ascii_var.get(),
             "join": self.join_var.get(), "combine": self.combine_var.get(),
             "speed": self.speed_var.get(), "speaker": self.speaker_cb.get(),
+            "pitch": self.pitch_var.get(), "intonation": self.into_var.get(),
+            "volume": self.vol_var.get(),
+            "fmt": self._out_format(),
             "gap": self.gap_var.get(),
             "replace_rules": self.replace_rules,
+            "presets": self.presets,
+            "dlg_enabled": self.dlg_var.get(),
+            "dlg_speaker": self.dlg_speaker_cb.get(),
+            "bookmark": self._bookmark,
             "base_url": self.url_var.get().strip() or self.base_url,
             "geometry": self.geometry(),
         }
@@ -806,12 +995,27 @@ class App(_Base):
             self.join_var.set(bool(s.get("join", False)))
             self.combine_var.set(bool(s.get("combine", False)))
             self.speed_var.set(float(s.get("speed", 1.0)))
+            self.pitch_var.set(float(s.get("pitch", 0.0)))
+            self.into_var.set(float(s.get("intonation", 1.0)))
+            self.vol_var.set(float(s.get("volume", 1.0)))
+            fmt = str(s.get("fmt", "wav")).upper()
+            if fmt in self._format_choices():
+                self.fmt_cb.set(fmt)
             self.gap_var.set(float(s.get("gap", 0.4)))
             rules = s.get("replace_rules", [])
             if isinstance(rules, list):
                 self.replace_rules = [[str(x[0]), str(x[1])] for x in rules
                                       if isinstance(x, (list, tuple)) and len(x) == 2]
                 self._refresh_rules()
+            presets = s.get("presets", [])
+            if isinstance(presets, list):
+                self.presets = [p for p in presets
+                                if isinstance(p, dict) and p.get("name")]
+                self._refresh_presets()
+            self.dlg_var.set(bool(s.get("dlg_enabled", False)))
+            self._saved_dlg_speaker = s.get("dlg_speaker") or None
+            bm = s.get("bookmark")
+            self._bookmark = int(bm) if isinstance(bm, (int, float)) else None
             self._saved_speaker = s.get("speaker") or None
             if s.get("base_url"):
                 self.base_url = s["base_url"]
@@ -865,9 +1069,18 @@ class App(_Base):
                             if self._saved_speaker and self._saved_speaker in labels:
                                 idx = labels.index(self._saved_speaker)
                             self.speaker_cb.current(idx)
+                        self.dlg_speaker_cb.config(values=labels, state="readonly")
+                        if labels:
+                            didx = 0
+                            if (self._saved_dlg_speaker
+                                    and self._saved_dlg_speaker in labels):
+                                didx = labels.index(self._saved_dlg_speaker)
+                            self.dlg_speaker_cb.current(didx)
                         self.engine_var.set(f"エンジン: 接続OK (v{ver})")
                         self.dict_btn.config(state="normal")
                         self.vvproj_btn.config(state="normal")
+                        if self._bookmark is not None:
+                            self.resume_btn.config(state="normal")
                     else:
                         self.engine_var.set("エンジン: 未接続（VOICEVOXを起動してください）")
                     self._set_busy(False)
@@ -899,7 +1112,8 @@ class App(_Base):
                         messagebox.showerror("エラー", info[-1500:])
                 elif kind == "playall_line":
                     _, lineno, line, done, total = msg
-                    # 再生中の行にカーソルを移してハイライト表示
+                    # 再生中の行にカーソルを移してハイライト表示。しおりも更新
+                    self._bookmark = lineno
                     self.text.tag_remove("playing", "1.0", "end")
                     self.text.tag_add("playing", f"{lineno}.0", f"{lineno}.end")
                     self.text.tag_config("playing", background="#cde8ff")
@@ -915,6 +1129,8 @@ class App(_Base):
                     if self.speakers and not self.busy:
                         self.preview_btn.config(state="normal")
                         self.playall_btn.config(state="normal")
+                        if self._bookmark is not None:
+                            self.resume_btn.config(state="normal")
                     if ok:
                         self.status_var.set(
                             f"連続再生を停止しました（{played}行再生）" if info
@@ -956,11 +1172,14 @@ class App(_Base):
             self.synth_btn.config(state="disabled")
             self.preview_btn.config(state="disabled")
             self.playall_btn.config(state="disabled")
+            self.resume_btn.config(state="disabled")
         elif self.speakers:
             self.synth_btn.config(state="normal")
             if not self._previewing:
                 self.preview_btn.config(state="normal")
                 self.playall_btn.config(state="normal")
+                if self._bookmark is not None:
+                    self.resume_btn.config(state="normal")
 
 
 if __name__ == "__main__":
