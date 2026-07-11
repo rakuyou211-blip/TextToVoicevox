@@ -2,6 +2,8 @@
 
 **作者: RAKUYOU211**（GitHub: [rakuyou211-blip](https://github.com/rakuyou211-blip)）— 本ツールのオリジナル作成者
 
+📦 [ダウンロード（最新版）](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest) ｜ 🐦 [X（旧Twitter）](https://x.com/rakuyou211) ｜ ▶️ [YouTube](https://www.youtube.com/@rakuyou211)
+
 PDF・画像（写真）から **テキストだけを取り出し**、VOICEVOX で読み上げ・音声化できる形に整えるツールです。
 **Windows と macOS の両方で動作**し、ネット接続なしで使えます。
 
