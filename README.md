@@ -99,6 +99,21 @@ PDF・画像（写真）から **テキストだけを取り出し**、VOICEVOX 
 
 ---
 
+## 開発者向け: テストの実行方法
+
+`core.py` の純ロジック（テキスト整形・WAV結合など）には pytest のテストがあります。
+OCR・VOICEVOXエンジン・GUIには依存しないため、どのOSでも実行できます。
+
+```sh
+pip install pypdfium2 pillow requests pytest
+pytest tests/ -v
+```
+
+GitHub Actions（`.github/workflows/ci.yml`）でも push / Pull Request のたびに
+Windows / macOS / Linux × Python 3.9 / 3.12 で同じテストを実行しています。
+
+---
+
 ## トラブルシューティング
 
 - **起動しない** → `デバッグ起動.bat`（Mac: `デバッグ起動.command`）でエラー内容を確認
