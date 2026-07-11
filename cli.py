@@ -39,6 +39,10 @@ def build_parser():
                    help="整形: sentence=文ごとに改行（既定）/ keep=元の改行維持")
     p.add_argument("--join-wrapped", action="store_true",
                    help="改行で途切れた文を連結（小説向け）")
+    p.add_argument("--paren-ruby", action="store_true",
+                   help="「漢字(かんじ)」型ルビを除去（Web小説向け）")
+    p.add_argument("--normalize", action="store_true",
+                   help="全角英数記号を半角に正規化")
     p.add_argument("--pdf-ocr", action="store_true", help="PDFを常にOCRする")
     p.add_argument("--dpi", type=int, default=300, help="OCR解像度（既定300）")
     p.add_argument("--url", default="http://127.0.0.1:50021",
@@ -66,7 +70,8 @@ def main(argv=None):
         progress_cb=lambda d, t, m: print(f"  {m}"))
     for w in warnings:
         print(f"  警告: {w}", file=sys.stderr)
-    text = core.clean_text(raw, mode=args.mode, join_wrapped=args.join_wrapped)
+    text = core.clean_text(raw, mode=args.mode, join_wrapped=args.join_wrapped,
+                           paren_ruby=args.paren_ruby, normalize=args.normalize)
     if not text:
         raise SystemExit("テキストを抽出できませんでした。")
 

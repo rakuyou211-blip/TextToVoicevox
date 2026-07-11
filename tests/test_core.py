@@ -663,3 +663,68 @@ class TestCli:
         assert rc == 0
         result = (out / "voicevox_text.txt").read_text(encoding="utf-8")
         assert result == "吾輩は猫である。\n名前はまだ無い。"
+
+
+# ============================================================
+#  strip_paren_ruby / normalize_ascii / fmt_duration
+# ============================================================
+class TestStripParenRuby:
+    def test_hiragana_ruby(self):
+        assert core.strip_paren_ruby("吾輩(わがはい)は猫である") == "吾輩は猫である"
+
+    def test_katakana_ruby_fullwidth_parens(self):
+        assert core.strip_paren_ruby("竜（ドラゴン）が飛ぶ") == "竜が飛ぶ"
+
+    def test_annotation_kept(self):
+        # かな以外が混ざる括弧は注釈なので残す
+        assert core.strip_paren_ruby("補足(2023年)を参照") == "補足(2023年)を参照"
+
+    def test_paren_after_kana_kept(self):
+        # 直前が漢字でなければルビと見なさない
+        assert core.strip_paren_ruby("これ(これ)は残る") == "これ(これ)は残る"
+
+    def test_multiple(self):
+        assert core.strip_paren_ruby("竜（ドラゴン）と魔法(まほう)") == "竜と魔法"
+
+
+class TestNormalizeAscii:
+    def test_fullwidth_alnum(self):
+        assert core.normalize_ascii("Ｅｘｃｅｌ２０２３") == "Excel2023"
+
+    def test_fullwidth_symbols(self):
+        assert core.normalize_ascii("（Ａ＋Ｂ）＝Ｃ！") == "(A+B)=C!"
+
+    def test_japanese_untouched(self):
+        assert core.normalize_ascii("日本語はそのまま。") == "日本語はそのまま。"
+
+    def test_fullwidth_space_untouched(self):
+        # 全角スペースは remove_cjk_spaces の担当なので変換しない
+        assert core.normalize_ascii("あ　い") == "あ　い"
+
+
+class TestCleanTextNewOptions:
+    def test_paren_ruby_option(self):
+        out = core.clean_text("吾輩(わがはい)は猫である。", paren_ruby=True)
+        assert out == "吾輩は猫である。"
+
+    def test_normalize_option(self):
+        out = core.clean_text("Ｅｘｃｅｌ ３６５を使う。", normalize=True)
+        assert out == "Excel 365を使う。"
+
+    def test_defaults_off(self):
+        out = core.clean_text("吾輩(わがはい)は猫である。")
+        assert "(わがはい)" in out
+
+
+class TestFmtDuration:
+    def test_seconds(self):
+        assert core.fmt_duration(42) == "約42秒"
+
+    def test_minutes(self):
+        assert core.fmt_duration(125) == "約2分05秒"
+
+    def test_hours(self):
+        assert core.fmt_duration(3720) == "約1時間02分"
+
+    def test_negative_clamped(self):
+        assert core.fmt_duration(-3) == "約0秒"

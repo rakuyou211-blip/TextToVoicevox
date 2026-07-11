@@ -5,6 +5,7 @@ GUI本体。テキスト抽出(core)とVOICEVOXエンジン連携を tkinter で
 """
 import os
 import json
+import time
 import queue
 import threading
 import traceback
@@ -73,11 +74,21 @@ class App(_Base):
         self._saved_dlg_speaker = None  # 設定から復元するセリフ話者ラベル
         self.encoders = core.audio_encoders()  # 使える音声変換 {"m4a":..., "mp3":...}
 
+        self.dark_var = tk.BooleanVar(value=False)
         self._build_ui()
+        # ライトテーマへ戻すための既定値を記憶
+        self._default_theme = ttk.Style(self).theme_use()
+        self._default_bg = self.cget("bg")
+        self._text_defaults = (self.text.cget("bg"), self.text.cget("fg"),
+                               self.text.cget("insertbackground"))
+        self._list_defaults = (self.listbox.cget("bg"), self.listbox.cget("fg"))
         self._load_settings()
+        if self.dark_var.get():
+            self.apply_theme()
         self._restore_text_cache()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._poll_queue)
+        self.after(600, self._auto_connect)  # 起動時にエンジンへ自動接続
 
     # ---------------- UI構築 ----------------
     def _build_ui(self):
@@ -152,6 +163,12 @@ class App(_Base):
         self.join_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row3, text="改行で途切れた文を連結（小説向け）",
                         variable=self.join_var).pack(side="left", padx=4)
+        self.pruby_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row3, text="括弧ルビ除去 例:漢字(かんじ)",
+                        variable=self.pruby_var).pack(side="left", padx=4)
+        self.norm_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row3, text="全角英数→半角",
+                        variable=self.norm_var).pack(side="left", padx=4)
 
         run = ttk.Frame(opt); run.pack(fill="x", padx=6, pady=5)
         self.extract_btn = ttk.Button(run, text="▶ テキスト抽出 実行", command=self.start_extract)
@@ -160,6 +177,8 @@ class App(_Base):
         self.progress.pack(side="left", padx=10)
         self.status_var = tk.StringVar(value="待機中")
         ttk.Label(run, textvariable=self.status_var).pack(side="left")
+        ttk.Button(run, text="🌓 テーマ", width=8,
+                   command=self.toggle_theme).pack(side="right", padx=4)
 
         # === 下段: VOICEVOX ===
         # 先に side="bottom" で確保し、ウィンドウが小さくても隠れないようにする
@@ -438,6 +457,8 @@ class App(_Base):
             remove_blank=self.blank_var.get(),
             keep_ascii_spaces=self.ascii_var.get(),
             join_wrapped=self.join_var.get(),
+            paren_ruby=self.pruby_var.get(),
+            normalize=self.norm_var.get(),
         )
         threading.Thread(target=self._extract_worker,
                          args=(params, clean_opts), daemon=True).start()
@@ -552,6 +573,7 @@ class App(_Base):
             from concurrent.futures import ThreadPoolExecutor
             done_count = [0]
             lock = threading.Lock()
+            t0 = time.monotonic()
 
             def synth(job):
                 text, spk, _para = job
@@ -559,7 +581,10 @@ class App(_Base):
                 with lock:
                     done_count[0] += 1
                     n = done_count[0]
-                self.q.put(("progress", n, len(jobs), f"音声生成中 {n}/{len(jobs)}"))
+                eta = (time.monotonic() - t0) / n * (len(jobs) - n)
+                self.q.put(("progress", n, len(jobs),
+                            f"音声生成中 {n}/{len(jobs)}"
+                            + (f"（残り{core.fmt_duration(eta)}）" if n < len(jobs) else "")))
                 return wb
 
             # エンジンへ3並列で投げる（順序はexecutor.mapが保持する）
@@ -673,7 +698,8 @@ class App(_Base):
             self.status_var.set(f"{added}件追加しました（クリップボードのファイル）")
             return
         clean_opts = dict(mode=self.mode_var.get(), remove_blank=self.blank_var.get(),
-                          keep_ascii_spaces=self.ascii_var.get(), join_wrapped=self.join_var.get())
+                          keep_ascii_spaces=self.ascii_var.get(), join_wrapped=self.join_var.get(),
+                          paren_ruby=self.pruby_var.get(), normalize=self.norm_var.get())
         self._set_busy(True)
         self.status_var.set("クリップボード画像をOCR中...")
         threading.Thread(target=self._clipboard_worker,
@@ -730,6 +756,8 @@ class App(_Base):
         ttk.Button(btns, text="追加", command=self._dict_add).pack(side="left", padx=2)
         ttk.Button(btns, text="選択を削除", command=self._dict_delete).pack(side="left", padx=2)
         ttk.Button(btns, text="再読込", command=self._dict_refresh).pack(side="left", padx=2)
+        ttk.Button(btns, text="書き出し...", command=self._dict_export).pack(side="left", padx=(10, 2))
+        ttk.Button(btns, text="読み込み...", command=self._dict_import).pack(side="left", padx=2)
         ttk.Label(btns, text="※読みはひらがなでもOK（自動でカタカナに変換）。"
                             "ｱｸｾﾝﾄ核0=平板").pack(side="left", padx=8)
         self._dict_refresh()
@@ -778,6 +806,63 @@ class App(_Base):
                 self.q.put(("dict_list", rows))
             except Exception as e:
                 self.q.put(("dict_status", f"削除に失敗: {e}"))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _dict_export(self):
+        """登録済みの読み方をJSONに書き出す（Win/Mac間の持ち運び用）。"""
+        out = filedialog.asksaveasfilename(
+            title="辞書を書き出し", defaultextension=".json",
+            filetypes=[("JSON", "*.json")], initialfile="voicevox_dict.json",
+            parent=self._dict_win)
+        if not out:
+            return
+
+        def worker():
+            try:
+                rows = core.vv_dict_list(self.base_url)
+                data = [{"surface": s, "pronunciation": p, "accent_type": a}
+                        for _u, s, p, a in rows]
+                with open(out, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                self.q.put(("dict_status", f"{len(data)}語を書き出しました: {out}"))
+            except Exception as e:
+                self.q.put(("dict_status", f"書き出しに失敗: {e}"))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _dict_import(self):
+        """JSONから読み方を取り込む（登録済みの単語はスキップ）。"""
+        path = filedialog.askopenfilename(
+            title="辞書を読み込み", filetypes=[("JSON", "*.json")],
+            parent=self._dict_win)
+        if not path:
+            return
+
+        def worker():
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if not isinstance(data, list):
+                    raise ValueError("辞書JSONの形式が違います（リストではありません）")
+                existing = {s for _u, s, _p, _a in core.vv_dict_list(self.base_url)}
+                added = skipped = 0
+                for w in data:
+                    surface = (w.get("surface") or "").strip()
+                    pron = (w.get("pronunciation") or "").strip()
+                    if not surface or not pron:
+                        continue
+                    if surface in existing:
+                        skipped += 1
+                        continue
+                    core.vv_dict_add(self.base_url, surface,
+                                     core.hira_to_kata(pron),
+                                     int(w.get("accent_type", 0)))
+                    added += 1
+                self.q.put(("dict_status",
+                            f"辞書読み込み: {added}語追加"
+                            + (f" / {skipped}語は登録済みのためスキップ" if skipped else "")))
+                self.q.put(("dict_list", core.vv_dict_list(self.base_url)))
+            except Exception as e:
+                self.q.put(("dict_status", f"読み込みに失敗: {e}"))
         threading.Thread(target=worker, daemon=True).start()
 
     # ---------------- 試聴 ----------------
@@ -977,6 +1062,51 @@ class App(_Base):
         self.text.insert("1.0", content)
         self.status_var.set(f"全{len(self.replace_rules)}ルールで計{total}件置換しました。")
 
+    # ---------------- テーマ（ライト/ダーク） ----------------
+    DARK_COLORS = dict(bg="#2b2b2b", fg="#e6e6e6", field="#3c3c3c",
+                       textbg="#1e1e1e", select="#44608a")
+
+    def toggle_theme(self):
+        self.dark_var.set(not self.dark_var.get())
+        self.apply_theme()
+
+    def apply_theme(self):
+        style = ttk.Style(self)
+        if self.dark_var.get():
+            c = self.DARK_COLORS
+            style.theme_use("clam")  # 色指定が全OSで効く共通テーマ
+            style.configure(".", background=c["bg"], foreground=c["fg"],
+                            fieldbackground=c["field"], troughcolor=c["field"],
+                            selectbackground=c["select"], selectforeground=c["fg"],
+                            insertcolor=c["fg"], bordercolor="#555555")
+            style.configure("TLabelframe.Label", background=c["bg"], foreground=c["fg"])
+            style.configure("TButton", background="#454545", foreground=c["fg"])
+            style.map("TButton", background=[("active", "#5a5a5a")])
+            for w in ("TCheckbutton", "TRadiobutton"):
+                style.map(w, background=[("active", c["bg"])])
+            style.map("TCombobox",
+                      fieldbackground=[("readonly", c["field"])],
+                      foreground=[("readonly", c["fg"])])
+            self.configure(bg=c["bg"])
+            self.text.config(bg=c["textbg"], fg=c["fg"], insertbackground=c["fg"])
+            self.listbox.config(bg=c["field"], fg=c["fg"])
+        else:
+            style.theme_use(self._default_theme)
+            self.configure(bg=self._default_bg)
+            tb, tf, ti = self._text_defaults
+            self.text.config(bg=tb, fg=tf, insertbackground=ti)
+            lb, lf = self._list_defaults
+            self.listbox.config(bg=lb, fg=lf)
+        # ハイライトは背景が明色のため、文字色を黒に固定して両テーマで読めるように
+        for tag, bg in (("playing", "#cde8ff"), ("hit", "#fff3a3"), ("curhit", "#ffb347")):
+            self.text.tag_config(tag, background=bg, foreground="#000000")
+
+    # ---------------- 起動時のエンジン自動接続 ----------------
+    def _auto_connect(self):
+        """起動直後に保存済みURLへ接続を試みる。失敗しても静かに未接続表示のまま。"""
+        if not self.busy:
+            self.check_engine()
+
     # ---------------- テキスト検索（Ctrl/Cmd+F） ----------------
     def open_search(self):
         if self._search_win is not None and self._search_win.winfo_exists():
@@ -1137,6 +1267,8 @@ class App(_Base):
             "dpi": self.dpi_var.get(), "preprocess": self.pre_var.get(),
             "blank": self.blank_var.get(), "ascii": self.ascii_var.get(),
             "join": self.join_var.get(),
+            "paren_ruby": self.pruby_var.get(), "normalize": self.norm_var.get(),
+            "dark": self.dark_var.get(),
             "unit": self._unit(), "nlines": self.nlines_var.get(),
             "srt": self.srt_var.get(),
             "font_size": int(self.text_font.cget("size")),
@@ -1168,6 +1300,9 @@ class App(_Base):
             self.blank_var.set(bool(s.get("blank", True)))
             self.ascii_var.set(bool(s.get("ascii", True)))
             self.join_var.set(bool(s.get("join", False)))
+            self.pruby_var.set(bool(s.get("paren_ruby", False)))
+            self.norm_var.set(bool(s.get("normalize", False)))
+            self.dark_var.set(bool(s.get("dark", False)))
             unit = s.get("unit")
             if unit is None and s.get("combine"):
                 unit = "combine"  # 旧設定(combine: true)からの引き継ぎ

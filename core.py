@@ -140,15 +140,22 @@ def split_sentences(text: str) -> list:
 
 def clean_text(raw: str, mode: str = "sentence",
                remove_blank: bool = True, keep_ascii_spaces: bool = True,
-               join_wrapped: bool = False) -> str:
+               join_wrapped: bool = False,
+               paren_ruby: bool = False, normalize: bool = False) -> str:
     """
     抽出生テキストをVOICEVOX向けに整形する。
     mode: "sentence" = 文ごとに改行（VOICEVOX推奨）/ "keep" = 元の改行を保持
     join_wrapped: True で改行をまたいだ文を連結（小説・段落向け）。
                   既定Falseでは元の改行を文の区切りとして尊重する（構造化文書で安全）。
+    paren_ruby: True で「漢字(かんじ)」型ルビを除去（Web小説向け）
+    normalize: True で全角英数記号を半角に正規化
     """
     # 改行コード統一・全角スペース正規化の前処理
     text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    if paren_ruby:
+        text = strip_paren_ruby(text)
+    if normalize:
+        text = normalize_ascii(text)
     # 連続する3つ以上の改行は2つに
     while "\n\n\n" in text:
         text = text.replace("\n\n\n", "\n\n")
@@ -190,6 +197,38 @@ def strip_aozora(text: str) -> str:
     text = _AOZORA_RUBY.sub("", text)
     text = _AOZORA_NOTE.sub("", text)
     return text.replace(_AOZORA_BAR, "")
+
+
+# 「漢字(かんじ)」型ルビ: 漢字の直後の丸括弧内が すべて かな のときだけ除去する
+_PAREN_RUBY = re.compile(
+    r"([一-鿿㐀-䶿々〆ヶ]+)[（(]([ぁ-ゖァ-ヶーゝゞヽヾ]+)[)）]")
+
+
+def strip_paren_ruby(text: str) -> str:
+    """Web小説等の「漢字(かんじ)」形式ルビを除去する（読みがな部分を捨てる）。
+    括弧内にかな以外が混ざる場合（例: 補足(2023年)）は注釈とみなして残す。"""
+    return _PAREN_RUBY.sub(r"\1", text)
+
+
+# 全角英数記号(FF01-FF5E) → 半角(21-7E)。全角スペースは対象外（既存処理が扱う）
+_Z2H = {c: c - 0xFEE0 for c in range(0xFF01, 0xFF5F)}
+
+
+def normalize_ascii(text: str) -> str:
+    """全角英数・記号を半角に正規化する（例: Ｅｘｃｅｌ２０２３ → Excel2023）。"""
+    return text.translate(_Z2H)
+
+
+def fmt_duration(sec: float) -> str:
+    """秒数を「約N秒」「約N分」の残り時間表示にする。"""
+    sec = max(0, int(round(sec)))
+    if sec < 60:
+        return f"約{sec}秒"
+    m, s = divmod(sec, 60)
+    if m < 60:
+        return f"約{m}分{s:02d}秒"
+    h, m = divmod(m, 60)
+    return f"約{h}時間{m:02d}分"
 
 
 def read_txt(path: str) -> str:
