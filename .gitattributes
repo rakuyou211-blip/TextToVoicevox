@@ -1,0 +1,13 @@
+# 既定はテキストとして扱い、改行はGitに任せる
+* text=auto
+
+# Windows 用スクリプトは CRLF を維持
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# macOS / Linux 用スクリプトは LF を維持
+*.command text eol=lf
+*.sh      text eol=lf
+
+# Python は LF
+*.py text eol=lf
