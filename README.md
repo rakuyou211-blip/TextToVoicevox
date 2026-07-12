@@ -4,8 +4,11 @@
 
 📦 [ダウンロード（最新版）](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest) ｜ 🐦 [X（旧Twitter）](https://x.com/rakuyou211) ｜ ▶️ [YouTube](https://www.youtube.com/@rakuyou211)
 
-PDF・画像（写真）から **テキストだけを取り出し**、VOICEVOX で読み上げ・音声化できる形に整えるツールです。
-**Windows と macOS の両方で動作**し、ネット接続なしで使えます。
+「スキャンした本や資料のPDF、ずんだもんに読み上げてほしい。でも文字起こしが面倒…」
+そんな自分の悩みを解決するために作ったツールです。
+
+PDF・画像（写真）・テキストファイルから **テキストだけを取り出し**、VOICEVOX で読み上げ・音声化できる形に自動で整えます。ファイルを放り込んで抽出ボタンを押し、あとは連続再生で聴くもよし、WAVやMP3に書き出すもよし。
+**Windows と macOS の両方で動作**し、ネット接続なしで使えます。OCRはOS標準エンジンだけを使うので、**文書が外部に送信されることは一切ありません**。
 
 - OCR … OS標準のオフラインOCRを使用
   - Windows: Windows標準OCR（Windows.Media.Ocr）
