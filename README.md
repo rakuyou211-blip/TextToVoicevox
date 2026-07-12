@@ -1,5 +1,10 @@
 # テキスト抽出 → VOICEVOX ツール（オフライン / Windows・macOS対応）
 
+[![latest release](https://img.shields.io/github/v/release/rakuyou211-blip/TextToVoicevox?color=4c9a5d)](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest)
+[![downloads](https://img.shields.io/github/downloads/rakuyou211-blip/TextToVoicevox/total?color=4c9a5d)](https://github.com/rakuyou211-blip/TextToVoicevox/releases)
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-4c9a5d)
+[![license](https://img.shields.io/github/license/rakuyou211-blip/TextToVoicevox?color=4c9a5d)](LICENSE)
+
 **作者: RAKUYOU211**（GitHub: [rakuyou211-blip](https://github.com/rakuyou211-blip)）— 本ツールのオリジナル作成者
 
 📦 [ダウンロード（最新版）](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest) ｜ 🐦 [X（旧Twitter）](https://x.com/rakuyou211) ｜ ▶️ [YouTube](https://www.youtube.com/@rakuyou211)
