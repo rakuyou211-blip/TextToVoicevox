@@ -1,5 +1,7 @@
 # TextToVoicevox 🍂
 
+🌐 English (this page) ｜ **[日本語 README](README.md)**
+
 *Part of Rakuyoi's Toolbox — small offline tools made by one person.*
 
 Turn PDFs, images, and text files into spoken audio with VOICEVOX, completely offline.
