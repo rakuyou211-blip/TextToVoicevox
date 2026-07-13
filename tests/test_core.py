@@ -728,3 +728,110 @@ class TestFmtDuration:
 
     def test_negative_clamped(self):
         assert core.fmt_duration(-3) == "約0秒"
+
+
+# ============================================================
+#  extract_epub のhref解決（パーセントエンコード / 相対パス / 全欠落）
+# ============================================================
+def _make_epub_split_href(path, entries):
+    """zip実体名とOPF hrefを別々に指定できるテスト用epub。
+    entries: [(zip_name, href, html), ...]"""
+    import zipfile
+    container = ('<?xml version="1.0"?>'
+                 '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                 '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+                 '</rootfiles></container>')
+    items = "".join(f'<item id="c{i}" href="{href}" media-type="application/xhtml+xml"/>'
+                    for i, (_zn, href, _h) in enumerate(entries))
+    refs = "".join(f'<itemref idref="c{i}"/>' for i in range(len(entries)))
+    opf = ('<?xml version="1.0"?>'
+           '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+           f'<manifest>{items}</manifest><spine>{refs}</spine></package>')
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("mimetype", "application/epub+zip")
+        z.writestr("META-INF/container.xml", container)
+        z.writestr("OEBPS/content.opf", opf)
+        for zn, _href, html in entries:
+            z.writestr(f"OEBPS/{zn}", html)
+
+
+class TestExtractEpubHrefResolution:
+    def test_percent_encoded_japanese_href(self, tmp_path):
+        from urllib.parse import quote
+        p = str(tmp_path / "enc.epub")
+        zn = "第1章.xhtml"
+        _make_epub_split_href(p, [
+            (zn, quote(zn), "<html><body><p>符号化された章。</p></body></html>")])
+        assert core.extract_epub(p) == "符号化された章。"
+
+    def test_space_in_filename_href(self, tmp_path):
+        p = str(tmp_path / "sp.epub")
+        _make_epub_split_href(p, [
+            ("Chapter 1.xhtml", "Chapter%201.xhtml",
+             "<html><body><p>空白入りの章。</p></body></html>")])
+        assert core.extract_epub(p) == "空白入りの章。"
+
+    def test_all_chapters_missing_raises(self, tmp_path):
+        # hrefがどのzip実体にも一致しない → 無言で空を返さず例外にする
+        p = str(tmp_path / "bad.epub")
+        _make_epub_split_href(p, [
+            ("real.xhtml", "does-not-exist.xhtml",
+             "<html><body><p>x</p></body></html>")])
+        with pytest.raises(RuntimeError):
+            core.extract_epub(p)
+
+
+# ============================================================
+#  extract_files が一時ディレクトリを残さないこと
+# ============================================================
+def test_extract_files_cleans_temp_dir(tmp_path):
+    import glob
+    import tempfile as _tf
+    src = tmp_path / "a.txt"
+    src.write_text("本文だけ。", encoding="utf-8")
+    pat = os.path.join(_tf.gettempdir(), "t2v_img_*")
+    before = set(glob.glob(pat))
+    text, warnings = core.extract_files([str(src)])
+    after = set(glob.glob(pat))
+    assert text == "本文だけ。"
+    assert after <= before  # 新規に作られたt2v_img_一時ディレクトリが残っていない
+
+
+# ============================================================
+#  cli.py: --srt 単独指定の警告 / @話者タグの解釈
+# ============================================================
+class TestCliSrtWarning:
+    def test_srt_without_combine_warns(self, tmp_path, capsys):
+        import cli
+        src = tmp_path / "n.txt"
+        src.write_text("一文目。二文目。", encoding="utf-8")
+        rc = cli.main([str(src), "-o", str(tmp_path / "o"), "--srt"])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "--srt" in err and "--combine" in err
+
+
+class TestCliSpeakerTags:
+    def test_tags_stripped_and_routed(self, tmp_path, monkeypatch):
+        import cli
+        src = tmp_path / "s.txt"
+        src.write_text("@ずんだもん: こんにちは\n地の文です。", encoding="utf-8")
+        speakers = [("ずんだもん（ノーマル）", 3, "uz"),
+                    ("四国めたん（ノーマル）", 2, "um")]
+        monkeypatch.setattr(core, "vv_check", lambda url, timeout=3: "0.0.0")
+        monkeypatch.setattr(core, "vv_speakers", lambda url, timeout=10: speakers)
+        calls = []
+
+        def fake_synth(url, text, sid, **kw):
+            calls.append((text, sid))
+            return _make_wav(0.05)
+
+        monkeypatch.setattr(core, "vv_synthesize_one", fake_synth)
+        monkeypatch.setattr(core, "audio_encoders", lambda: {})
+        rc = cli.main([str(src), "-o", str(tmp_path / "o"),
+                       "--wav", "--speaker", "ずんだもん"])
+        assert rc == 0
+        # タグは読み上げず、その行は指定話者(3)で。地の文も既定話者(3)。
+        assert ("こんにちは", 3) in calls
+        assert ("地の文です。", 3) in calls
+        assert all("@" not in t for t, _ in calls)

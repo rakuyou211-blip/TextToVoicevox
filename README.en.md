@@ -8,6 +8,11 @@ Turn PDFs, images, and text files into spoken audio with VOICEVOX, completely of
 
 Hi. I'm rakuyou211, a solo hobby developer. I made this because I wanted my own machine to read things out loud to me — books, scanned documents, long PDFs — without sending anything to the cloud. It grew from there. It's still young and a little rough in places, and I try to be honest about that below.
 
+![TextToVoicevox main window](docs/screenshot-light.png#gh-light-mode-only)
+![TextToVoicevox main window (dark mode)](docs/screenshot-dark.png#gh-dark-mode-only)
+
+<sub>▲ The actual app. Drop in a file, pull out the text, pick a voice, then preview / export audio / write subtitles. A leading `@name:` on a line switches the speaker just for that line. (Shown connected to VOICEVOX; dark mode supported.)</sub>
+
 ---
 
 ## What it does
@@ -26,7 +31,7 @@ You give it a file. It pulls the text out, cleans it up, and reads it aloud in a
 - **Ruby / furigana removal** — strips ruby markup from Aozora Bunko texts, and `漢字(かんじ)`-style ruby from web novels, so they read cleanly.
 - **Command line** — there's a CLI too, if you'd rather script it than click.
 
-The current release is **v1.4.0**, which was a big update (around 25 new features). It's moving fast, so expect some sharp edges.
+The current release is **v1.4.1**, a stability pass that makes first-time setup and everyday use less fragile (see [CHANGELOG.md](CHANGELOG.md)); v1.4.0 before it was a big feature update (~25 new features). It's still moving fast, so expect some sharp edges.
 
 ---
 

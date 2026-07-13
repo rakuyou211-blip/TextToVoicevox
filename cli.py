@@ -22,6 +22,8 @@ def build_parser():
     p = argparse.ArgumentParser(
         prog="cli.py",
         description="PDF・画像・テキスト → 整形txt / VOICEVOX音声 の一括変換（GUIなし）")
+    p.add_argument("--version", action="version",
+                   version=f"TextToVoicevox {core.APP_VERSION}")
     p.add_argument("inputs", nargs="+", help="入力ファイル（PDF/画像/txt/docx/epub）")
     p.add_argument("-o", "--out", required=True, help="出力フォルダ")
     p.add_argument("--wav", action="store_true", help="音声も生成する（要エンジン）")
@@ -64,6 +66,10 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     os.makedirs(args.out, exist_ok=True)
 
+    if args.srt and not args.combine:
+        print("警告: --srt は --combine と併用したときだけ保存されます"
+              "（今回は字幕を出力しません）。", file=sys.stderr)
+
     print(f"[1/3] テキスト抽出中... ({len(args.inputs)}ファイル)")
     raw, warnings = core.extract_files(
         args.inputs, pdf_mode=("ocr" if args.pdf_ocr else "auto"), dpi=args.dpi,
@@ -100,10 +106,25 @@ def main(argv=None):
         raise SystemExit(f"{args.format.upper()}への変換ツールがありません"
                          "（Mac: afconvert / それ以外: ffmpeg が必要）。")
 
+    # 行頭の「@話者名:」タグをGUIと同様に解釈する（タグ自体は読み上げず、
+    # その行だけ指定話者に切り替える）。未解決タグは行全体を既定話者で読む。
+    speak_lines, sids = [], []
+    for ln in lines:
+        name, rest = core.parse_speaker_tag(ln)
+        if name is not None:
+            m = core.resolve_speaker(name, speakers)
+            if m is not None:
+                if rest.strip():
+                    speak_lines.append(rest)
+                    sids.append(m[1])
+                continue
+        speak_lines.append(ln)
+        sids.append(sp[1])
+
     wavs = []
-    for i, ln in enumerate(lines):
-        wavs.append(core.vv_synthesize_one(args.url, ln, sp[1], **voice))
-        print(f"  {i+1}/{len(lines)}")
+    for i, (spoken, sid) in enumerate(zip(speak_lines, sids)):
+        wavs.append(core.vv_synthesize_one(args.url, spoken, sid, **voice))
+        print(f"  {i+1}/{len(speak_lines)}")
 
     if args.combine:
         out_audio = os.path.join(args.out, f"voicevox_output.{args.format}")
@@ -114,7 +135,7 @@ def main(argv=None):
             srt_path = os.path.join(args.out, "voicevox_output.srt")
             durations = [core.wav_duration(w) for w in wavs]
             with open(srt_path, "w", encoding="utf-8") as f:
-                f.write(core.make_srt(lines, durations, gap_sec=args.gap))
+                f.write(core.make_srt(speak_lines, durations, gap_sec=args.gap))
             print(f"保存: {srt_path}")
     else:
         for i, wb in enumerate(wavs):
