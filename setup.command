@@ -31,9 +31,9 @@ echo "仮想環境を作成しています..."
     exit 1
 }
 
-echo "依存ライブラリをインストールしています (pypdfium2, pillow, requests, tkinterdnd2, pyobjc-Vision)..."
+echo "依存ライブラリをインストールしています（requirements.txt）..."
 ./venv_mac/bin/python -m pip install --upgrade pip
-./venv_mac/bin/python -m pip install pypdfium2 pillow requests tkinterdnd2 pyobjc-framework-Vision || {
+./venv_mac/bin/python -m pip install -r requirements.txt || {
     echo "[エラー] インストールに失敗しました。ネット接続を確認してください。"
     read -n 1 -s -r -p "何かキーを押すと閉じます..."
     exit 1

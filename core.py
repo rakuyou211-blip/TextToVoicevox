@@ -11,11 +11,18 @@ import json
 import time
 import uuid
 import wave
+import shutil
 import zipfile
 import tempfile
+import posixpath
 import subprocess
 from html.parser import HTMLParser
+from urllib.parse import unquote
 from xml.etree import ElementTree
+
+# アプリのバージョン（タイトルバー・CLI --version・不具合報告の目印に使う）。
+# リリースごとにここだけ更新する。
+APP_VERSION = "1.4.1"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
@@ -308,11 +315,22 @@ class _HTMLTextExtractor(HTMLParser):
         return "\n".join(out).strip()
 
 
+def _epub_norm(p: str) -> str:
+    """EPUB内パスを引き当て用に正規化する。
+    href はURI（空白や日本語はパーセントエンコードされる）なので unquote し、
+    ../ や ./ を畳んで先頭スラッシュを外す。zip実エントリ名と突き合わせるため。"""
+    return posixpath.normpath(unquote(p)).lstrip("/")
+
+
 def extract_epub(path: str) -> str:
-    """EPUBから本文テキストを抽出する（spine順・追加ライブラリ不要）。"""
+    """EPUBから本文テキストを抽出する（spine順・追加ライブラリ不要）。
+    章ファイル名に空白や日本語（=hrefがパーセントエンコードされる）を含むEPUBでも
+    取りこぼさないよう、zipエントリ名を正規化して突き合わせる。"""
     ns_c = "{urn:oasis:names:tc:opendocument:xmlns:container}"
     ns_o = "{http://www.idpf.org/2007/opf}"
     with zipfile.ZipFile(path) as z:
+        # 正規化した名前 → 実際のzipエントリ名 の対応表（hrefの表記揺れを吸収）
+        name_map = {_epub_norm(n): n for n in z.namelist()}
         container = ElementTree.fromstring(z.read("META-INF/container.xml"))
         rootfile = container.find(f".//{ns_c}rootfile")
         opf_path = rootfile.get("full-path")
@@ -322,20 +340,24 @@ def extract_epub(path: str) -> str:
         for it in opf.iter(ns_o + "item"):
             items[it.get("id")] = it.get("href")
         chapters = []
+        missing = 0
         for ref in opf.iter(ns_o + "itemref"):
             href = items.get(ref.get("idref"))
             if not href:
                 continue
-            full = (opf_dir + "/" + href) if opf_dir else href
-            try:
-                html = z.read(full).decode("utf-8", errors="replace")
-            except KeyError:
+            entry = name_map.get(_epub_norm((opf_dir + "/" + href) if opf_dir else href))
+            if entry is None:
+                missing += 1  # 見つからない章は数える（無言で捨てない）
                 continue
+            html = z.read(entry).decode("utf-8", errors="replace")
             p = _HTMLTextExtractor()
             p.feed(html)
             t = p.text()
             if t:
                 chapters.append(t)
+    if missing and not chapters:
+        # 全章取りこぼした＝ほぼ確実に構造の読み違い。呼び出し側が気づけるよう例外に。
+        raise RuntimeError(f"EPUBの本文を取り出せませんでした（{missing}章が見つからず）。")
     return "\n\n".join(chapters)
 
 
@@ -386,29 +408,36 @@ def run_windows_ocr(image_paths, lang="ja"):
     if not image_paths:
         return {}
     tmpdir = tempfile.mkdtemp(prefix="t2v_ocr_")
-    manifest = os.path.join(tmpdir, "manifest.txt")
-    out_json = os.path.join(tmpdir, "result.json")
-    with open(manifest, "w", encoding="utf-8") as f:
-        f.write("\n".join(image_paths))
+    try:
+        manifest = os.path.join(tmpdir, "manifest.txt")
+        out_json = os.path.join(tmpdir, "result.json")
+        with open(manifest, "w", encoding="utf-8") as f:
+            f.write("\n".join(image_paths))
 
-    ps_exe = _find_powershell()
-    cmd = [ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass",
-           "-File", OCR_PS1, "-Manifest", manifest, "-Out", out_json, "-Lang", lang]
-    proc = subprocess.run(cmd, capture_output=True, text=True,
-                          creationflags=CREATE_NO_WINDOW)
-    if not os.path.exists(out_json):
-        raise RuntimeError("OCR失敗: " + (proc.stderr or proc.stdout or "出力なし"))
+        ps_exe = _find_powershell()
+        cmd = [ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass",
+               "-File", OCR_PS1, "-Manifest", manifest, "-Out", out_json, "-Lang", lang]
+        # encoding/errors 指定なしだと日本語Windows(cp932)でOCR側の出力に
+        # 非cp932バイトが混ざったとき decode で例外→エラーメッセージが潰れる。
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              creationflags=CREATE_NO_WINDOW)
+        if not os.path.exists(out_json):
+            raise RuntimeError("OCR失敗: " + (proc.stderr or proc.stdout or "出力なし"))
 
-    with open(out_json, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if isinstance(data, dict) and "fatal" in data:
-        raise RuntimeError(data["fatal"])
-    if isinstance(data, dict):
-        data = [data]
-    result = {}
-    for item in data:
-        result[item.get("path", "")] = item.get("text", "") if item.get("ok") else ""
-    return result
+        with open(out_json, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and "fatal" in data:
+            raise RuntimeError(data["fatal"])
+        if isinstance(data, dict):
+            data = [data]
+        result = {}
+        for item in data:
+            result[item.get("path", "")] = item.get("text", "") if item.get("ok") else ""
+        return result
+    finally:
+        # OCRが済めばmanifest.txt/result.json（＝抽出全文）は不要。%TEMP%に残さない。
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _find_powershell():
@@ -436,87 +465,90 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
     text_parts = {}         # key -> text(テキスト層のもの)
     order = []              # 出力順 key
     tmpdir = tempfile.mkdtemp(prefix="t2v_img_")
-
-    total = len(paths)
-    for idx, path in enumerate(paths):
-        if progress_cb:
-            progress_cb(idx, total, f"解析中: {os.path.basename(path)}")
-        ext = os.path.splitext(path)[1].lower()
-        try:
-            if ext in PDF_EXT:
-                doc = pdfium.PdfDocument(path)
-                npages = len(doc)
-                for pi in range(npages):
-                    key = f"{path}#p{pi+1}"
+    try:
+        total = len(paths)
+        for idx, path in enumerate(paths):
+            if progress_cb:
+                progress_cb(idx, total, f"解析中: {os.path.basename(path)}")
+            ext = os.path.splitext(path)[1].lower()
+            try:
+                if ext in PDF_EXT:
+                    doc = pdfium.PdfDocument(path)
+                    npages = len(doc)
+                    for pi in range(npages):
+                        key = f"{path}#p{pi+1}"
+                        order.append(key)
+                        page = doc[pi]
+                        use_ocr = (pdf_mode == "ocr")
+                        if not use_ocr:
+                            tp = page.get_textpage()
+                            layer = tp.get_text_range()
+                            if len(layer.strip()) >= 1:
+                                text_parts[key] = layer
+                            else:
+                                use_ocr = True
+                        if use_ocr:
+                            w_pt, h_pt = page.get_size()
+                            scale = dpi / 72.0
+                            if max(w_pt, h_pt) * scale > 4000:
+                                scale = 4000.0 / max(w_pt, h_pt)
+                            bitmap = page.render(scale=scale)
+                            pil = bitmap.to_pil()
+                            pil = preprocess_image(pil, enable=preprocess)
+                            png = os.path.join(tmpdir, f"pdf_{idx}_{pi}.png")
+                            pil.save(png)
+                            ocr_jobs.append((key, png))
+                        if progress_cb:
+                            progress_cb(idx, total,
+                                        f"解析中: {os.path.basename(path)} ({pi+1}/{npages}p)")
+                    doc.close()
+                elif ext in IMG_EXT:
+                    key = path
                     order.append(key)
-                    page = doc[pi]
-                    use_ocr = (pdf_mode == "ocr")
-                    if not use_ocr:
-                        tp = page.get_textpage()
-                        layer = tp.get_text_range()
-                        if len(layer.strip()) >= 1:
-                            text_parts[key] = layer
-                        else:
-                            use_ocr = True
-                    if use_ocr:
-                        w_pt, h_pt = page.get_size()
-                        scale = dpi / 72.0
-                        if max(w_pt, h_pt) * scale > 4000:
-                            scale = 4000.0 / max(w_pt, h_pt)
-                        bitmap = page.render(scale=scale)
-                        pil = bitmap.to_pil()
-                        pil = preprocess_image(pil, enable=preprocess)
-                        png = os.path.join(tmpdir, f"pdf_{idx}_{pi}.png")
-                        pil.save(png)
-                        ocr_jobs.append((key, png))
-                    if progress_cb:
-                        progress_cb(idx, total,
-                                    f"解析中: {os.path.basename(path)} ({pi+1}/{npages}p)")
-                doc.close()
-            elif ext in IMG_EXT:
-                key = path
-                order.append(key)
-                img = Image.open(path)
-                img = preprocess_image(img, enable=preprocess)
-                png = os.path.join(tmpdir, f"img_{idx}.png")
-                img.save(png)
-                ocr_jobs.append((key, png))
-            elif ext in TXT_EXT:
-                order.append(path)
-                text_parts[path] = strip_aozora(read_txt(path))
-            elif ext in DOCX_EXT:
-                order.append(path)
-                text_parts[path] = extract_docx(path)
-            elif ext in EPUB_EXT:
-                order.append(path)
-                text_parts[path] = strip_aozora(extract_epub(path))
-            else:
-                warnings.append(f"未対応の形式をスキップ: {os.path.basename(path)}")
-        except Exception as e:
-            warnings.append(f"読み込み失敗 {os.path.basename(path)}: {e}")
+                    img = Image.open(path)
+                    img = preprocess_image(img, enable=preprocess)
+                    png = os.path.join(tmpdir, f"img_{idx}.png")
+                    img.save(png)
+                    ocr_jobs.append((key, png))
+                elif ext in TXT_EXT:
+                    order.append(path)
+                    text_parts[path] = strip_aozora(read_txt(path))
+                elif ext in DOCX_EXT:
+                    order.append(path)
+                    text_parts[path] = extract_docx(path)
+                elif ext in EPUB_EXT:
+                    order.append(path)
+                    text_parts[path] = strip_aozora(extract_epub(path))
+                else:
+                    warnings.append(f"未対応の形式をスキップ: {os.path.basename(path)}")
+            except Exception as e:
+                warnings.append(f"読み込み失敗 {os.path.basename(path)}: {e}")
 
-    # まとめてOCR
-    if ocr_jobs:
+        # まとめてOCR
+        if ocr_jobs:
+            if progress_cb:
+                progress_cb(total - 1, total, f"OCR実行中... ({len(ocr_jobs)}枚)")
+            png_paths = [p for _, p in ocr_jobs]
+            try:
+                ocr_result = run_ocr(png_paths, lang=lang)
+            except Exception as e:
+                warnings.append(f"OCRエラー: {e}")
+                ocr_result = {}
+            for key, png in ocr_jobs:
+                text_parts[key] = ocr_result.get(png, "")
+
+        # 出力順に結合（ファイル/ページ境界は空行）
+        chunks = []
+        for key in order:
+            t = text_parts.get(key, "").strip()
+            if t:
+                chunks.append(t)
         if progress_cb:
-            progress_cb(total - 1, total, f"OCR実行中... ({len(ocr_jobs)}枚)")
-        png_paths = [p for _, p in ocr_jobs]
-        try:
-            ocr_result = run_ocr(png_paths, lang=lang)
-        except Exception as e:
-            warnings.append(f"OCRエラー: {e}")
-            ocr_result = {}
-        for key, png in ocr_jobs:
-            text_parts[key] = ocr_result.get(png, "")
-
-    # 出力順に結合（ファイル/ページ境界は空行）
-    chunks = []
-    for key in order:
-        t = text_parts.get(key, "").strip()
-        if t:
-            chunks.append(t)
-    if progress_cb:
-        progress_cb(total, total, "抽出完了")
-    return "\n\n".join(chunks), warnings
+            progress_cb(total, total, "抽出完了")
+        return "\n\n".join(chunks), warnings
+    finally:
+        # OCR用に描き出した一時PNG（＝元文書の画像コピー）は用済み。%TEMPに残さない。
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ============================================================
@@ -774,7 +806,10 @@ def encode_audio(wav_bytes, out_path, fmt, encoders=None):
         else:  # ffmpegでm4a
             cmd = [cmd_or_path, "-y", "-loglevel", "error", "-i", tmp,
                    "-codec:a", "aac", out_path]
+        # encoding/errors 指定なしだと、失敗時に ffmpeg が日本語パスをUTF-8で
+        # 吐き返したとき cp932 厳格デコードが例外を投げ、下の RuntimeError に届かない。
         proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
                               creationflags=CREATE_NO_WINDOW)
         if proc.returncode != 0 or not os.path.exists(out_path):
             raise RuntimeError(f"変換失敗: {proc.stderr or proc.stdout or 'unknown'}")

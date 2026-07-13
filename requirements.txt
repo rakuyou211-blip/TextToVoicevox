@@ -1,0 +1,15 @@
+# TextToVoicevox の実行に必要なライブラリ（setup.bat / setup.command が使う）
+# 初回セットアップ時だけネット接続が必要。以降はオフラインで動作します。
+#
+# バージョンに幅を持たせつつ“次のメジャー”は弾く。将来pypdfium2やPillowが
+# 破壊的な新メジャーを出しても、まっさらな環境の初回インストールが勝手に壊れないため。
+
+pypdfium2>=4,<6          # PDFの解析・ページ描画
+pillow>=10,<13           # 画像処理（前処理・クリップボード画像の取り込み）
+requests>=2.28,<3        # VOICEVOXエンジンとのHTTP通信
+
+# ドラッグ＆ドロップ（無くてもアプリは起動する。入れると画面へ直接放り込める）
+tkinterdnd2>=0.3,<1
+
+# macOS 専用: Apple Vision フレームワークでのオフラインOCR
+pyobjc-framework-Vision>=9 ; sys_platform == "darwin"
