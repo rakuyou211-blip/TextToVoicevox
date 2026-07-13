@@ -21,7 +21,7 @@ You give it a file. It pulls the text out, cleans it up, and reads it aloud in a
 - **Subtitles** — produce a `.srt` subtitle file timed to the audio.
 - **Pronunciation dictionary** — teach it how to read names or words it gets wrong, once, and it remembers.
 - **OCR cleanup** — find-and-replace and batch rules to fix common OCR mistakes before reading.
-- **Aozora Bunko ruby removal** — strips the ruby / furigana markup from Aozora Bunko texts so they read cleanly.
+- **Ruby / furigana removal** — strips ruby markup from Aozora Bunko texts, and `漢字(かんじ)`-style ruby from web novels, so they read cleanly.
 - **Command line** — there's a CLI too, if you'd rather script it than click.
 
 The current release is **v1.4.0**, which was a big update (around 25 new features). It's moving fast, so expect some sharp edges.
@@ -48,7 +48,7 @@ This app is the **last** of three pieces. You need all three, in this order. The
 VOICEVOX is a separate, free program that actually makes the voices. It is **not included** with this app — you download and install it yourself from the official VOICEVOX site, then **launch it and leave it running**. This app talks to VOICEVOX on your own machine at `http://127.0.0.1:50021`. If VOICEVOX isn't running, no audio will come out.
 
 **② Install Python**
-This app is a Python program. If you don't have Python yet, install it first (a recent Python 3 from the official python.org installer is fine). On Windows, tick "Add Python to PATH" during install.
+This app is a Python program. If you don't have Python yet, install it first (**Python 3.10 or newer** from the official python.org installer is recommended). On Windows, tick "Add Python to PATH" during install. The python.org installers for Windows and macOS already include tkinter, which the app's screen uses.
 
 **③ Install this app**
 Download the release zip (below) and unzip it somewhere. Then:
@@ -56,6 +56,12 @@ Download the release zip (below) and unzip it somewhere. Then:
 - **macOS:** run `setup.command`
 
 The setup script creates a local virtual environment and installs the dependencies for you. After that first setup, everything runs offline.
+
+Once setup finishes, launch the app itself:
+- **Windows:** double-click `起動.bat`
+- **macOS:** run `起動.command`
+
+If it won't start, run `デバッグ起動.bat` / `デバッグ起動.command` instead — it opens a console window so you can read the actual error.
 
 > Heads up: right now this is distributed as a **script zip**, not a ready-made `.exe` or `.app`. There is no packaged executable yet. That's on my list, but it isn't here today, and I'd rather say so than pretend otherwise.
 
@@ -71,7 +77,8 @@ This app is **not code-signed** (signing certificates cost money I don't have ye
 You may see *"Windows protected your PC."* This appears for apps it hasn't seen signed before. If you want to continue, click **More info → Run anyway**. If you'd rather be careful first, that's completely reasonable.
 
 **macOS — Gatekeeper**
-You may see *"cannot be opened because it is from an unidentified developer"* or *"Apple could not verify…"*. If you choose to continue, you can right-click (or Control-click) the file and choose **Open**, or allow it under **System Settings → Privacy & Security**.
+You may see *"cannot be opened because it is from an unidentified developer"* or *"Apple could not verify…"*. If you choose to continue, you can right-click (or Control-click) the file and choose **Open**, or allow it under **System Settings → Privacy & Security**. If it still refuses, you can clear the download quarantine flag from Terminal:
+`xattr -dr com.apple.quarantine "/path/to/the/unzipped/folder"`
 
 **Antivirus false positives**
 Unsigned scripts sometimes get flagged as "suspicious" even when they're harmless. That's a false positive from being new and unsigned, not proof of anything.
