@@ -22,7 +22,7 @@ from xml.etree import ElementTree
 
 # アプリのバージョン（タイトルバー・CLI --version・不具合報告の目印に使う）。
 # リリースごとにここだけ更新する。
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.9.0"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
@@ -56,6 +56,21 @@ def is_cjk(ch: str) -> bool:
         0x4E00 <= o <= 0x9FFF or   # 漢字
         0xF900 <= o <= 0xFAFF or   # 互換漢字
         0xFF00 <= o <= 0xFFEF      # 全角英数・半角カナ等
+    )
+
+
+def is_jp_script_char(ch: str) -> bool:
+    """『日本語の中身の文字』か＝ひらがな・カタカナ・漢字（半角カナ含む）。
+    is_cjk と違い、全角の英数・記号や句読点は含めない（“文字”と“区切り記号”を分ける用途）。"""
+    if not ch:
+        return False
+    o = ord(ch)
+    return (
+        0x3040 <= o <= 0x30FF or   # ひらがな・カタカナ（ー含む）
+        0x3400 <= o <= 0x4DBF or   # 漢字拡張A
+        0x4E00 <= o <= 0x9FFF or   # 漢字
+        0xF900 <= o <= 0xFAFF or   # 互換漢字
+        0xFF66 <= o <= 0xFF9D       # 半角カタカナ
     )
 
 
@@ -126,6 +141,237 @@ def join_wrapped_lines(text: str, max_len: int = 90) -> str:
     return "\n\n".join(result_paras)
 
 
+# 折り返し（視覚的な改行）で1文が複数行に割れたものだけを連結するための下限長。
+# これ以上の長さの行が文末記号なしで途切れていれば「折り返しらしい」とみなす。
+# 未満の短い行は箇条書き・ラベル・短い見出しの可能性が高いので連結しない。
+# ※ レイアウト座標が無いテキストだけからでは「折り返し」と「別々の短い見出し」を
+#   完全には区別できない（日本語の見出しは句点で終わらないため）。誤連結を避けたい
+#   場合はこの機能をOFFにする。既定OFF。真に堅牢にするにはOCRの行の外接矩形が必要。
+_SMART_JOIN_MIN_LEN = 16
+
+
+def _smart_join_sep(last: str, first: str):
+    """境界文字が“折り返しの継続”として連結可能かを返す。可なら区切り文字、不可なら None。
+    日本語スクリプト同士は空文字（詰める）、半角英数同士は空白。それ以外（記号・箇条書き・
+    括弧・日本語⇄英字の切替）は別ブロックとみなして連結しない。"""
+    if is_jp_script_char(last) and is_jp_script_char(first):
+        return ""
+    if last.isascii() and last.isalnum() and first.isascii() and first.isalnum():
+        return " "
+    return None
+
+
+def smart_join_wrapped(text: str) -> str:
+    """OCR等の“折り返しで途切れた文”を連結する（join_wrapped_lines より保守的）。
+    隣接行を連結するのは、直前の“元の行”が一定長以上・文末記号なしで、境界の字種が
+    継続可能なとき（詳細は _smart_join_sep）。空行/空白のみ行は段落境界として連結を断つ。
+
+    注意: レイアウト座標を持たないテキストだけからでは、折り返しと「別々の短い見出し」を
+    完全には区別できない。長い見出しが2本続くと連結され得る点に留意（既定OFF・opt-in）。"""
+    out = []
+    prev_len = 0  # 直前に置いた“元の行”の長さ。段落先頭・空行直後は0＝連結不可（連鎖防止）
+    for raw in text.split("\n"):
+        ln = raw.strip()
+        if not ln:
+            out.append("")        # 空行/空白のみ行＝段落境界
+            prev_len = 0
+            continue
+        if (prev_len >= _SMART_JOIN_MIN_LEN and out and out[-1]
+                and out[-1][-1] not in _SENT_ENDERS):
+            sep = _smart_join_sep(out[-1][-1], ln[0])
+            if sep is not None:
+                out[-1] += sep + ln
+                prev_len = len(ln)   # 連鎖防止: 次の判定は“今つないだ元の行”の長さで見る
+                continue
+        out.append(ln)
+        prev_len = len(ln)
+    return "\n".join(out)
+
+
+# OCRの行“座標”を使った折り返し連結のしきい値（すべて画像サイズに対する正規化[0,1]）。
+_REFLOW_COL_TOL = 0.06      # 左端がこの差以内なら同じ列（段落）
+_REFLOW_GAP_MAX = 1.0       # 行間がこの倍率(×行高)以内なら折り返し、超えたら別ブロック
+_REFLOW_MARGIN_TOL = 0.04   # 右端が列の右余白にこの差以内まで達していれば「行が一杯＝折り返し」
+_REFLOW_MIN_MARGIN = 0.30   # 列の右余白がこの位置未満（＝とても短い塊）なら折り返し判定しない
+
+
+def _ocr_line_height(l) -> float:
+    """1行の外接矩形の高さ（正規化）。退化（0以下）は極小値に丸める。"""
+    return max(float(l["y1"]) - float(l["y0"]), 1e-6)
+
+
+def _ocr_median_height(items) -> float:
+    """行高の代表値（中央値）。少数のロゴ/日時ラベルが混じっても本文の高さに寄る。"""
+    heights = sorted(_ocr_line_height(l) for l in items)
+    return heights[len(heights) // 2]
+
+
+def _group_ocr_blocks(items: list, h: float) -> list:
+    """縦に連続し同じ列（左端が一致）の行を1ブロック（段落候補）にまとめる。
+    items は (y0, x0) 昇順に整列済み・非空であること。h は行高の代表値（中央値）。
+    行間が大きい／左端がずれる行は別ブロックの先頭になる。右余白等をブロック内だけで
+    測れるようにして、離れたフッター等が別ブロックの判定を汚染するのを防ぐ。
+    reflow_ocr_lines（折り返し連結）と strip_overlay_labels（ラベル除去）で共有する。"""
+    blocks = [[items[0]]]
+    for line in items[1:]:
+        prev = blocks[-1][-1]
+        same_col = abs(float(line["x0"]) - float(prev["x0"])) <= _REFLOW_COL_TOL
+        gap = float(line["y0"]) - float(prev["y1"])
+        if same_col and -0.5 * h <= gap <= _REFLOW_GAP_MAX * h:
+            blocks[-1].append(line)
+        else:
+            blocks.append([line])
+    return blocks
+
+
+def reflow_ocr_lines(lines: list) -> str:
+    """OCRの行（テキスト＋外接矩形）から、折り返しで割れた1文だけを座標で確実に連結する。
+    lines: [{"text": str, "x0","x1","y0","y1": float(正規化, y0=上端 / y1=下端)}, ...]
+    連結の条件:
+      ・直前の“元の行”が列の右余白いっぱいまで達している（＝折り返された行）
+      ・同じ列（左端が一致）で、行間が通常の1行ぶん以内（別ブロックの大きな空きではない）
+      ・直前の行が文末記号(。！？…)で終わっていない
+    右余白まで届いている＝折り返しと座標で確定しているので、境界が鉤括弧「」や読点、で
+    終わっていても（文末記号でなければ）連結する。英単語同士だけ空白、他は詰める。
+    見出し・箇条書き・別段落は「右端が短い」「行間が空く」ので自然に連結対象外になる。
+    座標が使えるため、テキストだけの smart_join_wrapped と違い誤連結がほぼ起きない。"""
+    items = [l for l in lines if str(l.get("text", "")).strip()]
+    if not items:
+        return ""
+    items = sorted(items, key=lambda l: (round(float(l["y0"]), 4), float(l["x0"])))
+    h = _ocr_median_height(items)
+
+    # 1) 縦に連続し同じ列の行を「ブロック（段落候補）」にまとめる。
+    blocks = _group_ocr_blocks(items, h)
+
+    # 2) 各ブロック内で「右余白いっぱいまで達した行＝折り返し」の連続を連結する。
+    out = []
+    for block in blocks:
+        margin = max(float(l["x1"]) for l in block)
+
+        def _full(line):
+            return (margin >= _REFLOW_MIN_MARGIN
+                    and float(line["x1"]) >= margin - _REFLOW_MARGIN_TOL)
+
+        merged = [str(block[0]["text"]).strip()]
+        prev_full = _full(block[0])
+        for line in block[1:]:
+            t = str(line["text"]).strip()
+            pa = merged[-1][-1] if merged[-1] else ""
+            if prev_full and pa and pa not in _SENT_ENDERS:
+                # 折り返しは座標で確定済み。英単語同士だけ空白、他（日本語・記号）は詰める。
+                sep = " " if (pa.isascii() and pa.isalnum()
+                              and t[0].isascii() and t[0].isalnum()) else ""
+                merged[-1] += sep + t
+            else:
+                merged.append(t)
+            prev_full = _full(line)
+        out.extend(merged)
+    return "\n".join(out)
+
+
+# ============================================================
+#  映像内オーバーレイ・ラベル行の除去（strip_overlay_labels）
+# ============================================================
+# ニュース画面のOCRには、局ロゴ・番組名・日時・カテゴリ表示（例「MBSニュース」「国内」）など
+# “記事本文でない短い日本語ラベル”が混じる。これらは正しい日本語なので、テキストだけでは
+# 本文中の短語（本文に出る「国内」等）と区別できない＝denoise では消せない。そこでOCRの
+# 行座標・文字サイズを使い、本文から外れた孤立ラベル行“だけ”を保守的に除く。
+# 最優先原則: 本文の取りこぼしは厳禁（迷ったら残す）。単一条件では絶対に落とさない。
+#
+# しきい値の根拠（実画像=MBSニュースの Apple Vision 実測で調整。本文中央値 H=0.035 に対し
+# ロゴ=0.57H・カテゴリ=0.67H・日時=0.72H と、本文（0.95〜1.09H）と明確に分かれた）:
+#   ・行高が本文中央値 H に対し 0.75H 未満 / 1.40H 超 → 異常サイズ（小ロゴ/カテゴリ・大ロゴ）。
+#     本文の行高ばらつき（±約10%）は含めない安全な境目。
+_LABEL_SMALL_H = 0.75
+_LABEL_LARGE_H = 1.40
+#   ・画面最上部（上位15%）はロゴ・日時・カテゴリの定位置。ここにある短い行はラベル候補。
+_LABEL_HEADER_Y = 0.15
+#   ・“短い行”＝ラベル長の上限（文字数）。実測ラベルは 国内=2, MBSニュース≈6〜10, TBSテレビ≈10。
+#     記事の本文・見出しはこれより長い。この長さ以下の行だけを位置/孤立シグナルの対象にする。
+_LABEL_SHORT_CHARS = 10
+#   ・これ以上の長さの行は“ラベルではない本文/見出し”として無条件に残す（保護）。日時ラベルも
+#     ここで保護され、日付だけの行は後段の denoise が確実に落とす（役割分担）。
+_LABEL_KEEP_CHARS = 16
+#   ・孤立ラベルは本文の右端（本文ブロックの最大x1）にこの差以上届かない＝全幅の本文行ではない。
+_LABEL_MARGIN_TOL = 0.10
+#   ・ラベルと判定するのに必要な“シグナル数”。単一条件では落とさない（誤除去防止の要）。
+#     位置・孤立の両シグナルは「短い行」を含意するので、2つ以上満たす行は必ず短い。
+_LABEL_MIN_SIGNALS = 2
+#   ・本文ブロック（複数行の段落）が成立しない少数行の入力ではラベル判定をしない（安全側）。
+_LABEL_MIN_LINES = 4
+
+# 本文シグナル（文末記号・鉤括弧）。これを含む行は文/引用＝本文とみなし必ず残す。
+# ラベル（国内/MBSニュース/国際/日時）はこれらを含まないので保護対象を汚さない。
+_LABEL_PROTECT_PUNCT = "。．！？!?「」『』"
+
+
+def strip_overlay_labels(lines: list) -> list:
+    """OCRの行（テキスト＋外接矩形）から、記事本文でない“映像内オーバーレイ・ラベル行”
+    （局ロゴ・番組名・日時・カテゴリ表示 例「MBSニュース」「国内」）だけを座標で保守的に除く。
+    入力/出力とも [{"text","x0","x1","y0","y1"}] のリスト（reflow_ocr_lines の前段で使う）。
+
+    最優先原則は本文の取りこぼし厳禁（迷ったら残す）＝単一条件では絶対に落とさない。
+    本文＝複数行が縦に連なる段落ブロック。そこから外れた行のうち、次の3シグナルを
+    2つ以上（_LABEL_MIN_SIGNALS）満たす行“だけ”を落とす:
+      A. 文字サイズ（行高）が本文の中央値と大きく違う（小さいロゴ/カテゴリ・大きい局ロゴ）
+      B. 画面最上部（ヘッダ域）にある短い行（ロゴ・日時・カテゴリの定位置）
+      C. 1行だけのブロックで本文の右端に届かない短い行（本文の折り返しではない孤立行）
+    次のいずれかに当てはまる行は本文とみなし“必ず”残す（保護）:
+      ・文末記号や鉤括弧（。！？「」）を含む＝文/引用
+      ・複数行ブロックの一部＝段落本文
+      ・一定長以上（_LABEL_KEEP_CHARS）＝見出し/本文
+    本文ブロックが立たない少数行の入力では何もしない（安全側で全て残す）。
+
+    既知の限界: “最上部・小・孤立・ごく短い”行は、カテゴリ表示（国内/国際）と、稀にある
+    ごく短い見出し（例「第一章」「速報」）とを座標だけでは区別できない。この位置・形の行は
+    ラベルとして落とし得る（本タスクの狙いは前者の除去なので許容範囲）。段落本文・句読点を
+    含む行・一定長以上の見出しは常に保護され、記事本文の取りこぼしは起きない。"""
+    items = [l for l in lines if str(l.get("text", "")).strip()]
+    if len(items) < _LABEL_MIN_LINES:
+        return lines
+    items = sorted(items, key=lambda l: (round(float(l["y0"]), 4), float(l["x0"])))
+    h = _ocr_median_height(items)
+    blocks = _group_ocr_blocks(items, h)
+    block_len_of = {id(l): len(b) for b in blocks for l in b}
+
+    # 本文＝複数行ブロックの行。ここから本文の行高中央値 H と右端 body_right を測る。
+    body = [l for b in blocks if len(b) >= 2 for l in b]
+    if not body:
+        return lines            # 段落が立たない＝本文を特定できない。安全側で全て残す。
+    body_h = _ocr_median_height(body)
+    body_right = max(float(l["x1"]) for l in body)
+
+    keep = []
+    for l in items:
+        text = str(l["text"]).strip()
+        block_len = block_len_of[id(l)]
+        # 日時・数値・記号・ハンドルの“厳密ノイズ”（denoise と同じ判定）。本文ではないので
+        # 下の長さ保護からは外し、位置/サイズが伴えばラベルとして落とせるようにする。
+        strict_noise = _denoise_is_strict_noise(text)
+        # --- 保護（本文シグナル）: どれか1つでも該当すれば必ず残す ---
+        #   句読点/鉤括弧を含む＝文・引用 / 複数行ブロックの一部＝段落本文 / 一定長以上＝本文。
+        #   ただし“厳密ノイズ”は長さがあっても本文ではないため長さ保護の対象にしない。
+        if (any(ch in text for ch in _LABEL_PROTECT_PUNCT)
+                or block_len >= 2
+                or (len(text) >= _LABEL_KEEP_CHARS and not strict_noise)):
+            keep.append(l)
+            continue
+        # --- ラベル・シグナル（2つ以上満たせば落とす）---
+        # “ラベルらしい中身”＝短い行、または日時/数値/記号/ハンドルの厳密ノイズ。位置(B)と
+        # 孤立(C)のシグナルはこの条件を伴わせることで、長い本文行が位置だけで落ちるのを防ぐ。
+        labely = len(text) <= _LABEL_SHORT_CHARS or strict_noise
+        lh = _ocr_line_height(l)
+        sig_size = lh < _LABEL_SMALL_H * body_h or lh > _LABEL_LARGE_H * body_h
+        sig_header = float(l["y0"]) <= _LABEL_HEADER_Y and labely
+        sig_isolated = (block_len == 1 and labely
+                        and float(l["x1"]) < body_right - _LABEL_MARGIN_TOL)
+        if sig_size + sig_header + sig_isolated >= _LABEL_MIN_SIGNALS:
+            continue            # ラベル行 → 落とす
+        keep.append(l)
+    return keep
+
+
 def split_sentences(text: str) -> list:
     """文末記号で文を分割し、1文1要素のリストを返す（記号は保持）。"""
     sentences = []
@@ -145,20 +391,204 @@ def split_sentences(text: str) -> list:
     return [s for s in sentences if s]
 
 
+# ============================================================
+#  画面キャプチャのノイズ除去（denoise_capture）
+# ============================================================
+# ニュース番組やSNS埋め込みを含む「画面キャプチャ」のOCR結果には、記事本文以外の
+# “映像内オーバーレイ文字”（局ロゴ・時刻・SNSハンドル・矢印など）が混ざる。これらを
+# 1行単位で落とす。方針は「高精度・低誤削除」＝迷ったら残す。本文の取りこぼしは厳禁。
+#
+# しきい値（根拠つき）:
+#   ・行のCJK比率＝その行の非空白文字のうち日本語・全角系(is_cjk)が占める割合。
+#     普通の日本語文は英単語や数字が混ざっても 0.5 を大きく超える。0.30 未満なら
+#     「実質ほぼ非日本語」とみなす保守的な下限。
+_DENOISE_LINE_CJK_MIN = 0.30
+#   ・短い英字断片(ルールA)を除去してよいのは「日本語主体の文書」だけ。
+#     判定は “比率が高い” か “日本語が一定量ある” のどちらか。後者を入れるのは、
+#     ニュース番組にSNSの英文ツイートが長々と埋め込まれると比率だけでは日本語が
+#     少数派に見えてしまうため。見出し＋本文ぶんの日本語があれば日本語文書とみなす。
+#     英語主体（日本語ほぼ皆無）の入力は両条件とも満たさず、英字行の全消しを防ぐ。
+_DENOISE_DOC_CJK_MIN = 0.50
+_DENOISE_DOC_CJK_MIN_CHARS = 20  # 見出し1本ぶん程度の日本語量
+# 行の日本語スクリプト比率がこれ未満なら「外国語ブロック/英字断片」とみなして落とす。
+# ひらがな・句読点を含む本文はこの判定より前（ルール1）で保護されるため、ここに来るのは
+# 助詞も句点も無いラベル/英文。0.20 は『20%減』(0.25)『iOS版』(0.25)を残し、英文(≈0)を落とす境目。
+_DENOISE_LINE_JP_MIN = 0.20
+
+# 本文を示す句読点・鉤括弧（全角）。これを含む行はノイズ判定に触れても必ず残す。
+_DENOISE_PROTECT_PUNCT = "。、！？「」『』"
+
+# 標準の日本語ノイズ除去対象になりやすい記号（矢印・囲み・箇条書き記号・区切り）。
+# 非空白文字がすべてこの集合なら「記号だけの行」として落とす。
+_DENOISE_SYMBOLS = set("←→↑↓⇒⇐▶◀▲▼△▽■□●○◆◇★☆♦♢•‣·・…‥※｜|/\\＿_—–―ー－~〜＞＜<>»«‹›【】〔〕")
+
+# 単独のタイムスタンプ／日付だけの行（行“全体”がこれらのトークンと区切りで埋まる）。
+# 文中に日付が現れる本文（例:「2026年7月14日に表明した。」）は助詞や句読点が残るため
+# フルマッチせず、この判定には掛からない（さらに保護ルールでも守られる）。
+_DENOISE_DATE_TOKEN = (
+    r"\d{4}年|\d{1,2}月|\d{1,2}日|"          # 和暦表記の年月日
+    r"\d{1,2}[:：]\d{2}(?:[:：]\d{2})?|"      # 時刻 HH:MM(:SS)
+    r"\d{1,4}/\d{1,2}(?:/\d{1,4})?|"          # スラッシュ日付 M/D・Y/M/D
+    r"[（(][日月火水木金土](?:曜日?)?[)）]|"  # 曜日 （火）
+    r"午前|午後"
+)
+# 日付トークン単体と、トークン間の区切り。行“全体”が日付だけかは、これらを
+# 左から貪欲に食べていく _denoise_is_date_only() で線形時間に判定する。
+# ※ ^(?:token|sep)+$ を1本のregexで書くと、スラッシュ日付トークンが数字列を
+#   指数的に分割し得て破滅的バックトラック（ReDoS）になるため、そうはしない。
+_DENOISE_DATE_TOKEN_RE = re.compile(_DENOISE_DATE_TOKEN)
+_DENOISE_DATE_SEP_RE = re.compile(r"[\s・,，.．\-]+")
+
+# 単独の数値・カウント行（例: 1.04 / 1.2万 / 1,234件）。単位の接尾辞まで許容。
+_DENOISE_NUM_LINE = re.compile(
+    r"^\s*[+\-]?\d+(?:[.,]\d+)*\s*(?:万|億|千|兆|%|％|人|件|回|票|位|K|k|M)?\s*$")
+
+
+def _denoise_cjk_ratio(s: str) -> float:
+    """行の非空白文字に占めるCJK文字の割合（0〜1）。空文字なら0。"""
+    chars = [c for c in s if not c.isspace()]
+    if not chars:
+        return 0.0
+    return sum(1 for c in chars if is_cjk(c)) / len(chars)
+
+
+def _denoise_has_hiragana(s: str) -> bool:
+    """ひらがな（助詞・送り仮名）を含むか。日本語“文”であることの強い目印。
+    タイムスタンプ・数値・ハンドル・矢印・英字断片にはひらがなが無いため、
+    『日付だけの行』と『文中に日付を含む本文』を安全に切り分けられる。"""
+    return any(0x3041 <= ord(c) <= 0x3096 for c in s)
+
+
+def _denoise_has_jp_script(s: str) -> bool:
+    """『日本語の中身の文字』＝ひらがな・カタカナ・漢字（半角カナ含む）を含むか。"""
+    return any(is_jp_script_char(c) for c in s)
+
+
+def _denoise_jp_ratio(s: str) -> float:
+    """行の非空白文字に占める『日本語の中身の文字』（かな・漢字）の割合（0〜1）。
+    英字だけの断片や英文ブロックは0付近、日本語ラベル・見出しは高い。
+    『20%減』『iOS版』のように数字・英字が多くても漢字を含む短い見出しは中程度で残る。"""
+    chars = [c for c in s if not c.isspace()]
+    if not chars:
+        return 0.0
+    return sum(1 for c in chars if is_jp_script_char(c)) / len(chars)
+
+
+def _denoise_symbol_only(s: str) -> bool:
+    """非空白文字がすべて記号集合なら True（矢印だけ・囲みだけの行）。"""
+    core_chars = [c for c in s if not c.isspace()]
+    return bool(core_chars) and all(c in _DENOISE_SYMBOLS for c in core_chars)
+
+
+def _denoise_is_date_only(s: str) -> bool:
+    """行“全体”が日付／時刻トークンと区切りだけで構成されるか（線形時間）。
+    左から貪欲にトークンor区切りを食べ、余りが出ずトークンを1つ以上含めば True。
+    途中に助詞や本文が残ればフルには食べきれず False（＝本文として残す・安全側）。"""
+    i, n = 0, len(s)
+    matched_token = False
+    while i < n:
+        m = _DENOISE_DATE_SEP_RE.match(s, i)
+        if m:
+            i = m.end()
+            continue
+        m = _DENOISE_DATE_TOKEN_RE.match(s, i)
+        if m and m.end() > i:
+            i = m.end()
+            matched_token = True
+            continue
+        return False  # トークンでも区切りでもない文字 → 日付だけの行ではない
+    return matched_token
+
+
+def _denoise_has_strong_jp(s: str) -> bool:
+    """本文であることの強いシグナル（句読点・鉤括弧・ひらがな）を含むか。
+    タイムスタンプ・数値・ハンドル・矢印・英字断片には現れないため、
+    『日付だけの行』と『文中に日付を含む本文』を確実に切り分けられる。"""
+    if any(p in s for p in _DENOISE_PROTECT_PUNCT):
+        return True
+    return _denoise_has_hiragana(s)
+
+
+def _denoise_is_strict_noise(s: str) -> bool:
+    """行“全体”が特定のノイズ形（記号だけ／日付だけ／数値だけ／ハンドル）か。
+    いずれも厳密一致なので本文には掛からない。長さ保護よりも優先する。"""
+    if not s:
+        return False
+    # E: 記号だけの行（矢印・囲み等）
+    if _denoise_symbol_only(s):
+        return True
+    # B: 単独のタイムスタンプ／日付だけの行
+    if _denoise_is_date_only(s):
+        return True
+    # C: 単独の数値・カウント行
+    if _DENOISE_NUM_LINE.fullmatch(s):
+        return True
+    # D: SNSハンドル行（先頭@／＠で、行が実質ASCII＝ハンドルそのもの）
+    if s[0] in "@＠" and _denoise_cjk_ratio(s) < _DENOISE_LINE_CJK_MIN:
+        return True
+    return False
+
+
+def denoise_capture(text: str) -> str:
+    """画面キャプチャOCRから“映像内オーバーレイ文字”を1行単位で除去する。
+    入力: 抽出直後の生テキスト（複数行）。出力: ノイズ行を落としたテキスト。
+    記事本文は絶対に残す方針（保守的判定・迷ったら残す）。空行は構造として残し、
+    後段の clean_text がまとめて処理する。
+
+    1行ごとの判定順（上ほど優先）:
+      1. 句読点・鉤括弧・ひらがなを含む → 本文シグナル。必ず残す。
+      2. 記号だけ／日付だけ／数値だけ／ハンドルの厳密一致 → 落とす。
+      3. 日本語の中身の文字（かな・漢字）を一切含まない行 → 落とす（文書が日本語主体のとき）。
+         英字オーバーレイ（THE/NEWS）や埋め込みの英文ツイート等の外国語ブロックが対象。
+         ※英語主体の入力は doc_is_jp が False になり、丸ごと消えることはない。
+      4. それ以外 → 残す（迷ったら残す）。2〜3文字の日本語ラベル等はここで残る。
+    """
+    lines = text.split("\n")
+    # 文書全体の日本語度（全行の非空白文字をまとめて評価）。英語主体の入力で
+    # 英字行を誤って全消ししないための doc レベルの門番。
+    all_chars = [c for ln in lines for c in ln if not c.isspace()]
+    cjk_count = sum(1 for c in all_chars if is_cjk(c))
+    doc_is_jp = bool(all_chars) and (
+        cjk_count / len(all_chars) >= _DENOISE_DOC_CJK_MIN
+        or cjk_count >= _DENOISE_DOC_CJK_MIN_CHARS)
+    out = []
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            out.append(ln)                       # 1'. 空行は残す（後段で整理）
+            continue
+        if _denoise_has_strong_jp(s):
+            out.append(ln)                       # 1. 本文シグナル → 残す
+            continue
+        if _denoise_is_strict_noise(s):
+            continue                             # 2. 厳密なノイズ → 落とす
+        if doc_is_jp and _denoise_jp_ratio(s) < _DENOISE_LINE_JP_MIN:
+            continue                             # 3. 日本語がごく僅かな行（英字/外国語ブロック）→ 落とす
+        out.append(ln)                           # 4. それ以外 → 残す
+    return "\n".join(out)
+
+
 def clean_text(raw: str, mode: str = "sentence",
                remove_blank: bool = True, keep_ascii_spaces: bool = True,
-               join_wrapped: bool = False,
-               paren_ruby: bool = False, normalize: bool = False) -> str:
+               join_wrapped: bool = False, smart_join: bool = False,
+               paren_ruby: bool = False, normalize: bool = False,
+               denoise: bool = False) -> str:
     """
     抽出生テキストをVOICEVOX向けに整形する。
     mode: "sentence" = 文ごとに改行（VOICEVOX推奨）/ "keep" = 元の改行を保持
-    join_wrapped: True で改行をまたいだ文を連結（小説・段落向け）。
-                  既定Falseでは元の改行を文の区切りとして尊重する（構造化文書で安全）。
+    join_wrapped: True で改行をまたいだ文を積極的に連結（小説・段落向け）。
+    smart_join: True で“折り返しで途切れた文”だけを賢く連結（見出し・リスト・別ブロックは尊重）。
+                join_wrapped が True のときはそちら（積極連結）を優先する。
+                いずれも既定Falseでは元の改行を文の区切りとして尊重する（後方互換）。
     paren_ruby: True で「漢字(かんじ)」型ルビを除去（Web小説向け）
     normalize: True で全角英数記号を半角に正規化
+    denoise: True で画面キャプチャの“映像内オーバーレイ文字”を前処理で除去
+             （既定Falseでは従来の出力を1バイトも変えない）
     """
     # 改行コード統一・全角スペース正規化の前処理
     text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    if denoise:
+        text = denoise_capture(text)
     if paren_ruby:
         text = strip_paren_ruby(text)
     if normalize:
@@ -172,9 +602,11 @@ def clean_text(raw: str, mode: str = "sentence",
 
     if mode == "sentence":
         if join_wrapped:
-            text = join_wrapped_lines(text)
+            text = join_wrapped_lines(text)          # 小説向け：積極連結
+        elif smart_join:
+            text = smart_join_wrapped(text)          # 既定推奨：折り返しだけ賢く連結
         # split_sentences は改行も区切りとして扱うため、
-        # join_wrapped=False なら元の改行は保たれる
+        # join_wrapped/smart_join がFalseなら元の改行は保たれる
         sents = split_sentences(text)
         text = "\n".join(sents)
     else:  # keep
@@ -383,10 +815,13 @@ def preprocess_image(img, enable: bool = True, max_side: int = 4000):
     return img
 
 
-def run_ocr(image_paths, lang="ja"):
+def run_ocr(image_paths, lang="ja", strip_labels=True):
     """
     画像パスのリストをOS標準のオフラインOCRに渡し、{path: text} を返す。
     Windows: Windows.Media.Ocr（PowerShellヘルパー） / macOS: Apple Vision（pyobjc）
+    strip_labels=True のとき、macOSでは行座標を使って“映像内オーバーレイ・ラベル行”
+    （局ロゴ・番組名・日時・カテゴリ）を除去する。denoise と同じON/OFFで効かせる想定。
+    Windowsは座標を持たないためラベル除去は非適用（現状維持）。
     """
     if not image_paths:
         return {}
@@ -396,7 +831,7 @@ def run_ocr(image_paths, lang="ja"):
         if APP_DIR not in sys.path:
             sys.path.insert(0, APP_DIR)  # 他ディレクトリからのimportでも ocr_mac を見つける
         import ocr_mac
-        return ocr_mac.recognize_files(image_paths, lang=lang)
+        return ocr_mac.recognize_files(image_paths, lang=lang, strip_labels=strip_labels)
     raise RuntimeError("この環境ではオフラインOCRを利用できません（Windows / macOS のみ対応）。")
 
 
@@ -450,10 +885,12 @@ def _find_powershell():
 #  ファイルからの抽出（progress_cb(done, total, msg) で進捗通知）
 # ============================================================
 def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
-                  lang="ja", progress_cb=None):
+                  lang="ja", progress_cb=None, strip_labels=True):
     """
     複数ファイル（PDF/画像/テキスト/Word/EPUB）からテキストを抽出して結合文字列を返す。
     pdf_mode: "auto"（テキスト層→無ければOCR） / "ocr"（常にOCR）
+    strip_labels: True で画像OCR時に“映像内オーバーレイ・ラベル行”を座標で除去（macOSのみ）。
+                  denoise と同じ値を渡す想定（--no-denoise / GUIチェックOFFでラベル除去もしない）。
     戻り値: (text, warnings:list)
     """
     from PIL import Image
@@ -530,7 +967,7 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                 progress_cb(total - 1, total, f"OCR実行中... ({len(ocr_jobs)}枚)")
             png_paths = [p for _, p in ocr_jobs]
             try:
-                ocr_result = run_ocr(png_paths, lang=lang)
+                ocr_result = run_ocr(png_paths, lang=lang, strip_labels=strip_labels)
             except Exception as e:
                 warnings.append(f"OCRエラー: {e}")
                 ocr_result = {}

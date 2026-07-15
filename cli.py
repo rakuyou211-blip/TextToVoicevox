@@ -40,11 +40,17 @@ def build_parser():
     p.add_argument("--mode", choices=["sentence", "keep"], default="sentence",
                    help="整形: sentence=文ごとに改行（既定）/ keep=元の改行維持")
     p.add_argument("--join-wrapped", action="store_true",
-                   help="改行で途切れた文を連結（小説向け）")
+                   help="改行で途切れた文を積極的に連結（小説向け）")
+    p.add_argument("--smart-join", action=argparse.BooleanOptionalAction, default=False,
+                   help="折り返しで途切れた文を連結（1段組みの本文向け。既定OFF）")
     p.add_argument("--paren-ruby", action="store_true",
                    help="「漢字(かんじ)」型ルビを除去（Web小説向け）")
     p.add_argument("--normalize", action="store_true",
                    help="全角英数記号を半角に正規化")
+    p.add_argument("--denoise", action=argparse.BooleanOptionalAction, default=True,
+                   help="画面キャプチャの映像内オーバーレイ文字（時刻・局ロゴ・SNSハンドル・"
+                        "矢印・英文ブロック、および局ロゴ/番組名/カテゴリ等のラベル）を"
+                        "除去（既定ON。--no-denoise で無効）")
     p.add_argument("--pdf-ocr", action="store_true", help="PDFを常にOCRする")
     p.add_argument("--dpi", type=int, default=300, help="OCR解像度（既定300）")
     p.add_argument("--url", default="http://127.0.0.1:50021",
@@ -73,11 +79,14 @@ def main(argv=None):
     print(f"[1/3] テキスト抽出中... ({len(args.inputs)}ファイル)")
     raw, warnings = core.extract_files(
         args.inputs, pdf_mode=("ocr" if args.pdf_ocr else "auto"), dpi=args.dpi,
+        strip_labels=args.denoise,
         progress_cb=lambda d, t, m: print(f"  {m}"))
     for w in warnings:
         print(f"  警告: {w}", file=sys.stderr)
     text = core.clean_text(raw, mode=args.mode, join_wrapped=args.join_wrapped,
-                           paren_ruby=args.paren_ruby, normalize=args.normalize)
+                           smart_join=args.smart_join,
+                           paren_ruby=args.paren_ruby, normalize=args.normalize,
+                           denoise=args.denoise)
     if not text:
         raise SystemExit("テキストを抽出できませんでした。")
 

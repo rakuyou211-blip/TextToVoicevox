@@ -121,6 +121,250 @@ class TestJoinWrappedLines:
 
 
 # ============================================================
+#  is_jp_script_char
+# ============================================================
+class TestIsJpScriptChar:
+    def test_kana_kanji_true(self):
+        assert core.is_jp_script_char("あ")
+        assert core.is_jp_script_char("ア")
+        assert core.is_jp_script_char("漢")
+        assert core.is_jp_script_char("ｱ")  # 半角カナ
+
+    def test_ascii_and_symbols_false(self):
+        assert not core.is_jp_script_char("A")
+        assert not core.is_jp_script_char("1")
+        assert not core.is_jp_script_char("、")   # 全角句読点は“中身”ではない
+        assert not core.is_jp_script_char("１")   # 全角数字も対象外
+        assert not core.is_jp_script_char("")
+
+
+# ============================================================
+#  smart_join_wrapped（折り返しだけ賢く連結）
+# ============================================================
+class TestSmartJoinWrapped:
+    def test_joins_long_wrapped_cjk_sentence(self):
+        raw = ("「貨物の価値の20%の払い戻しを求める」トランプ大統領がホ\n"
+               "ルムズ海峡の安全航行の対価を各国に請求")
+        assert core.smart_join_wrapped(raw) == \
+            "「貨物の価値の20%の払い戻しを求める」トランプ大統領がホルムズ海峡の安全航行の対価を各国に請求"
+
+    def test_joins_body_across_three_lines(self):
+        raw = ("アメリカのトランプ大統領は、イランがホルムズ海峡で商船への攻撃を続けている\n"
+               "ことを受けて、イランの港湾への船の出入りの封鎖措置を\n"
+               "開始すると表明しました。")
+        out = core.smart_join_wrapped(raw)
+        assert out.count("\n") == 0
+        assert out.endswith("表明しました。")
+
+    def test_does_not_join_across_bullet(self):
+        raw = ("トランプ大統領がホルムズ海峡の対価を各国に請求\n"
+               "■ホルムズ海峡封鎖措置再開")
+        assert core.smart_join_wrapped(raw).split("\n") == [
+            "トランプ大統領がホルムズ海峡の対価を各国に請求",
+            "■ホルムズ海峡封鎖措置再開"]
+
+    def test_does_not_join_across_script_change(self):
+        # 日本語行の直後の英字行は別ブロック（字種の切替）
+        raw = "米軍がイラン港湾を封鎖する措置を再開すると表明\nTHE"
+        assert core.smart_join_wrapped(raw).split("\n") == [
+            "米軍がイラン港湾を封鎖する措置を再開すると表明", "THE"]
+
+    def test_keeps_short_list_items(self):
+        assert core.smart_join_wrapped("りんご\nみかん\nぶどう") == "りんご\nみかん\nぶどう"
+
+    def test_keeps_short_wrap_below_threshold(self):
+        # 16字未満の行は折り返しとみなさない（従来どおり改行を尊重）
+        assert core.smart_join_wrapped("これは改行で\n途切れた文です。") == \
+            "これは改行で\n途切れた文です。"
+
+    def test_no_join_after_sentence_ender(self):
+        raw = "とても長い一文がここで終わりました。\n次のあたらしい文がここから始まります"
+        assert core.smart_join_wrapped(raw).split("\n")[0].endswith("。")
+
+    def test_joins_wrapped_ascii_with_space(self):
+        raw = "This is a fairly long english line that\nwraps onto the next"
+        assert core.smart_join_wrapped(raw) == \
+            "This is a fairly long english line that wraps onto the next"
+
+    def test_blank_line_keeps_paragraph(self):
+        raw = "とても長い最初の段落がここに書いてある\n\n二つ目の段落がここに書いてある"
+        assert "\n\n" in core.smart_join_wrapped(raw)
+
+    def test_whitespace_only_line_breaks_paragraph(self):
+        # 空白のみの行（NBSP等）も段落境界として扱い、前後を糊付けしない
+        a = "アメリカの大統領が海峡の封鎖措置について表明した"
+        b = "日経平均株価は大きく下落し年初来安値を更新した"
+        out = core.smart_join_wrapped(a + "\n \n" + b)
+        assert a in out.split("\n") and b in out.split("\n")
+
+    def test_cascade_stops_at_short_line(self):
+        # 長い行が“リスト全体”を飲み込まない（短い行に達したら連鎖を止める）
+        raw = "本日午後に首相官邸で開かれた関係閣僚会議で決まった重点項目は次の通り\nテロ\n対策\n強化"
+        lines = core.smart_join_wrapped(raw).split("\n")
+        assert "対策" in lines and "強化" in lines  # 短い後続項目は独立のまま
+
+    def test_empty(self):
+        assert core.smart_join_wrapped("") == ""
+
+
+# ============================================================
+#  reflow_ocr_lines（座標を使った折り返し連結）
+# ============================================================
+def _ln(text, x0, x1, y0, y1):
+    return {"text": text, "x0": x0, "x1": x1, "y0": y0, "y1": y1}
+
+
+class TestReflowOcrLines:
+    # Apple Vision の実測に近い合成座標（正規化・y0=上端）
+    HEAD = _ln("ホルムズ海峡の封鎖措置", 0.033, 0.345, 0.043, 0.094)   # 短い見出し
+    B1 = _ln("アメリカの大統領はイランが海峡で攻撃を続けて", 0.029, 0.996, 0.171, 0.228)
+    B2 = _ln("いることを受けて港湾の封鎖措置を開始すると表明しま", 0.037, 0.995, 0.237, 0.288)
+    LAST = _ln("した。", 0.037, 0.108, 0.303, 0.363)                    # 段落末（短い）
+    L1 = _ln("重点項目", 0.033, 0.145, 0.456, 0.510)
+    L2 = _ln("テロ対策", 0.033, 0.148, 0.519, 0.575)
+
+    def test_joins_wrapped_full_lines(self):
+        out = core.reflow_ocr_lines([self.B1, self.B2, self.LAST])
+        assert out == ("アメリカの大統領はイランが海峡で攻撃を続けて"
+                       "いることを受けて港湾の封鎖措置を開始すると表明しました。")
+
+    def test_heading_and_list_stay_separate(self):
+        out = core.reflow_ocr_lines(
+            [self.HEAD, self.B1, self.B2, self.LAST, self.L1, self.L2]).split("\n")
+        assert "ホルムズ海峡の封鎖措置" in out          # 見出しは独立
+        assert "重点項目" in out and "テロ対策" in out    # 箇条書きは独立
+        assert any(l.endswith("表明しました。") for l in out)  # 本文は1文に連結
+        assert len(out) == 4
+
+    def test_separate_columns_not_joined(self):
+        c1 = _ln("ひだりのれつ", 0.03, 0.45, 0.10, 0.15)
+        c2 = _ln("みぎのれつ", 0.55, 0.95, 0.10, 0.15)
+        assert len(core.reflow_ocr_lines([c1, c2]).split("\n")) == 2
+
+    def test_short_block_not_treated_as_wrap(self):
+        # 右余白まで届かない短い塊は折り返しとみなさない（連結しない）
+        a = _ln("みじかい", 0.03, 0.20, 0.10, 0.15)
+        b = _ln("つぎのぎょう", 0.03, 0.20, 0.16, 0.21)
+        assert len(core.reflow_ocr_lines([a, b]).split("\n")) == 2
+
+    def test_big_gap_breaks_block(self):
+        # 行間が大きい（別ブロック）なら、たとえ前行が長くても連結しない
+        a = _ln("よこいっぱいにひろがるながいぎょうがここにある", 0.03, 0.98, 0.10, 0.16)
+        b = _ln("とおくはなれたべつのぎょう", 0.03, 0.60, 0.60, 0.66)
+        assert len(core.reflow_ocr_lines([a, b]).split("\n")) == 2
+
+    def test_joins_wrap_ending_in_bracket(self):
+        # 座標で折り返し確定なら、行末が鉤括弧「」でも次行と連結する
+        a = _ln("姫路市豊富町にある工場で爆発があったと「日本化薬」", 0.05, 0.97, 0.10, 0.14)
+        b = _ln("の担当者から通報があった", 0.05, 0.40, 0.15, 0.19)
+        assert core.reflow_ocr_lines([a, b]) == \
+            "姫路市豊富町にある工場で爆発があったと「日本化薬」の担当者から通報があった"
+
+    def test_distant_line_does_not_contaminate_margin(self):
+        # 右余白はブロック内だけで測る。離れた行（フッター等）が同じx0でも、
+        # 別ブロックの短い見出しを“折り返し”に化けさせて誤連結してはいけない。
+        a = _ln("本日の予定", 0.10, 0.28, 0.10, 0.14)
+        b = _ln("会議あり", 0.10, 0.22, 0.15, 0.19)
+        footer = _ln("ページ下部の注記文言", 0.10, 0.31, 0.90, 0.94)
+        out = core.reflow_ocr_lines([a, b, footer]).split("\n")
+        assert out == ["本日の予定", "会議あり", "ページ下部の注記文言"]
+
+    def test_empty(self):
+        assert core.reflow_ocr_lines([]) == ""
+
+
+# ============================================================
+#  strip_overlay_labels（座標で“映像内オーバーレイ・ラベル行”を除去）
+# ============================================================
+def _texts(lines):
+    return {l["text"] for l in lines}
+
+
+class TestStripOverlayLabels:
+    # MBSニュース画像の Apple Vision 実測に近い合成座標（正規化・y0=上端, H≈0.035）。
+    LOGO = _ln("MBSニュース", 0.019, 0.188, 0.000, 0.020)          # 小・上部・孤立（0.57H）
+    DATE = _ln("2026年7月14日（火）19:48", 0.702, 0.917, 0.000, 0.025)  # 日時・上部（0.72H）
+    CAT = _ln("国内", 0.016, 0.054, 0.037, 0.060)                  # カテゴリ 小・上部・孤立（0.66H）
+    # 本文＝複数行が縦に連なる段落ブロック（H の基準・保護対象）
+    B1a = _ln("14日午後、兵庫県姫路市にある工場の実験室で爆発があり、男性2人が病院に搬送",
+              0.015, 0.895, 0.111, 0.146)
+    B1b = _ln("されました。このうち30代くらいの男性が意識不明の重体です。",
+              0.016, 0.702, 0.161, 0.196)
+    B2a = _ln("通報した従業員が爆発音を聞いて実験室に駆けつけたところ、男性が倒れているの",
+              0.015, 0.894, 0.456, 0.489)
+    B2b = _ln("を発見したということです。", 0.016, 0.314, 0.506, 0.540)
+
+    def _body(self):
+        return [self.B1a, self.B1b, self.B2a, self.B2b]
+
+    def test_drops_logo_and_datetime(self):
+        # 上部・小さめ・孤立のロゴ行と日時行を落とす。本文は残す。
+        kept = _texts(core.strip_overlay_labels([self.LOGO, self.DATE] + self._body()))
+        assert "MBSニュース" not in kept
+        assert self.DATE["text"] not in kept
+        assert self.B1a["text"] in kept and self.B1b["text"] in kept
+
+    def test_drops_short_category(self):
+        # 本文と別サイズ・上部・孤立の短いカテゴリ行（「国内」）を落とす。
+        kept = _texts(core.strip_overlay_labels([self.CAT] + self._body()))
+        assert "国内" not in kept
+        for b in self._body():
+            assert b["text"] in kept
+
+    def test_keeps_body_period_line(self):
+        # 句点を含む短い段落末は本文シグナル。上部・小・孤立でも必ず残す（保護）。
+        last = _ln("した。", 0.013, 0.079, 0.030, 0.062)
+        kept = _texts(core.strip_overlay_labels([last] + self._body()))
+        assert "した。" in kept
+
+    def test_keeps_body_block_member(self):
+        # 複数行ブロックの一部（段落末の短い行 B1b/B2b）は残す。
+        kept = _texts(core.strip_overlay_labels(self._body()))
+        assert self.B1b["text"] in kept and self.B2b["text"] in kept
+
+    def test_keeps_long_line_even_if_small_and_top(self):
+        # 小さめ・上部・孤立でも、一定長以上の行は見出し/本文として残す（単一シグナルでは落とさない）。
+        head = _ln("兵庫県姫路市豊富町の化学工場で爆発事故が発生", 0.03, 0.55, 0.004, 0.024)
+        kept = _texts(core.strip_overlay_labels([head] + self._body()))
+        assert head["text"] in kept
+
+    def test_single_signal_isolated_not_dropped(self):
+        # 本文と同じ高さ・中段・孤立の短い行（＝孤立シグナル“1つだけ”）は落とさない。
+        lonely = _ln("メモ書き", 0.40, 0.55, 0.400, 0.435)
+        kept = _texts(core.strip_overlay_labels([self.B1a, self.B1b, lonely,
+                                                 self.B2a, self.B2b]))
+        assert "メモ書き" in kept
+
+    def test_short_word_midbody_normal_size_kept(self):
+        # 本文中に紛れた短語（本文と同サイズ・中段・孤立の「国内」）は孤立1シグナルのみ→残す。
+        word = _ln("国内", 0.015, 0.055, 0.400, 0.435)
+        kept = _texts(core.strip_overlay_labels([self.B1a, self.B1b, word,
+                                                 self.B2a, self.B2b]))
+        assert "国内" in kept
+
+    def test_few_lines_unchanged(self):
+        # 本文ブロックが立たない少数行では何もしない（安全側）。
+        assert core.strip_overlay_labels([]) == []
+        two = [self.B1a, self.B1b]
+        assert core.strip_overlay_labels(two) == two
+
+    def test_no_body_block_keeps_all(self):
+        # 段落（複数行ブロック）が無い＝本文を特定できない。すべて孤立行でも全部残す。
+        a = _ln("あいう", 0.03, 0.20, 0.05, 0.09)
+        b = _ln("かきくけ", 0.50, 0.72, 0.05, 0.09)
+        c = _ln("さしす", 0.03, 0.20, 0.30, 0.34)
+        d = _ln("たちつて", 0.50, 0.72, 0.60, 0.64)
+        kept = _texts(core.strip_overlay_labels([a, b, c, d]))
+        assert kept == {"あいう", "かきくけ", "さしす", "たちつて"}
+
+    def test_full_scene_keeps_all_body(self):
+        # ロゴ+日時+カテゴリ+本文の実シーン: ラベル3行だけ消え、本文4行は全て残る。
+        scene = [self.LOGO, self.DATE, self.CAT] + self._body()
+        kept = _texts(core.strip_overlay_labels(scene))
+        assert kept == {b["text"] for b in self._body()}
+
+
+# ============================================================
 #  split_sentences
 # ============================================================
 class TestSplitSentences:
@@ -192,6 +436,25 @@ class TestCleanText:
         raw = "これは改行で\n途切れた文です。"
         assert core.clean_text(raw, mode="sentence", join_wrapped=False) == \
             "これは改行で\n途切れた文です。"
+
+    def test_smart_join_defaults_off_in_core(self):
+        # core.clean_text の既定は後方互換（smart_join=False＝連結しない）
+        raw = ("アメリカのトランプ大統領がホルムズ海峡の封鎖措置について\n"
+               "改めて表明した")
+        assert core.clean_text(raw, mode="sentence").count("\n") == 1
+
+    def test_smart_join_joins_long_wrap(self):
+        raw = ("アメリカのトランプ大統領がホルムズ海峡の封鎖措置について\n"
+               "改めて表明した")
+        assert core.clean_text(raw, mode="sentence", smart_join=True) == \
+            "アメリカのトランプ大統領がホルムズ海峡の封鎖措置について改めて表明した"
+
+    def test_join_wrapped_takes_precedence_over_smart(self):
+        # 両方Trueなら積極連結(join_wrapped)が優先され、短い折り返しも連結される
+        raw = "これは改行で\n途切れた文です。"
+        assert core.clean_text(raw, mode="sentence",
+                               join_wrapped=True, smart_join=True) == \
+            "これは改行で途切れた文です。"
 
     def test_empty_input(self):
         assert core.clean_text("") == ""
@@ -714,6 +977,266 @@ class TestCleanTextNewOptions:
     def test_defaults_off(self):
         out = core.clean_text("吾輩(わがはい)は猫である。")
         assert "(わがはい)" in out
+
+
+# ============================================================
+#  denoise_capture（画面キャプチャのノイズ除去）
+# ============================================================
+_FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+
+def _load_fixture(name):
+    with open(os.path.join(_FIXTURE_DIR, name), encoding="utf-8") as f:
+        return f.read()
+
+
+# 日本語の見出し＋本文を含む文脈（doc全体が日本語主体だと認識させる）。
+_JP_CONTEXT = ("トランプ大統領がホルムズ海峡封鎖を警告\n"
+               "アメリカのトランプ大統領は封鎖を表明した。")
+
+
+def _denoise_lines(noise_lines):
+    """ノイズ行を日本語文脈に混ぜて denoise_capture し、残った行を返す。"""
+    raw = _JP_CONTEXT + "\n" + "\n".join(noise_lines)
+    return core.denoise_capture(raw).split("\n")
+
+
+class TestDenoiseCapture:
+    def test_drops_short_english_overlay(self):
+        # 局ロゴ・英字オーバーレイの短い断片は落ちる（矢印＋短い英字も含む）
+        left = _denoise_lines(["NEWS", "THE", "TIME，", "LIVE", "← EXIT"])
+        for x in ["NEWS", "THE", "TIME，", "LIVE", "← EXIT"]:
+            assert x not in left
+
+    def test_drops_standalone_timestamp(self):
+        assert "06:02" not in _denoise_lines(["06:02"])
+        assert "6:02" not in _denoise_lines(["6:02"])
+
+    def test_drops_standalone_date(self):
+        left = _denoise_lines(["7/14（火）", "2026年7月14日（火）06:02", "7月14日"])
+        for x in ["7/14（火）", "2026年7月14日（火）06:02", "7月14日"]:
+            assert x not in left
+
+    def test_drops_standalone_number(self):
+        left = _denoise_lines(["1.04", "1.2万", "1,234件"])
+        for x in ["1.04", "1.2万", "1,234件"]:
+            assert x not in left
+
+    def test_drops_sns_handle(self):
+        left = _denoise_lines(["@rakuyou211", "＠news_bot"])
+        assert "@rakuyou211" not in left
+        assert "＠news_bot" not in left
+
+    def test_drops_symbol_only_lines(self):
+        # カテゴリE（記号だけの行）＝ _denoise_symbol_only が拾う純粋な記号行のみ。
+        assert core._denoise_symbol_only("▶")
+        assert core._denoise_symbol_only("■ ■ ■")
+        assert not core._denoise_symbol_only("← EXIT")  # 英字混じりはEではない
+        left = _denoise_lines(["▶", "■ ■ ■", "→→→", "【】"])
+        for x in ["▶", "■ ■ ■", "→→→", "【】"]:
+            assert x not in left
+
+    def test_keeps_headline_and_body(self):
+        left = _denoise_lines(["NEWS", "06:02"])
+        assert "トランプ大統領がホルムズ海峡封鎖を警告" in left
+        assert "アメリカのトランプ大統領は封鎖を表明した。" in left
+
+    # ---- 保護ルール（本文の取りこぼし防止） ----
+    def test_strong_jp_signal_helper(self):
+        # 本文シグナル判定の単体テスト。句読点“または”助詞（ひらがな）単独でも本文と判る。
+        # ひらがな枝（句読点なし）を独立して固定する回帰テスト。
+        assert core._denoise_has_strong_jp("あ")            # ひらがな単独
+        assert core._denoise_has_strong_jp("14日にも会談")  # 助詞のみ・句点なし
+        assert core._denoise_has_strong_jp("表明した")      # 送り仮名
+        assert core._denoise_has_strong_jp("再開。")        # 句読点のみ
+        assert not core._denoise_has_strong_jp("NEWS")
+        assert not core._denoise_has_strong_jp("06:02")
+        assert not core._denoise_has_strong_jp("ホルムズ")   # カタカナだけは強シグナル扱いしない
+
+    def test_protects_date_inside_sentence_with_punctuation(self):
+        # 文中に現れる日付は“文”なので残す（句読点あり）
+        out = core.denoise_capture("2026年7月14日に表明した。")
+        assert out == "2026年7月14日に表明した。"
+
+    def test_protects_date_inside_sentence_particle_only(self):
+        # 句読点が無く助詞（ひらがな）だけで本文と判る行も残す（ひらがな枝を独立検証）
+        left = _denoise_lines(["2026年7月14日にも会談"])
+        assert "2026年7月14日にも会談" in left
+
+    def test_protects_line_with_brackets(self):
+        left = _denoise_lines(["「20%の払い戻しを求める」"])
+        assert "「20%の払い戻しを求める」" in left
+
+    def test_keeps_long_katakana_headline(self):
+        # ひらがなが無くても、長いカタカナ見出しは（英字断片ではないので）残る
+        left = _denoise_lines(["ホルムズカイキョウフウサソチ"])
+        assert "ホルムズカイキョウフウサソチ" in left
+
+    def test_protects_short_kanji_line_with_numbers(self):
+        # 数字・記号・英字が多くても、漢字/かな（日本語の中身）を含む短い見出しは残す。
+        # 英字だけの断片（THE/NEWS）と切り分ける回帰テスト。
+        keep = ["20%減", "iOS版", "第3四半期", "3位に転落", "GDP速報値"]
+        left = _denoise_lines(keep)
+        for x in keep:
+            assert x in left, f"body line wrongly dropped: {x!r}"
+
+    def test_drops_long_english_block_in_jp_doc(self):
+        # 日本語主体の文書に埋め込まれた英文ブロック（長文）も落とす
+        eng = ("The Hormuz Strait is OPEN and will remain OPEN "
+               "with or without Iran as we reinstate the blockade")
+        left = _denoise_lines([eng])
+        assert eng not in left
+
+    def test_drops_mostly_english_line_with_few_kanji(self):
+        # 漢字が少し混じっていても、日本語比率がごく僅かなら外国語ブロックとして落とす
+        line = "known as THE GUARDIAN OF THE HORMUZ STRAIT such and トランプ大統領"
+        assert line not in _denoise_lines([line])
+
+    def test_keeps_mostly_japanese_labels(self):
+        keep = ["国際", "ホルムズ海峡", "20%減", "iOS版"]
+        left = _denoise_lines(keep)
+        for x in keep:
+            assert x in left, f"jp label wrongly dropped: {x!r}"
+
+    # ---- 英語主体の入力を誤って全消ししない ----
+    def test_english_dominant_input_not_gutted(self):
+        raw = "BREAKING NEWS\nTHE TIMES\nHormuz Strait Update"
+        out = core.denoise_capture(raw)
+        for x in ["BREAKING NEWS", "THE TIMES", "Hormuz Strait Update"]:
+            assert x in out.split("\n")
+
+    def test_short_english_kept_without_japanese_context(self):
+        # 日本語文脈が無ければ短い英字行も残す（doc門番がOFF）
+        assert core.denoise_capture("THE") == "THE"
+
+    def test_doc_gate_ratio_branch(self):
+        # 日本語量は20字未満だが比率>=0.5 → 比率ブランチで日本語主体と判定し英字断片を落とす
+        raw = "封鎖措置を警告\nNEWS"          # CJK 7字(<20) / 比率 7/11≈0.64(>=0.5)
+        left = core.denoise_capture(raw).split("\n")
+        assert "NEWS" not in left
+        assert "封鎖措置を警告" in left
+
+    def test_date_scan_linear_no_redos(self):
+        # スラッシュ数字の長い羅列でも線形時間で終わる（破滅的バックトラック回帰）
+        import time
+        s = "1/12" * 400 + "a"
+        t = time.time()
+        core.denoise_capture(s)
+        assert time.time() - t < 1.0
+
+    def test_strict_noise_empty_string_safe(self):
+        # 空文字でも s[0] で落ちない
+        assert core._denoise_is_strict_noise("") is False
+
+    def test_empty_input(self):
+        assert core.denoise_capture("") == ""
+
+    def test_blank_lines_only(self):
+        assert core.denoise_capture("\n  \n\t\n").strip() == ""
+
+    def test_blank_only_input(self):
+        assert core.denoise_capture("\n\n").strip() == ""
+
+
+class TestDenoiseFixture:
+    """今回のニュース（トランプ/ホルムズ海峡）の生OCRをフィクスチャ化した回帰テスト。"""
+
+    def test_hormuz_news_overlay_removed_body_kept(self):
+        raw = _load_fixture("news_hormuz_ocr.txt")
+        left = core.denoise_capture(raw).split("\n")
+        # 映像内オーバーレイ（局ロゴ・時刻・日付・数値・矢印・英字断片）は消える
+        for noise in ["THE", "NEWS", "TIME，", "← EXIT", "7/14（火）",
+                      "1.04", "2026年7月14日（火）06:02", "Pre：", "sec'"]:
+            assert noise not in left, f"noise line should be dropped: {noise!r}"
+        # 見出し・本文の日本語行は残る
+        assert any("各国に請求" in ln for ln in left)
+        assert any("アメリカのトランプ大統領は" in ln for ln in left)
+        assert any("封鎖措置について" in ln for ln in left)
+        # 実際にノイズが減っている
+        assert len(left) < len(raw.split("\n"))
+
+
+class TestCleanTextDenoise:
+    _RAW = ("トランプ大統領がホルムズ海峡の封鎖を警告。\nNEWS\n06:02\n@rakuyou211\n"
+            "アメリカのトランプ大統領は封鎖措置を表明した。")
+
+    def test_denoise_defaults_to_false(self):
+        import inspect
+        assert inspect.signature(core.clean_text).parameters["denoise"].default is False
+
+    def test_denoise_false_matches_golden(self):
+        # 後方互換の本丸: denoise=False の出力を固定の期待値で凍結する。
+        # denoise=False は denoise 前処理を丸ごとスキップする＝機能追加前と同一経路なので、
+        # この期待値は「従来出力」を表す。clean_text 共有ロジックの将来の退行をここで捕まえる。
+        raw = "こ れ は\r\nテスト です。 Excel 365\n次の 行。"
+        assert core.clean_text(raw, denoise=False) == \
+            "これは\nテストです。\nExcel 365\n次の行。"
+
+    def test_denoise_false_byte_identical_to_default_on_fixture(self):
+        # フィクスチャ全体でも既定＝denoise=False（引数を付けても従来経路のまま）
+        raw = _load_fixture("news_hormuz_ocr.txt")
+        for mode in ("sentence", "keep"):
+            assert core.clean_text(raw, mode=mode) == \
+                core.clean_text(raw, mode=mode, denoise=False)
+
+    def test_denoise_false_keeps_overlay(self):
+        out = core.clean_text(self._RAW, denoise=False)
+        assert "NEWS" in out and "06:02" in out and "@rakuyou211" in out
+
+    def test_denoise_true_removes_overlay(self):
+        out = core.clean_text(self._RAW, denoise=True)
+        assert "NEWS" not in out
+        assert "06:02" not in out
+        assert "@rakuyou211" not in out
+        assert "トランプ大統領がホルムズ海峡の封鎖を警告。" in out
+        assert "アメリカのトランプ大統領は封鎖措置を表明した。" in out
+
+    def test_denoise_keeps_body_date_drops_standalone_datetime(self):
+        raw = ("米、ホルムズ海峡巡り警告\n"
+               "2026年7月14日（火）06:02\n"
+               "2026年7月14日に表明した。")
+        out = core.clean_text(raw, mode="keep", denoise=True)
+        assert "2026年7月14日に表明した。" in out.split("\n")
+        assert "2026年7月14日（火）06:02" not in out.split("\n")
+
+
+class TestCliDenoise:
+    _RAW = ("トランプ大統領がホルムズ海峡封鎖を警告\nNEWS\n06:02\n"
+            "アメリカのトランプ大統領は表明した。")
+
+    def test_denoise_flag_removes_overlay(self, tmp_path):
+        import cli
+        src = tmp_path / "cap.txt"
+        src.write_text(self._RAW, encoding="utf-8")
+        out = tmp_path / "o"
+        rc = cli.main([str(src), "-o", str(out), "--denoise"])
+        assert rc == 0
+        text = (out / "voicevox_text.txt").read_text(encoding="utf-8")
+        assert "NEWS" not in text
+        assert "06:02" not in text
+        assert "アメリカのトランプ大統領は表明した。" in text
+
+    def test_default_removes_overlay(self, tmp_path):
+        # denoise は既定ON。フラグ無しでもノイズが消える
+        import cli
+        src = tmp_path / "cap.txt"
+        src.write_text(self._RAW, encoding="utf-8")
+        out = tmp_path / "o"
+        rc = cli.main([str(src), "-o", str(out)])
+        assert rc == 0
+        text = (out / "voicevox_text.txt").read_text(encoding="utf-8")
+        assert "NEWS" not in text and "06:02" not in text
+
+    def test_no_denoise_flag_keeps_overlay(self, tmp_path):
+        # --no-denoise で従来どおりノイズを残せる
+        import cli
+        src = tmp_path / "cap.txt"
+        src.write_text(self._RAW, encoding="utf-8")
+        out = tmp_path / "o"
+        rc = cli.main([str(src), "-o", str(out), "--no-denoise"])
+        assert rc == 0
+        text = (out / "voicevox_text.txt").read_text(encoding="utf-8")
+        assert "NEWS" in text and "06:02" in text
 
 
 class TestFmtDuration:

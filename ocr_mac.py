@@ -10,8 +10,12 @@ import os
 _LANG_MAP = {"ja": ["ja-JP", "en-US"], "en": ["en-US"]}
 
 
-def recognize_files(image_paths, lang="ja"):
-    """画像パスのリストをOCRし {path: text} を返す。読めなかったファイルは ""。"""
+def recognize_files(image_paths, lang="ja", reflow=True, strip_labels=True):
+    """画像パスのリストをOCRし {path: text} を返す。読めなかったファイルは ""。
+    reflow=True のとき、Visionが返す行の外接矩形（座標）を使って“折り返しで割れた1文”を
+    確実に連結する（見出し・箇条書き・別段落は連結しない）。
+    strip_labels=True のとき、連結の前に“映像内オーバーレイ・ラベル行”（局ロゴ・番組名・
+    日時・カテゴリ）を座標で除去する（core.strip_overlay_labels）。"""
     try:
         import Vision  # noqa: F401  先にimport可否だけ確認して分かりやすいエラーにする
     except ImportError:
@@ -23,7 +27,8 @@ def recognize_files(image_paths, lang="ja"):
     errors = []
     for path in image_paths:
         try:
-            result[path] = _recognize_one(path, languages)
+            result[path] = _recognize_one(path, languages, reflow=reflow,
+                                          strip_labels=strip_labels)
         except Exception as e:
             result[path] = ""
             errors.append(f"{os.path.basename(path)}: {e}")
@@ -33,8 +38,11 @@ def recognize_files(image_paths, lang="ja"):
     return result
 
 
-def _recognize_one(path, languages):
-    """1枚の画像をVision OCRにかけ、行テキストを改行結合して返す。"""
+def _recognize_one(path, languages, reflow=True, strip_labels=True):
+    """1枚の画像をVision OCRにかけ、行テキストを返す。
+    strip_labels=True なら折り返し連結の前に“オーバーレイ・ラベル行”を座標で除去
+    （core.strip_overlay_labels）。reflow=True なら各行の外接矩形を使って折り返しを連結
+    （core.reflow_ocr_lines）。"""
     import Vision
     from Foundation import NSURL
 
@@ -59,6 +67,30 @@ def _recognize_one(path, languages):
     lines = []
     for obs in (request.results() or []):
         candidates = obs.topCandidates_(1)
-        if candidates and len(candidates) > 0:
-            lines.append(str(candidates[0].string()))
-    return "\n".join(lines)
+        if not candidates or len(candidates) == 0:
+            continue
+        text = str(candidates[0].string())
+        b = obs.boundingBox()  # 正規化[0,1]・原点は左下
+        x0 = float(b.origin.x)
+        x1 = x0 + float(b.size.width)
+        y_bottom = float(b.origin.y)
+        y_top = 1.0 - (y_bottom + float(b.size.height))   # 上端基準に変換
+        lines.append({"text": text, "x0": x0, "x1": x1,
+                      "y0": y_top, "y1": 1.0 - y_bottom})
+    if not lines:
+        return ""
+    if strip_labels:
+        try:
+            import core
+            lines = core.strip_overlay_labels(lines)
+        except Exception:
+            pass  # ラベル除去に失敗しても素の行で続行（本文は保持される）
+        if not lines:
+            return ""
+    if reflow:
+        try:
+            import core
+            return core.reflow_ocr_lines(lines)
+        except Exception:
+            pass  # 座標連結に失敗しても素の行結合で続行
+    return "\n".join(l["text"] for l in lines)

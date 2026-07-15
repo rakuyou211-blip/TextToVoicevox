@@ -14,13 +14,18 @@ import tempfile
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from tkinter import font as tkfont
 
 from PIL import ImageGrab
 
 import core
 
-SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
-TEXT_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_text.txt")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+TEXT_CACHE_PATH = os.path.join(APP_DIR, "last_text.txt")
+# キャラ立ち絵とアプリアイコン（任意・ローカル資産）。無くてもアプリは動く。
+PORTRAIT_DIR = os.path.join(APP_DIR, "assets", "立ち絵")
+APP_ICON_PATH = os.path.join(APP_DIR, "assets", "app-icon.png")
 
 # ドラッグ＆ドロップ対応（tkinterdnd2 が無くてもアプリは動く）
 try:
@@ -47,6 +52,64 @@ else:
     UI_FONT = None
     TEXT_FONT = None
 
+# レイアウトの余白定数（全セクションで統一し、バラバラなpadx/padyを解消する）
+PAD_X = 8    # セクション外周の水平余白
+PAD_Y = 6    # セクション外周の垂直余白
+GAPX = 6     # 同一行のラベルと入力欄・小ブロック間の間隔
+GAPY = 4     # grid の行間
+
+
+class _Tooltip:
+    """軽量ツールチップ（ホバーで説明を表示）。既存のバインドを壊さないよう add='+'。"""
+    def __init__(self, widget, text, delay=500):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self._id = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _e=None):
+        self._cancel()
+        try:
+            self._id = self.widget.after(self.delay, self._show)
+        except tk.TclError:
+            self._id = None
+
+    def _cancel(self):
+        if self._id:
+            try:
+                self.widget.after_cancel(self._id)
+            except tk.TclError:
+                pass
+            self._id = None
+
+    def _show(self):
+        if self._tip or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 14
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+            self._tip = tw = tk.Toplevel(self.widget)
+            tw.wm_overrideredirect(True)
+            tw.wm_geometry(f"+{x}+{y}")
+            tk.Label(tw, text=self.text, justify="left", background="#ffffe0",
+                     foreground="#000000", relief="solid", borderwidth=1,
+                     padx=6, pady=3).pack()
+        except tk.TclError:
+            self._tip = None
+
+    def _hide(self, _e=None):
+        self._cancel()
+        if self._tip:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+
 
 class App(_Base):
     # 出力単位: 内部キー → 表示ラベル（コンボボックスの並び順と一致させる）
@@ -56,6 +119,7 @@ class App(_Base):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
+        self._set_window_icon()
         self.geometry("980x880")
         self.minsize(860, 700)
 
@@ -73,19 +137,17 @@ class App(_Base):
         self.presets = []               # 声プリセット [{name, speaker, speed, ...}]
         self._bookmark = None           # 連続再生のしおり（最後に再生した行番号）
         self._saved_dlg_speaker = None  # 設定から復元するセリフ話者ラベル
+        self._cleared_text = None       # 「本文を全消去」で退避した本文（復元用）
+        self._suppress_modified = False  # <<Modified>>ハンドラの一時抑止（全消去/復元の自編集用）
         self.encoders = core.audio_encoders()  # 使える音声変換 {"m4a":..., "mp3":...}
 
         self.dark_var = tk.BooleanVar(value=False)
         self._build_ui()
-        # ライトテーマへ戻すための既定値を記憶
-        self._default_theme = ttk.Style(self).theme_use()
-        self._default_bg = self.cget("bg")
-        self._text_defaults = (self.text.cget("bg"), self.text.cget("fg"),
-                               self.text.cget("insertbackground"))
-        self._list_defaults = (self.listbox.cget("bg"), self.listbox.cget("fg"))
+        # 画像等を画面のどこに落としても効くよう、UI全ウィジェットをドロップ先に登録する
+        self._register_drop_tree(self)
         self._load_settings()
-        if self.dark_var.get():
-            self.apply_theme()
+        # ライト/ダークとも clam ベースのデザインパレットを常に適用する（起動時に美観を反映）
+        self.apply_theme()
         self._restore_text_cache()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._poll_queue)
@@ -98,14 +160,52 @@ class App(_Base):
                 self.option_add("*Font", UI_FONT)
             except Exception:
                 pass
-        pad = {"padx": 6, "pady": 4}
+        self._setup_styles()
+        # 右にキャラ立ち絵パネル（あれば）、左にメイン。右を先に side="right" で確保して
+        # 幅をリザーブし、メインは残りを expand で埋める。狭い窓では立ち絵を自動で畳む。
+        self._portraits = self._load_portraits()
+        self._side = None
+        self._side_shown = False
+        if self._portraits:
+            self._side = ttk.Frame(self)
+            self._side.pack(side="right", fill="y", padx=(0, PAD_X), pady=PAD_Y)
+            self._side_shown = True
+            self._build_portrait_panel(self._side)
+        self._main = ttk.Frame(self)
+        self._main.pack(side="left", fill="both", expand=True)
 
-        # === 上段: ファイル ===
-        hint = "（ここにファイル/フォルダをドラッグ＆ドロップ）" if _HAS_DND else ""
-        top = ttk.LabelFrame(self, text="1. 入力ファイル（PDF・画像）" + hint)
-        top.pack(fill="x", **pad)
+        # pack順の意味は不変（親は self._main）：上から files→options を積み、VOICEVOX を
+        # side="bottom" で先に確保（窓が小さくても隠れない意図）。最後に result(本文) を
+        # expand で残りに広げる（本文テキスト欄が伸縮の主役）。
+        self._build_files_section()
+        self._build_options_section()
+        self._build_voicevox_section()
+        self._build_result_section()
+
+        if self._side is not None:
+            self.bind("<Configure>", self._on_resize_toggle_side, add="+")
+
+    # ---------------- スタイル（フォント） ----------------
+    def _setup_styles(self):
+        """見出し・主要ボタン・クレジット用のフォントを用意する。
+        実際の色付け（テーマ）は apply_theme()→_paint() が一括で行う。"""
+        try:
+            base = tkfont.nametofont("TkDefaultFont")
+            fam, size = base.cget("family"), int(base.cget("size"))
+        except Exception:
+            fam, size = "TkDefaultFont", 12
+        self._heading_font = (fam, size, "bold")
+        self._primary_font = (fam, size, "bold")
+        self._credit_font = (fam, max(9, size - 2))
+
+    # ---------------- §1 入力ファイル ----------------
+    def _build_files_section(self):
+        hint = "（画像・PDF・フォルダを画面のどこにでもドラッグ＆ドロップ）" if _HAS_DND else ""
+        top = ttk.LabelFrame(self._main, text="1. 入力ファイル" + hint)
+        top.pack(fill="x", padx=PAD_X, pady=(PAD_Y, PAD_Y // 2))
+
         btns = ttk.Frame(top)
-        btns.pack(side="left", fill="y", padx=4, pady=4)
+        btns.pack(side="left", fill="y", padx=GAPX, pady=GAPY)
         ttk.Button(btns, text="ファイル追加", command=self.add_files).pack(fill="x", pady=2)
         ttk.Button(btns, text="フォルダ追加", command=self.add_folder).pack(fill="x", pady=2)
         ttk.Button(btns, text="選択削除", command=self.remove_selected).pack(fill="x", pady=2)
@@ -114,65 +214,105 @@ class App(_Base):
         self.clip_btn.pack(fill="x", pady=(8, 2))
 
         lst = ttk.Frame(top)
-        lst.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        lst.pack(side="left", fill="both", expand=True, padx=GAPX, pady=GAPY)
         self.listbox = tk.Listbox(lst, height=5, selectmode="extended")
         self.listbox.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(lst, command=self.listbox.yview)
         sb.pack(side="right", fill="y")
         self.listbox.config(yscrollcommand=sb.set)
+        # ドラッグ＆ドロップは _build_ui 完了後に _register_drop_tree が全ウィジェットへ
+        # 一括登録する（新設フレームも子ツリーに繋がっていれば自動で対象になる）。macOSでは
+        # 子ウィジェットがルート窓を覆うため、個別登録でないと「落としても反応しない」ため。
 
-        # ドラッグ＆ドロップ登録（リストボックスとウィンドウ全体）
-        if _HAS_DND:
-            for w in (self.listbox, self):
-                try:
-                    w.drop_target_register(DND_FILES)
-                    w.dnd_bind("<<Drop>>", self._on_drop)
-                except Exception:
-                    pass
+    # ---------------- §2 抽出オプション ----------------
+    def _build_options_section(self):
+        opt = ttk.LabelFrame(self._main, text="2. 抽出オプション")
+        opt.pack(fill="x", padx=PAD_X, pady=PAD_Y // 2)
 
-        # === 中段: オプション + 実行 ===
-        opt = ttk.LabelFrame(self, text="2. 抽出オプション")
-        opt.pack(fill="x", **pad)
-
-        row1 = ttk.Frame(opt); row1.pack(fill="x", padx=6, pady=3)
-        ttk.Label(row1, text="出力形式:").pack(side="left")
+        # --- 基本（入出力）: 改行の扱い / PDF処理 / 解像度。ラベルを col0 で縦に揃える ---
+        basic = ttk.Frame(opt)
+        basic.pack(fill="x", padx=GAPX, pady=(GAPY, 2))
+        ttk.Label(basic, text="改行の扱い:").grid(row=0, column=0, sticky="w", pady=1)
         self.mode_var = tk.StringVar(value="sentence")
-        ttk.Radiobutton(row1, text="文ごとに改行（VOICEVOX推奨）",
-                        variable=self.mode_var, value="sentence").pack(side="left", padx=4)
-        ttk.Radiobutton(row1, text="元の改行を保持",
-                        variable=self.mode_var, value="keep").pack(side="left", padx=4)
+        mrow = ttk.Frame(basic)
+        mrow.grid(row=0, column=1, sticky="w", padx=(GAPX, 0))
+        ttk.Radiobutton(mrow, text="文ごとに改行（VOICEVOX推奨）",
+                        variable=self.mode_var, value="sentence").pack(side="left")
+        ttk.Radiobutton(mrow, text="元の改行を保持",
+                        variable=self.mode_var, value="keep").pack(side="left", padx=(GAPX, 0))
 
-        row2 = ttk.Frame(opt); row2.pack(fill="x", padx=6, pady=3)
-        ttk.Label(row2, text="PDF処理:").pack(side="left")
+        ttk.Label(basic, text="PDF処理:").grid(row=1, column=0, sticky="w", pady=1)
         self.pdf_var = tk.StringVar(value="auto")
-        ttk.Radiobutton(row2, text="自動（テキスト層→無ければOCR）",
-                        variable=self.pdf_var, value="auto").pack(side="left", padx=4)
-        ttk.Radiobutton(row2, text="常にOCR（スキャン/文字化け対策）",
-                        variable=self.pdf_var, value="ocr").pack(side="left", padx=4)
-        ttk.Label(row2, text="  OCR解像度(DPI):").pack(side="left")
+        prow = ttk.Frame(basic)
+        prow.grid(row=1, column=1, sticky="w", padx=(GAPX, 0))
+        ttk.Radiobutton(prow, text="自動（テキスト層→無ければOCR）",
+                        variable=self.pdf_var, value="auto").pack(side="left")
+        ttk.Radiobutton(prow, text="常にOCR（スキャン/文字化け対策）",
+                        variable=self.pdf_var, value="ocr").pack(side="left", padx=(GAPX, 0))
+        ttk.Label(prow, text="解像度(DPI):").pack(side="left", padx=(GAPX, 2))
         self.dpi_var = tk.IntVar(value=300)
-        ttk.Spinbox(row2, from_=150, to=400, increment=50, width=5,
+        ttk.Spinbox(prow, from_=150, to=400, increment=50, width=5,
                     textvariable=self.dpi_var).pack(side="left")
 
-        row3 = ttk.Frame(opt); row3.pack(fill="x", padx=6, pady=3)
-        self.pre_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(row3, text="画像前処理（精度向上）", variable=self.pre_var).pack(side="left", padx=4)
-        self.blank_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(row3, text="空行を削除", variable=self.blank_var).pack(side="left", padx=4)
-        self.ascii_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(row3, text="英数字間の空白を保持", variable=self.ascii_var).pack(side="left", padx=4)
-        self.join_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(row3, text="改行で途切れた文を連結（小説向け）",
-                        variable=self.join_var).pack(side="left", padx=4)
-        self.pruby_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(row3, text="括弧ルビ除去 例:漢字(かんじ)",
-                        variable=self.pruby_var).pack(side="left", padx=4)
-        self.norm_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(row3, text="全角英数→半角",
-                        variable=self.norm_var).pack(side="left", padx=4)
+        ttk.Separator(opt, orient="horizontal").pack(fill="x", padx=GAPX, pady=(4, 2))
 
-        run = ttk.Frame(opt); run.pack(fill="x", padx=6, pady=5)
-        self.extract_btn = ttk.Button(run, text="▶ テキスト抽出 実行", command=self.start_extract)
+        # --- 整形: よく使う項目は常時表示、上級者向けは「詳細設定」で折りたたむ ---
+        head = ttk.Frame(opt)
+        head.pack(fill="x", padx=GAPX)
+        ttk.Label(head, text="整形", style="Cluster.TLabel").pack(side="left")
+        self._adv_btn = ttk.Button(head, text="詳細設定 ▸", width=12,
+                                   command=self._toggle_advanced)
+        self._adv_btn.pack(side="right")
+
+        common = ttk.Frame(opt)
+        common.pack(fill="x", padx=GAPX, pady=(2, 0))
+        self.pre_var = tk.BooleanVar(value=True)
+        self.blank_var = tk.BooleanVar(value=True)
+        self.ascii_var = tk.BooleanVar(value=True)
+        self.smartjoin_var = tk.BooleanVar(value=False)
+        self.denoise_var = tk.BooleanVar(value=True)
+        common_defs = [
+            (self.pre_var, "画像前処理（精度向上）",
+             "写真やスキャンを補正してOCRの精度を上げます。"),
+            (self.blank_var, "空行を削除", "連続する空行を1つにまとめます。"),
+            (self.ascii_var, "英数字間の空白を保持",
+             "英単語の間の半角スペースを残します。"),
+            (self.smartjoin_var, "折り返しを連結（1段組みの本文向け）",
+             "ページ幅で折り返された行を1文につなげます。"),
+            (self.denoise_var, "画面キャプチャのノイズを除去",
+             "字幕・局ロゴ・UIラベルなど画面上の余計な文字を取り除きます。"),
+        ]
+        for i, (var, label, tip) in enumerate(common_defs):
+            cb = ttk.Checkbutton(common, text=label, variable=var)
+            cb.grid(row=i // 3, column=i % 3, sticky="w", padx=(0, GAPX), pady=1)
+            _Tooltip(cb, tip)
+        for cidx in range(3):
+            common.columnconfigure(cidx, weight=1)
+
+        # 折りたたみ対象（既定は畳む＝pack しない。子ツリーには繋がるのでD&D登録は効く）
+        self._adv_open = False
+        self._adv_frame = ttk.Frame(opt)
+        self.join_var = tk.BooleanVar(value=False)
+        self.pruby_var = tk.BooleanVar(value=False)
+        self.norm_var = tk.BooleanVar(value=False)
+        adv_defs = [
+            (self.join_var, "改行で途切れた文を連結（小説向け）",
+             "句点で終わらない改行を前の行につなげます。"),
+            (self.pruby_var, "括弧ルビ除去 例:漢字(かんじ)",
+             "漢字の後の括弧内の読みがなを削除します。"),
+            (self.norm_var, "全角英数→半角", "全角の英数字を半角に変換します。"),
+        ]
+        for i, (var, label, tip) in enumerate(adv_defs):
+            cb = ttk.Checkbutton(self._adv_frame, text=label, variable=var)
+            cb.grid(row=0, column=i, sticky="w", padx=(0, GAPX), pady=1)
+            _Tooltip(cb, tip)
+
+        # --- 実行行：主要操作(抽出)・進捗・状態・テーマ切替 ---
+        run = ttk.Frame(opt)
+        run.pack(fill="x", padx=GAPX, pady=(4, GAPY))
+        self._run_frame = run  # 折りたたみ枠をこの直前(before=)に差し込むための基準
+        self.extract_btn = ttk.Button(run, text="▶ テキスト抽出 実行",
+                                       style="Primary.TButton", command=self.start_extract)
         self.extract_btn.pack(side="left")
         self.progress = ttk.Progressbar(run, mode="determinate", length=300)
         self.progress.pack(side="left", padx=10)
@@ -181,114 +321,156 @@ class App(_Base):
         ttk.Button(run, text="🌓 テーマ", width=8,
                    command=self.toggle_theme).pack(side="right", padx=4)
 
-        # === 下段: VOICEVOX ===
-        # 先に side="bottom" で確保し、ウィンドウが小さくても隠れないようにする
-        bottom = ttk.LabelFrame(self, text="4. VOICEVOX へ")
-        bottom.pack(side="bottom", fill="x", **pad)
+    def _toggle_advanced(self):
+        self._set_advanced(not self._adv_open)
 
-        vrow1 = ttk.Frame(bottom); vrow1.pack(fill="x", padx=6, pady=3)
-        ttk.Button(vrow1, text="VOICEVOX用に保存(.txt)",
-                   command=self.save_txt).pack(side="left", padx=2)
-        ttk.Button(vrow1, text="クリップボードにコピー",
-                   command=self.copy_clip).pack(side="left", padx=2)
-        self.vvproj_btn = ttk.Button(vrow1, text="プロジェクト保存(.vvproj)",
-                                     command=self.save_vvproj, state="disabled")
-        self.vvproj_btn.pack(side="left", padx=2)
-        ttk.Separator(vrow1, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Button(vrow1, text="VOICEVOX起動", command=self.launch_voicevox).pack(side="left", padx=2)
-        ttk.Label(vrow1, text="URL:").pack(side="left", padx=(8, 0))
+    def _set_advanced(self, show):
+        """整形の詳細設定パネルを開閉する（pack/pack_forget と矢印表示の更新のみ）。"""
+        self._adv_open = bool(show)
+        if self._adv_open:
+            self._adv_frame.pack(fill="x", padx=GAPX, pady=(2, 0),
+                                 before=self._run_frame)
+            self._adv_btn.config(text="詳細設定 ▾")
+        else:
+            self._adv_frame.pack_forget()
+            self._adv_btn.config(text="詳細設定 ▸")
+
+    # ---------------- §4 VOICEVOX へ ----------------
+    def _build_voicevox_section(self):
+        # 先に side="bottom" で確保し、ウィンドウが小さくても隠れないようにする（順序不変）。
+        # 4クラスタ［接続］［声・調整］［出力］［再生・生成］を、太字の見出しラベルと薄い
+        # 区切り線で分ける。内側LabelFrameは縦を食い本文欄を潰すので使わず、伸縮の主役
+        # （§3の本文）を優先して各クラスタは1〜2行に抑える。
+        bottom = ttk.LabelFrame(self._main, text="4. VOICEVOX へ")
+        bottom.pack(side="bottom", fill="x", padx=PAD_X, pady=(PAD_Y // 2, PAD_Y))
+
+        def _sep():
+            ttk.Separator(bottom, orient="horizontal").pack(fill="x", padx=GAPX, pady=2)
+
+        # === 接続 ===
+        c = ttk.Frame(bottom)
+        c.pack(fill="x", padx=GAPX, pady=(GAPY, 0))
+        ttk.Label(c, text="接続", style="Cluster.TLabel").pack(side="left", padx=(0, GAPX))
+        ttk.Button(c, text="VOICEVOX起動", command=self.launch_voicevox).pack(side="left")
+        ttk.Label(c, text="URL:").pack(side="left", padx=(GAPX, 2))
         self.url_var = tk.StringVar(value=self.base_url)
-        ttk.Entry(vrow1, textvariable=self.url_var, width=22).pack(side="left", padx=2)
-        ttk.Button(vrow1, text="エンジン接続確認", command=self.check_engine).pack(side="left", padx=2)
+        ttk.Entry(c, textvariable=self.url_var, width=22).pack(side="left")
+        ttk.Button(c, text="エンジン接続確認",
+                   command=self.check_engine).pack(side="left", padx=(GAPX, 0))
         self.engine_var = tk.StringVar(value="エンジン: 未接続")
-        ttk.Label(vrow1, textvariable=self.engine_var).pack(side="left", padx=8)
+        ttk.Label(c, textvariable=self.engine_var).pack(side="left", padx=GAPX)
+        _sep()
 
-        vrow2 = ttk.Frame(bottom); vrow2.pack(fill="x", padx=6, pady=3)
-        ttk.Label(vrow2, text="話者:").pack(side="left")
-        self.speaker_cb = ttk.Combobox(vrow2, width=30, state="disabled")
-        self.speaker_cb.pack(side="left", padx=4)
-        ttk.Label(vrow2, text="話速:").pack(side="left", padx=(8, 0))
+        # === 声・調整（話速/音高/抑揚/音量を grid の列で揃える。1行に収める） ===
+        va = ttk.Frame(bottom)
+        va.pack(fill="x", padx=GAPX)
+        ttk.Label(va, text="声・調整", style="Cluster.TLabel").pack(side="left", padx=(0, GAPX))
+        ttk.Label(va, text="話者:").pack(side="left")
+        self.speaker_cb = ttk.Combobox(va, width=30, state="disabled")
+        self.speaker_cb.pack(side="left", padx=(2, GAPX))
+        self.speaker_cb.bind("<<ComboboxSelected>>", self._update_portrait, add="+")
+        params = ttk.Frame(va)
+        params.pack(side="left")
         self.speed_var = tk.DoubleVar(value=1.0)
-        ttk.Spinbox(vrow2, from_=0.5, to=2.0, increment=0.1, width=5,
-                    textvariable=self.speed_var).pack(side="left")
-        ttk.Label(vrow2, text="音高:").pack(side="left", padx=(8, 0))
         self.pitch_var = tk.DoubleVar(value=0.0)
-        ttk.Spinbox(vrow2, from_=-0.15, to=0.15, increment=0.01, width=6,
-                    textvariable=self.pitch_var).pack(side="left")
-        ttk.Label(vrow2, text="抑揚:").pack(side="left", padx=(8, 0))
         self.into_var = tk.DoubleVar(value=1.0)
-        ttk.Spinbox(vrow2, from_=0.0, to=2.0, increment=0.1, width=5,
-                    textvariable=self.into_var).pack(side="left")
-        ttk.Label(vrow2, text="音量:").pack(side="left", padx=(8, 0))
         self.vol_var = tk.DoubleVar(value=1.0)
-        ttk.Spinbox(vrow2, from_=0.0, to=2.0, increment=0.1, width=5,
-                    textvariable=self.vol_var).pack(side="left")
+        specs = [("話速", self.speed_var, 0.5, 2.0, 0.1, 5),
+                 ("音高", self.pitch_var, -0.15, 0.15, 0.01, 6),
+                 ("抑揚", self.into_var, 0.0, 2.0, 0.1, 5),
+                 ("音量", self.vol_var, 0.0, 2.0, 0.1, 5)]
+        for col, (name, var, lo, hi, inc, w) in enumerate(specs):
+            ttk.Label(params, text=name).grid(row=0, column=2 * col,
+                                              padx=(GAPX if col else 0, 2))
+            ttk.Spinbox(params, from_=lo, to=hi, increment=inc, width=w,
+                        textvariable=var).grid(row=0, column=2 * col + 1)
 
-        vrow2b = ttk.Frame(bottom); vrow2b.pack(fill="x", padx=6, pady=3)
-        ttk.Label(vrow2b, text="プリセット:").pack(side="left")
-        self.preset_cb = ttk.Combobox(vrow2b, width=14, state="readonly", values=[])
+        vb = ttk.Frame(bottom)
+        vb.pack(fill="x", padx=GAPX, pady=(2, 0))
+        ttk.Label(vb, text="プリセット:").pack(side="left")
+        self.preset_cb = ttk.Combobox(vb, width=14, state="readonly", values=[])
         self.preset_cb.pack(side="left", padx=2)
         self.preset_cb.bind("<<ComboboxSelected>>", self._preset_selected)
-        ttk.Button(vrow2b, text="保存", width=4, command=self.save_preset).pack(side="left", padx=1)
-        ttk.Button(vrow2b, text="削除", width=4, command=self.del_preset).pack(side="left", padx=1)
-        ttk.Separator(vrow2b, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Button(vb, text="保存", width=4, command=self.save_preset).pack(side="left", padx=1)
+        ttk.Button(vb, text="削除", width=4, command=self.del_preset).pack(side="left", padx=1)
+        ttk.Separator(vb, orient="vertical").pack(side="left", fill="y", padx=GAPX)
         self.dlg_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(vrow2b, text="セリフ行(「」開始)を別話者:",
+        ttk.Checkbutton(vb, text="セリフ行(「」開始)を別話者:",
                         variable=self.dlg_var).pack(side="left")
-        self.dlg_speaker_cb = ttk.Combobox(vrow2b, width=24, state="disabled")
+        self.dlg_speaker_cb = ttk.Combobox(vb, width=24, state="disabled")
         self.dlg_speaker_cb.pack(side="left", padx=2)
-        ttk.Label(vrow2b, text="※行頭「@話者名:」でも指定可").pack(side="left", padx=6)
+        ttk.Label(vb, text="※行頭「@話者名:」でも指定可").pack(side="left", padx=GAPX)
+        _sep()
 
-        vrow2c = ttk.Frame(bottom); vrow2c.pack(fill="x", padx=6, pady=3)
-        ttk.Label(vrow2c, text="出力形式:").pack(side="left")
-        self.fmt_cb = ttk.Combobox(vrow2c, width=6, state="readonly",
+        # === 出力（形式と保存） ===
+        oa = ttk.Frame(bottom)
+        oa.pack(fill="x", padx=GAPX)
+        ttk.Label(oa, text="出力", style="Cluster.TLabel").pack(side="left", padx=(0, GAPX))
+        ttk.Label(oa, text="音声形式:").pack(side="left")
+        self.fmt_cb = ttk.Combobox(oa, width=6, state="readonly",
                                    values=self._format_choices())
         self.fmt_cb.current(0)
         self.fmt_cb.pack(side="left", padx=2)
-        ttk.Label(vrow2c, text="出力単位:").pack(side="left", padx=(10, 0))
-        self.unit_cb = ttk.Combobox(vrow2c, width=13, state="readonly",
+        ttk.Label(oa, text="まとめ方:").pack(side="left", padx=(GAPX, 0))
+        self.unit_cb = ttk.Combobox(oa, width=13, state="readonly",
                                     values=list(self._UNITS.values()))
         self.unit_cb.current(0)
         self.unit_cb.pack(side="left", padx=2)
         self.nlines_var = tk.IntVar(value=50)
-        ttk.Spinbox(vrow2c, from_=2, to=1000, increment=10, width=5,
+        ttk.Spinbox(oa, from_=2, to=1000, increment=10, width=5,
                     textvariable=self.nlines_var).pack(side="left", padx=(2, 0))
-        ttk.Label(vrow2c, text="行").pack(side="left")
-        ttk.Label(vrow2c, text="文間の無音(秒):").pack(side="left", padx=(10, 0))
+        ttk.Label(oa, text="行").pack(side="left")
+        ttk.Label(oa, text="文間の無音(秒):").pack(side="left", padx=(GAPX, 0))
         self.gap_var = tk.DoubleVar(value=0.4)
-        ttk.Spinbox(vrow2c, from_=0.0, to=3.0, increment=0.1, width=5,
+        ttk.Spinbox(oa, from_=0.0, to=3.0, increment=0.1, width=5,
                     textvariable=self.gap_var).pack(side="left")
         self.srt_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(vrow2c, text="字幕(.srt)も保存",
-                        variable=self.srt_var).pack(side="left", padx=10)
+        ttk.Checkbutton(oa, text="字幕(.srt)も保存",
+                        variable=self.srt_var).pack(side="left", padx=GAPX)
 
-        vrow3 = ttk.Frame(bottom); vrow3.pack(fill="x", padx=6, pady=3)
-        self.preview_btn = ttk.Button(vrow3, text="▶ 試聴(カーソル行)",
-                                       command=self.preview_selected, state="disabled")
-        self.preview_btn.pack(side="left", padx=4)
-        self.playall_btn = ttk.Button(vrow3, text="▶▶ 連続再生(カーソル行から)",
+        ob = ttk.Frame(bottom)
+        ob.pack(fill="x", padx=GAPX, pady=(2, 0))
+        ttk.Button(ob, text="VOICEVOX用に保存(.txt)",
+                   command=self.save_txt).pack(side="left", padx=(0, 2))
+        ttk.Button(ob, text="クリップボードにコピー",
+                   command=self.copy_clip).pack(side="left", padx=2)
+        self.vvproj_btn = ttk.Button(ob, text="プロジェクト保存(.vvproj)",
+                                     command=self.save_vvproj, state="disabled")
+        self.vvproj_btn.pack(side="left", padx=2)
+        _sep()
+
+        # === 再生・生成 ===
+        p = ttk.Frame(bottom)
+        p.pack(fill="x", padx=GAPX, pady=(0, GAPY))
+        ttk.Label(p, text="再生・生成", style="Cluster.TLabel").pack(side="left", padx=(0, GAPX))
+        self.preview_btn = ttk.Button(p, text="▶ 試聴(カーソル行)",
+                                      command=self.preview_selected, state="disabled")
+        self.preview_btn.pack(side="left")
+        self.playall_btn = ttk.Button(p, text="▶▶ 連続再生(カーソル行から)",
                                       command=self.play_all, state="disabled")
         self.playall_btn.pack(side="left", padx=4)
-        self.resume_btn = ttk.Button(vrow3, text="⏵ 続きから",
+        self.resume_btn = ttk.Button(p, text="⏵ 続きから",
                                      command=self.play_from_bookmark, state="disabled")
         self.resume_btn.pack(side="left", padx=4)
-        self.stop_btn = ttk.Button(vrow3, text="■ 停止",
+        self.stop_btn = ttk.Button(p, text="■ 停止",
                                    command=self.stop_playall, state="disabled")
         self.stop_btn.pack(side="left", padx=4)
-        self.synth_btn = ttk.Button(vrow3, text="🔊 音声を生成",
+        ttk.Separator(p, orient="vertical").pack(side="left", fill="y", padx=GAPX)
+        self.synth_btn = ttk.Button(p, text="🔊 音声を生成", style="Primary.TButton",
                                     command=self.start_synth, state="disabled")
-        self.synth_btn.pack(side="left", padx=12)
-        self.dict_btn = ttk.Button(vrow3, text="読み方辞書...",
+        self.synth_btn.pack(side="left")
+        self.dict_btn = ttk.Button(p, text="読み方辞書...",
                                    command=self.open_dict_dialog, state="disabled")
-        self.dict_btn.pack(side="left", padx=4)
+        self.dict_btn.pack(side="left", padx=(GAPX, 0))
 
-        # === 結果テキスト（編集可能）=== 残りスペースを埋める（最後にpack）
-        mid = ttk.LabelFrame(self, text="3. 抽出結果（手動で修正できます）")
-        mid.pack(fill="both", expand=True, **pad)
+    # ---------------- §3 抽出結果（編集可能・伸縮の主役） ----------------
+    def _build_result_section(self):
+        mid = ttk.LabelFrame(self._main, text="3. 抽出結果（手動で修正できます）")
+        mid.pack(fill="both", expand=True, padx=PAD_X, pady=PAD_Y // 2)
 
         # 一括置換バー
         rep = ttk.Frame(mid)
-        rep.pack(fill="x", padx=4, pady=(4, 0))
+        rep.pack(fill="x", padx=GAPX, pady=(GAPY, 0))
         ttk.Label(rep, text="一括置換:").pack(side="left")
         self.find_var = tk.StringVar()
         self.repl_var = tk.StringVar()
@@ -300,7 +482,7 @@ class App(_Base):
         ttk.Button(rep, text="すべて置換", command=self.replace_all_text).pack(side="left", padx=4)
         fe.bind("<Return>", lambda e: self.replace_all_text())
         re_.bind("<Return>", lambda e: self.replace_all_text())
-        ttk.Separator(rep, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Separator(rep, orient="vertical").pack(side="left", fill="y", padx=GAPX)
         ttk.Label(rep, text="保存ルール:").pack(side="left")
         self.rule_cb = ttk.Combobox(rep, width=16, state="readonly", values=[])
         self.rule_cb.pack(side="left", padx=2)
@@ -308,16 +490,22 @@ class App(_Base):
         ttk.Button(rep, text="登録", width=4, command=self.add_rule).pack(side="left", padx=1)
         ttk.Button(rep, text="削除", width=4, command=self.del_rule).pack(side="left", padx=1)
         ttk.Button(rep, text="全ルール適用", command=self.apply_all_rules).pack(side="left", padx=4)
+        # 本文の全消去 / 復元（右端）
+        self.restore_btn = ttk.Button(rep, text="復元", width=5,
+                                      command=self.restore_text, state="disabled")
+        self.restore_btn.pack(side="right", padx=2)
+        ttk.Button(rep, text="本文を全消去", command=self.clear_text).pack(side="right", padx=2)
 
         body = ttk.Frame(mid)
         body.pack(fill="both", expand=True)
-        from tkinter import font as tkfont
         self.text_font = tkfont.Font(font=(TEXT_FONT or "TkTextFont"))
         self.text = tk.Text(body, wrap="word", undo=True, font=self.text_font)
         self.text.pack(side="left", fill="both", expand=True, padx=4, pady=4)
         tsb = ttk.Scrollbar(body, command=self.text.yview)
         tsb.pack(side="right", fill="y")
         self.text.config(yscrollcommand=tsb.set)
+        # 本文が（全消去/復元“以外”の理由で）変わったら復元ポイントを無効化する一元フック
+        self.text.bind("<<Modified>>", self._on_text_modified)
 
         # ショートカット: 検索(Ctrl/Cmd+F)・文字サイズ(Ctrl/Cmd + = / - / 0)
         self._font_size0 = int(self.text_font.cget("size"))  # リセット用の既定サイズ
@@ -333,6 +521,82 @@ class App(_Base):
         self._search_win = None
         self._search_hits = []
         self._search_idx = -1
+
+    # ---------------- キャラ立ち絵パネル（任意・ローカル資産） ----------------
+    def _set_window_icon(self):
+        """ウィンドウ/タスクバーのアイコンを設定（無ければ何もしない）。"""
+        try:
+            self._app_icon = tk.PhotoImage(file=APP_ICON_PATH)
+            self.iconphoto(True, self._app_icon)
+        except Exception:
+            pass
+
+    def _load_portraits(self):
+        """assets/立ち絵/ の透過PNGを読み込む。無ければ空dict（パネルを出さない）。"""
+        files = {"zundamon": "zundamon.png", "metan": "metan.png"}
+        out = {}
+        for key, fn in files.items():
+            img = self._load_scaled_image(os.path.join(PORTRAIT_DIR, fn),
+                                          max_w=230, max_h=640)
+            if img is not None:
+                out[key] = img
+        return out
+
+    def _load_scaled_image(self, path, max_w, max_h):
+        """PNGを縦横比維持でパネルに収まるよう縮小して返す。失敗時は None。"""
+        if not os.path.exists(path):
+            return None
+        try:
+            from PIL import Image, ImageTk
+            im = Image.open(path).convert("RGBA")
+            im.thumbnail((max_w, max_h), Image.LANCZOS)
+            return ImageTk.PhotoImage(im)
+        except Exception:
+            return None
+
+    def _build_portrait_panel(self, parent):
+        # 立ち絵は下端そろえ（地面に立つ見た目）。透過部の背景はテーマに追従させる。
+        self._portrait_label = tk.Label(parent, bd=0, anchor="s")
+        self._portrait_label.pack(side="top", fill="both", expand=True)
+        ttk.Label(parent, text="VOICEVOX / 立ち絵:坂本アヒル",
+                  style="Credit.TLabel").pack(side="bottom", pady=(4, 2))
+        self._update_portrait()
+
+    def _portrait_key_for(self, label):
+        s = label or ""
+        if "四国めたん" in s or "めたん" in s:
+            return "metan"
+        if "ずんだもん" in s:
+            return "zundamon"
+        return None
+
+    def _update_portrait(self, event=None):
+        """選択中の話者に応じて立ち絵を切り替える（対応が無ければ既定=ずんだもん）。"""
+        if not getattr(self, "_portrait_label", None):
+            return
+        label = self.speaker_cb.get() if getattr(self, "speaker_cb", None) else ""
+        key = self._portrait_key_for(label)
+        img = self._portraits.get(key) or self._portraits.get("zundamon")
+        if img is not None:
+            self._portrait_label.config(image=img)
+            self._portrait_label.image = img  # GC防止の参照保持
+
+    def _on_resize_toggle_side(self, event=None):
+        """窓が狭いときは立ち絵パネルを自動で畳み、メインの横幅を確保する。"""
+        if self._side is None:
+            return
+        try:
+            w = self.winfo_width()
+        except tk.TclError:
+            return
+        want = w >= 1080
+        if want and not self._side_shown:
+            self._side.pack(side="right", fill="y", padx=(0, PAD_X), pady=PAD_Y,
+                            before=self._main)
+            self._side_shown = True
+        elif not want and self._side_shown:
+            self._side.pack_forget()
+            self._side_shown = False
 
     # ---------------- 合成パラメータ・行別話者ヘルパー ----------------
     def _format_choices(self):
@@ -404,6 +668,24 @@ class App(_Base):
             return 1
         return 0
 
+    def _enable_drop(self, widget):
+        """ウィジェットをファイルのドロップ先として登録する（tkinterdnd2が無ければ無視）。"""
+        if not _HAS_DND:
+            return
+        try:
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<Drop>>", self._on_drop)
+        except Exception:
+            pass
+
+    def _register_drop_tree(self, widget):
+        """ウィジェット木の全要素をドロップ先に登録する（画面のどこに落としても効く）。"""
+        if not _HAS_DND:
+            return
+        self._enable_drop(widget)
+        for child in widget.winfo_children():
+            self._register_drop_tree(child)
+
     def _on_drop(self, event):
         """エクスプローラからのファイル/フォルダのドロップを処理する。"""
         try:
@@ -453,14 +735,18 @@ class App(_Base):
                 pdf_mode=self.pdf_var.get(),
                 dpi=self.dpi_var.get(),
                 preprocess=self.pre_var.get(),
+                # 映像内ラベル除去は「ノイズ除去」チェックと同じON/OFFで効かせる（座標段階で適用）
+                strip_labels=self.denoise_var.get(),
             )
             clean_opts = dict(
                 mode=self.mode_var.get(),
                 remove_blank=self.blank_var.get(),
                 keep_ascii_spaces=self.ascii_var.get(),
                 join_wrapped=self.join_var.get(),
+                smart_join=self.smartjoin_var.get(),
                 paren_ruby=self.pruby_var.get(),
                 normalize=self.norm_var.get(),
+                denoise=self.denoise_var.get(),
             )
         except tk.TclError:
             messagebox.showwarning("入力エラー",
@@ -720,7 +1006,9 @@ class App(_Base):
             return
         clean_opts = dict(mode=self.mode_var.get(), remove_blank=self.blank_var.get(),
                           keep_ascii_spaces=self.ascii_var.get(), join_wrapped=self.join_var.get(),
-                          paren_ruby=self.pruby_var.get(), normalize=self.norm_var.get())
+                          smart_join=self.smartjoin_var.get(),
+                          paren_ruby=self.pruby_var.get(), normalize=self.norm_var.get(),
+                          denoise=self.denoise_var.get())
         self._set_busy(True)
         self.status_var.set("クリップボード画像をOCR中...")
         threading.Thread(target=self._clipboard_worker,
@@ -731,7 +1019,7 @@ class App(_Base):
             tmpdir = tempfile.mkdtemp(prefix="t2v_clip_")
             png = os.path.join(tmpdir, "clip.png")
             core.preprocess_image(img, enable=preprocess).save(png)
-            res = core.run_ocr([png])
+            res = core.run_ocr([png], strip_labels=clean_opts.get("denoise", True))
             cleaned = core.clean_text(res.get(png, ""), **clean_opts)
             self.q.put(("clip_done", cleaned))
         except Exception:
@@ -1031,6 +1319,67 @@ class App(_Base):
         self.text.insert("1.0", content.replace(find, repl))
         self.status_var.set(f"{count}件置換しました：「{find}」→「{repl}」")
 
+    # ---------------- 本文の全消去 / 復元 ----------------
+    def _on_text_modified(self, event=None):
+        """本文が全消去/復元“以外”の理由で変更されたら、復元ポイントを無効化する。
+        抽出・クリップボード・置換・ルール適用・手動編集・Ctrl/Cmd+Zのどれでも一元的に捕捉し、
+        古い退避内容で新しい本文を上書きしてしまう「復元」事故を防ぐ。"""
+        if self._suppress_modified or not self.text.edit_modified():
+            return
+        # 変更フラグを戻す。edit_modified(False)自体が再度<<Modified>>を発火するため多重防止。
+        self._suppress_modified = True
+        try:
+            self.text.edit_modified(False)
+        finally:
+            self._suppress_modified = False
+        if self._cleared_text is not None:
+            self._cleared_text = None
+            self.restore_btn.config(state="disabled")
+
+    def _edit_body(self, fn):
+        """本文の全消去/復元まわりの自編集を、<<Modified>>フックに拾わせずに実行する。"""
+        self._suppress_modified = True
+        try:
+            self.text.edit_separator()
+            fn()
+            self.text.edit_separator()
+            self.text.edit_modified(False)
+        finally:
+            self._suppress_modified = False
+
+    def clear_text(self):
+        """抽出結果の本文を一気に消去する。直前の内容は「復元」ボタンで戻せるほか、
+        テキストのUndo（Ctrl/Cmd+Z）でも戻せる。"""
+        if self.busy or self._previewing:
+            self.status_var.set("再生／処理の実行中です。停止・完了してからお試しください。")
+            return
+        content = self.text.get("1.0", "end-1c")
+        if not content.strip():
+            self.status_var.set("本文は空です。消去するものがありません。")
+            return
+        self._edit_body(lambda: self.text.delete("1.0", "end"))
+        self._cleared_text = content
+        self.restore_btn.config(state="normal")
+        self.status_var.set("本文を全消去しました（「復元」ボタン／Ctrl・Cmd+Zで戻せます）。")
+
+    def restore_text(self):
+        """「本文を全消去」で消した内容を元に戻す。"""
+        if self.busy or self._previewing:
+            self.status_var.set("再生／処理の実行中です。停止・完了してからお試しください。")
+            return
+        if not self._cleared_text:
+            self.status_var.set("復元できる内容がありません。")
+            return
+        restored = self._cleared_text
+
+        def _do():
+            self.text.delete("1.0", "end")
+            self.text.insert("1.0", restored)
+        self._edit_body(_do)
+        self._cleared_text = None
+        self.restore_btn.config(state="disabled")
+        self.status_var.set("本文を復元しました。")
+
     # ---------------- 置換ルールの保存・適用 ----------------
     def _rule_labels(self):
         return [f"{f} → {r}" for f, r in self.replace_rules]
@@ -1088,44 +1437,111 @@ class App(_Base):
         self.text.insert("1.0", content)
         self.status_var.set(f"全{len(self.replace_rules)}ルールで計{total}件置換しました。")
 
-    # ---------------- テーマ（ライト/ダーク） ----------------
-    DARK_COLORS = dict(bg="#2b2b2b", fg="#e6e6e6", field="#3c3c3c",
-                       textbg="#1e1e1e", select="#44608a")
+    # ---------------- テーマ（ライト/ダーク・落ち葉カラー） ----------------
+    # 秋の落ち葉をイメージした暖色系パレット。ライトもダームも clam ベースで統一的に配色。
+    LIGHT = dict(
+        bg="#f4efe6", card="#faf6ee", field="#ffffff", textbg="#ffffff",
+        fg="#3d342c", subtle="#93867a", head_fg="#5a4636",
+        accent="#c56a2c", accent_hi="#dd7d3a", accent_fg="#ffffff",
+        btn="#ece1cf", btn_hi="#e2d3b9", border="#ddd0bd",
+        sel="#f0dcbf", disabled="#b7ab9a",
+    )
+    DARK = dict(
+        bg="#272320", card="#302b26", field="#3a342d", textbg="#1f1c19",
+        fg="#ece3d5", subtle="#a89b89", head_fg="#f0e6d6",
+        accent="#e08a45", accent_hi="#ef9a55", accent_fg="#241a12",
+        btn="#3c362f", btn_hi="#4a433a", border="#4a4239",
+        sel="#5c4632", disabled="#6b6255",
+    )
 
     def toggle_theme(self):
         self.dark_var.set(not self.dark_var.get())
         self.apply_theme()
 
     def apply_theme(self):
-        style = ttk.Style(self)
-        if self.dark_var.get():
-            c = self.DARK_COLORS
-            style.theme_use("clam")  # 色指定が全OSで効く共通テーマ
-            style.configure(".", background=c["bg"], foreground=c["fg"],
-                            fieldbackground=c["field"], troughcolor=c["field"],
-                            selectbackground=c["select"], selectforeground=c["fg"],
-                            insertcolor=c["fg"], bordercolor="#555555")
-            style.configure("TLabelframe.Label", background=c["bg"], foreground=c["fg"])
-            style.configure("TButton", background="#454545", foreground=c["fg"])
-            style.map("TButton", background=[("active", "#5a5a5a")])
-            for w in ("TCheckbutton", "TRadiobutton"):
-                style.map(w, background=[("active", c["bg"])])
-            style.map("TCombobox",
-                      fieldbackground=[("readonly", c["field"])],
-                      foreground=[("readonly", c["fg"])])
-            self.configure(bg=c["bg"])
-            self.text.config(bg=c["textbg"], fg=c["fg"], insertbackground=c["fg"])
-            self.listbox.config(bg=c["field"], fg=c["fg"])
-        else:
-            style.theme_use(self._default_theme)
-            self.configure(bg=self._default_bg)
-            tb, tf, ti = self._text_defaults
-            self.text.config(bg=tb, fg=tf, insertbackground=ti)
-            lb, lf = self._list_defaults
-            self.listbox.config(bg=lb, fg=lf)
-        # ハイライトは背景が明色のため、文字色を黒に固定して両テーマで読めるように
+        self._paint(self.DARK if self.dark_var.get() else self.LIGHT)
+        # 検索/再生のハイライトは明色固定なので、文字色を黒にして両テーマで読めるように
         for tag, bg in (("playing", "#cde8ff"), ("hit", "#fff3a3"), ("curhit", "#ffb347")):
             self.text.tag_config(tag, background=bg, foreground="#000000")
+
+    def _paint(self, p):
+        """パレット p を clam ベースで全ウィジェットへ一括適用する。"""
+        style = ttk.Style(self)
+        style.theme_use("clam")   # 色指定が全OSで効く共通テーマ（ライトも native aqua をやめる）
+        style.configure(".", background=p["bg"], foreground=p["fg"],
+                        fieldbackground=p["field"], troughcolor=p["field"],
+                        bordercolor=p["border"], darkcolor=p["bg"], lightcolor=p["bg"],
+                        selectbackground=p["sel"], selectforeground=p["fg"],
+                        insertcolor=p["fg"], focuscolor=p["accent"])
+        style.configure("TFrame", background=p["bg"])
+        style.configure("TLabel", background=p["bg"], foreground=p["fg"])
+        # セクション枠を薄い罫線のカード風に
+        style.configure("TLabelframe", background=p["bg"], bordercolor=p["border"],
+                        relief="solid", borderwidth=1)
+        style.configure("TLabelframe.Label", background=p["bg"],
+                        foreground=p["head_fg"], font=self._heading_font)
+        style.configure("Cluster.TLabel", background=p["bg"],
+                        foreground=p["accent"], font=self._heading_font)
+        style.configure("Credit.TLabel", background=p["bg"],
+                        foreground=p["subtle"], font=self._credit_font)
+        # 通常ボタン（フラット・少し余白）
+        style.configure("TButton", background=p["btn"], foreground=p["fg"],
+                        bordercolor=p["border"], relief="flat", padding=(7, 3),
+                        focuscolor=p["btn"])
+        style.map("TButton",
+                  background=[("pressed", p["btn_hi"]), ("active", p["btn_hi"]),
+                              ("disabled", p["bg"])],
+                  foreground=[("disabled", p["disabled"])])
+        # 主要ボタン（アクセント＝落ち葉オレンジ・太字）
+        style.configure("Primary.TButton", background=p["accent"],
+                        foreground=p["accent_fg"], bordercolor=p["accent"],
+                        font=self._primary_font, relief="flat", padding=(11, 6))
+        style.map("Primary.TButton",
+                  background=[("pressed", p["accent_hi"]), ("active", p["accent_hi"]),
+                              ("disabled", p["btn"])],
+                  foreground=[("disabled", p["disabled"])])
+        # 入力系
+        for w in ("TEntry", "TSpinbox", "TCombobox"):
+            style.configure(w, fieldbackground=p["field"], foreground=p["fg"],
+                            bordercolor=p["border"], insertcolor=p["fg"],
+                            arrowcolor=p["fg"])
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", p["field"]), ("disabled", p["bg"])],
+                  foreground=[("readonly", p["fg"]), ("disabled", p["disabled"])],
+                  selectbackground=[("readonly", p["field"])],
+                  selectforeground=[("readonly", p["fg"])],
+                  arrowcolor=[("disabled", p["disabled"])])
+        style.map("TSpinbox", arrowcolor=[("disabled", p["disabled"])])
+        # チェック/ラジオ（選択インジケータをアクセント色に）
+        for w in ("TCheckbutton", "TRadiobutton"):
+            style.configure(w, background=p["bg"], foreground=p["fg"],
+                            indicatorcolor=p["field"], focuscolor=p["bg"])
+            style.map(w, background=[("active", p["bg"])],
+                      indicatorcolor=[("selected", p["accent"]),
+                                      ("pressed", p["accent_hi"])],
+                      foreground=[("disabled", p["disabled"])])
+        # 進捗・区切り・スクロールバー
+        style.configure("TProgressbar", background=p["accent"],
+                        troughcolor=p["field"], bordercolor=p["border"])
+        style.configure("TSeparator", background=p["border"])
+        style.configure("TScrollbar", background=p["btn"], troughcolor=p["bg"],
+                        bordercolor=p["border"], arrowcolor=p["fg"])
+        style.map("TScrollbar", background=[("active", p["btn_hi"])])
+        # 非ttk（tk）ウィジェットは直接配色
+        self.configure(bg=p["bg"])
+        self.text.config(bg=p["textbg"], fg=p["fg"], insertbackground=p["fg"],
+                         selectbackground=p["sel"], selectforeground=p["fg"],
+                         highlightthickness=0, borderwidth=0)
+        self.listbox.config(bg=p["field"], fg=p["fg"],
+                            selectbackground=p["sel"], selectforeground=p["fg"],
+                            highlightthickness=0, borderwidth=0)
+        if getattr(self, "_portrait_label", None):
+            self._portrait_label.config(bg=p["bg"])  # 立ち絵の透過部を背景色に
+        # コンボボックスのドロップダウン一覧（option DB経由）
+        self.option_add("*TCombobox*Listbox.background", p["field"])
+        self.option_add("*TCombobox*Listbox.foreground", p["fg"])
+        self.option_add("*TCombobox*Listbox.selectBackground", p["accent"])
+        self.option_add("*TCombobox*Listbox.selectForeground", p["accent_fg"])
 
     # ---------------- 起動時のエンジン自動接続 ----------------
     def _auto_connect(self):
@@ -1255,6 +1671,7 @@ class App(_Base):
         labels = list(self.speaker_cb["values"])
         if p.get("speaker") in labels:
             self.speaker_cb.current(labels.index(p["speaker"]))
+            self._update_portrait()
         self.status_var.set(f"プリセット「{p['name']}」を適用しました。")
 
     def save_preset(self):
@@ -1293,7 +1710,9 @@ class App(_Base):
             "dpi": self.dpi_var.get(), "preprocess": self.pre_var.get(),
             "blank": self.blank_var.get(), "ascii": self.ascii_var.get(),
             "join": self.join_var.get(),
+            "smart_join": self.smartjoin_var.get(),
             "paren_ruby": self.pruby_var.get(), "normalize": self.norm_var.get(),
+            "denoise": self.denoise_var.get(),
             "dark": self.dark_var.get(),
             "unit": self._unit(), "nlines": self.nlines_var.get(),
             "srt": self.srt_var.get(),
@@ -1310,6 +1729,7 @@ class App(_Base):
             "bookmark": self._bookmark,
             "base_url": self.url_var.get().strip() or self.base_url,
             "geometry": self.geometry(),
+            "adv_open": bool(self._adv_open),
         }
 
     def _load_settings(self):
@@ -1326,9 +1746,12 @@ class App(_Base):
             self.blank_var.set(bool(s.get("blank", True)))
             self.ascii_var.set(bool(s.get("ascii", True)))
             self.join_var.set(bool(s.get("join", False)))
+            self.smartjoin_var.set(bool(s.get("smart_join", False)))
             self.pruby_var.set(bool(s.get("paren_ruby", False)))
             self.norm_var.set(bool(s.get("normalize", False)))
+            self.denoise_var.set(bool(s.get("denoise", True)))
             self.dark_var.set(bool(s.get("dark", False)))
+            self._set_advanced(bool(s.get("adv_open", False)))
             unit = s.get("unit")
             if unit is None and s.get("combine"):
                 unit = "combine"  # 旧設定(combine: true)からの引き継ぎ
@@ -1418,6 +1841,7 @@ class App(_Base):
                     _, cleaned, warnings = msg
                     self.text.delete("1.0", "end")
                     self.text.insert("1.0", cleaned)
+                    # 本文が変わったので復元ポイントは _on_text_modified が自動で無効化する
                     self.progress.config(value=self.progress["maximum"])
                     n = len([l for l in cleaned.split("\n") if l.strip()])
                     self.status_var.set(f"抽出完了：{n}行 / {len(cleaned)}文字")
@@ -1435,6 +1859,7 @@ class App(_Base):
                             if self._saved_speaker and self._saved_speaker in labels:
                                 idx = labels.index(self._saved_speaker)
                             self.speaker_cb.current(idx)
+                            self._update_portrait()
                         self.dlg_speaker_cb.config(values=labels, state="readonly")
                         if labels:
                             didx = 0

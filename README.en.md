@@ -28,7 +28,10 @@ You give it a file. It pulls the text out, cleans it up, and reads it aloud in a
 - **Subtitles** — produce a `.srt` subtitle file timed to the audio.
 - **Pronunciation dictionary** — teach it how to read names or words it gets wrong, once, and it remembers.
 - **OCR cleanup** — find-and-replace and batch rules to fix common OCR mistakes before reading.
+- **Smart line reflow** — for image OCR it uses each line's on-screen position (bounding box) to reliably rejoin sentences that were split across wrapped lines, while leaving headings, bullet lists and separate blocks intact — no false merges.
 - **Ruby / furigana removal** — strips ruby markup from Aozora Bunko texts, and `漢字(かんじ)`-style ruby from web novels, so they read cleanly.
+- **Screen-capture noise removal** — for screenshots of news programs or embedded social posts, it drops the on-screen overlay text (clock, channel logo, social handles, arrows, stray numbers) that isn't part of the article, keeping the body. Conservative by design (when in doubt, it keeps the line); on by default. Toggle it with the "画面キャプチャのノイズを除去" option in the GUI or `--denoise` / `--no-denoise` on the CLI.
+- **On-screen label removal** — for news image OCR it also removes short Japanese labels that plain text can't tell from the article (station logo, program name, timestamp, category — e.g. "MBSニュース", "国内"), using each line's position and font size to judge that it isn't body text. macOS only, sharing the same on/off as noise removal above; conservative (it never drops article body).
 - **Command line** — there's a CLI too, if you'd rather script it than click.
 
 The current release is **v1.4.1**, a stability pass that makes first-time setup and everyday use less fragile (see [CHANGELOG.md](CHANGELOG.md)); v1.4.0 before it was a big feature update (~25 new features). It's still moving fast, so expect some sharp edges.
