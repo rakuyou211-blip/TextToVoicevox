@@ -38,7 +38,7 @@ You give it a file. It pulls the text out, cleans it up, and reads it aloud in a
 - **On-screen label removal** — for news image OCR it also removes short Japanese labels that plain text can't tell from the article (station logo, program name, timestamp, category — e.g. "MBSニュース", "国内"), using each line's position and font size to judge that it isn't body text. macOS only, sharing the same on/off as noise removal above; conservative (it never drops article body).
 - **Command line** — there's a CLI too, if you'd rather script it than click.
 
-The current release is **v1.9.0**, which repaints the whole window in warm "fallen leaf" colors (light and dark) and adds a character panel: whoever you pick as the speaker — Zundamon or Shikoku Metan — now stands on the right-hand side of the window. The character art isn't bundled with the app; you drop your own PNGs into `assets/立ち絵/` (see [`assets/立ち絵/README.md`](assets/立ち絵/README.md)), and everything works the same if you don't. The full history is in [CHANGELOG.md](CHANGELOG.md). It's still moving fast, so expect some sharp edges.
+The current release is **v1.11.0**. The character panel on the right has come alive — blinking while idle, lip-syncing during playback, and switching to match each line's speaker — and there are now four color themes to pick from (🍂 light / 🌙 dark / ☀️ high-contrast / 🌿 zunda). The character art still isn't bundled with the app; you drop your own PNGs into `assets/立ち絵/` (see [`assets/立ち絵/README.md`](assets/立ち絵/README.md)), and everything works the same if you don't. The full history is in [CHANGELOG.md](CHANGELOG.md). It's still moving fast, so expect some sharp edges.
 
 ---
 
