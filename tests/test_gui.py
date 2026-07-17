@@ -23,7 +23,7 @@ REQUIRED_WIDGETS = [
     "listbox", "clip_btn", "extract_btn", "progress", "text", "text_font",
     "vvproj_btn", "speaker_cb", "dlg_speaker_cb", "preset_cb", "fmt_cb",
     "unit_cb", "preview_btn", "playall_btn", "resume_btn", "stop_btn",
-    "synth_btn", "dict_btn", "rule_cb", "restore_btn",
+    "synth_btn", "dict_btn", "rule_cb", "restore_btn", "theme_cb",
 ]
 
 # 保持必須の tk.*Var / StringVar 群
@@ -32,7 +32,7 @@ REQUIRED_VARS = [
     "into_var", "vol_var", "nlines_var", "gap_var", "srt_var", "find_var",
     "repl_var", "mode_var", "pdf_var", "dpi_var", "pre_var", "blank_var",
     "ascii_var", "smartjoin_var", "join_var", "pruby_var", "norm_var",
-    "denoise_var", "dark_var", "dlg_var",
+    "denoise_var", "dark_var", "dlg_var", "theme_var",
 ]
 
 # 配置を変えても生かす結線メソッド
@@ -94,15 +94,39 @@ def test_set_busy_toggles(app):
 
 def test_theme_roundtrip_restores_text_colors(app):
     """ダーク→ライトで本文欄の色が既定へ戻る（テーマ往復で色が残らない）。"""
-    app.dark_var.set(False)
+    app.theme_var.set("light")
     app.apply_theme()
     light_bg = str(app.text.cget("bg"))
-    app.dark_var.set(True)
+    app.theme_var.set("dark")
     app.apply_theme()
     assert str(app.text.cget("bg")) != light_bg
-    app.dark_var.set(False)
+    assert app.dark_var.get() is True    # 旧キー互換の同期
+    app.theme_var.set("light")
     app.apply_theme()
     assert str(app.text.cget("bg")) == light_bg
+    assert app.dark_var.get() is False
+
+
+def test_all_themes_apply_safely(app):
+    """4テーマすべて適用できて、パレットの背景が反映される。"""
+    for key, _label, pal in app.THEMES:
+        app.theme_var.set(key)
+        app.apply_theme()
+        assert str(app.text.cget("bg")) == pal["textbg"], key
+    app.theme_var.set("light")
+    app.apply_theme()
+
+
+def test_theme_backcompat_from_dark_flag(app, tmp_path, monkeypatch):
+    """旧settings.json（"dark": true のみ・"theme"なし）がダークとして読める。"""
+    import json
+    import main as main_mod
+    p = tmp_path / "settings.json"
+    p.write_text(json.dumps({"dark": True}), encoding="utf-8")
+    monkeypatch.setattr(main_mod, "SETTINGS_PATH", str(p))
+    app.theme_var.set("light")
+    app._load_settings()
+    assert app.theme_var.get() == "dark"
 
 
 def test_settings_roundtrip_keys_present(app):
@@ -113,7 +137,7 @@ def test_settings_roundtrip_keys_present(app):
                 "unit", "nlines", "srt", "font_size", "speed", "speaker",
                 "pitch", "intonation", "volume", "fmt", "gap", "replace_rules",
                 "presets", "dlg_enabled", "dlg_speaker", "bookmark", "base_url",
-                "geometry", "adv_open"):
+                "geometry", "adv_open", "theme"):
         assert key in d, f"設定キー {key} が欠落"
 
 
@@ -141,3 +165,19 @@ def test_portrait_and_resize_no_crash(app):
     assert isinstance(app._portraits, dict)
     app._update_portrait()          # 立ち絵が無くても例外を出さない
     app._on_resize_toggle_side()    # _side が None でも安全
+
+
+def test_portrait_frames_structure(app):
+    """立ち絵は base を必ず持つフレームdict（closed があれば base=closed）。"""
+    for key, frames in app._portraits.items():
+        assert isinstance(frames, dict) and "base" in frames, key
+
+
+def test_animation_methods_safe(app):
+    """まばたき・口パクの開始/停止が資産の有無に関わらず例外を出さない。"""
+    app._start_mouth()
+    app._start_mouth(speaker_id=999999)   # 未知IDでも安全
+    app._stop_mouth()
+    app._blink_tick()
+    app._show_frame("open")
+    app._show_frame("そんなフレームない")   # 未知名は base にフォールバック

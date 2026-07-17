@@ -8,6 +8,7 @@ import re
 import json
 import time
 import queue
+import random
 import threading
 import traceback
 import tempfile
@@ -141,7 +142,8 @@ class App(_Base):
         self._suppress_modified = False  # <<Modified>>ハンドラの一時抑止（全消去/復元の自編集用）
         self.encoders = core.audio_encoders()  # 使える音声変換 {"m4a":..., "mp3":...}
 
-        self.dark_var = tk.BooleanVar(value=False)
+        self.dark_var = tk.BooleanVar(value=False)   # 旧設定キー互換（theme=="dark"と同期）
+        self.theme_var = tk.StringVar(value="light")  # テーマの本体（light/dark/hc/zunda）
         self._build_ui()
         # 画像等を画面のどこに落としても効くよう、UI全ウィジェットをドロップ先に登録する
         self._register_drop_tree(self)
@@ -161,6 +163,9 @@ class App(_Base):
             except Exception:
                 pass
         self._setup_styles()
+        # 状態表示はパネル（吹き出し）とオプション欄の両方から参照するため最初に作る
+        # （初期文は短く：長いとrun行の右端コントロールを押し出す。D&DのヒントはS1見出しにある）
+        self.status_var = tk.StringVar(value="まずは 1. にファイルを追加してね🍂")
         # 右にキャラ立ち絵パネル（あれば）、左にメイン。右を先に side="right" で確保して
         # 幅をリザーブし、メインは残りを expand で埋める。狭い窓では立ち絵を自動で畳む。
         self._portraits = self._load_portraits()
@@ -201,7 +206,7 @@ class App(_Base):
     # ---------------- §1 入力ファイル ----------------
     def _build_files_section(self):
         hint = "（画像・PDF・フォルダを画面のどこにでもドラッグ＆ドロップ）" if _HAS_DND else ""
-        top = ttk.LabelFrame(self._main, text="1. 入力ファイル" + hint)
+        top = ttk.LabelFrame(self._main, text="1. 📥 入力ファイル" + hint)
         top.pack(fill="x", padx=PAD_X, pady=(PAD_Y, PAD_Y // 2))
 
         btns = ttk.Frame(top)
@@ -226,7 +231,7 @@ class App(_Base):
 
     # ---------------- §2 抽出オプション ----------------
     def _build_options_section(self):
-        opt = ttk.LabelFrame(self._main, text="2. 抽出オプション")
+        opt = ttk.LabelFrame(self._main, text="2. ⚙️ 抽出オプション")
         opt.pack(fill="x", padx=PAD_X, pady=PAD_Y // 2)
 
         # --- 基本（入出力）: 改行の扱い / PDF処理 / 解像度。ラベルを col0 で縦に揃える ---
@@ -314,12 +319,18 @@ class App(_Base):
         self.extract_btn = ttk.Button(run, text="▶ テキスト抽出 実行",
                                        style="Primary.TButton", command=self.start_extract)
         self.extract_btn.pack(side="left")
-        self.progress = ttk.Progressbar(run, mode="determinate", length=300)
+        self.progress = ttk.Progressbar(run, mode="determinate", length=240)
         self.progress.pack(side="left", padx=10)
-        self.status_var = tk.StringVar(value="待機中")
+        # テーマ選択（🍂ライト/🌙ダーク/☀️くっきり/🌿ずんだ）。packは後詰めから縮むため、
+        # 固定コントロールのテーマ選択を先に確保し、伸縮できる状態文を最後にする
+        self.theme_cb = ttk.Combobox(run, width=11, state="readonly",
+                                     values=[l for _k, l, _p in self.THEMES])
+        self.theme_cb.pack(side="right", padx=4)
+        self.theme_cb.bind("<<ComboboxSelected>>", self._theme_selected)
+        ttk.Label(run, text="テーマ:").pack(side="right")
+        # status_var は _build_ui 冒頭で生成済み（吹き出しと共有）。最後にpack＝
+        # 長い状態文があふれた時はここだけが縮み、ボタンやテーマ選択は消えない
         ttk.Label(run, textvariable=self.status_var).pack(side="left")
-        ttk.Button(run, text="🌓 テーマ", width=8,
-                   command=self.toggle_theme).pack(side="right", padx=4)
 
     def _toggle_advanced(self):
         self._set_advanced(not self._adv_open)
@@ -341,7 +352,7 @@ class App(_Base):
         # 4クラスタ［接続］［声・調整］［出力］［再生・生成］を、太字の見出しラベルと薄い
         # 区切り線で分ける。内側LabelFrameは縦を食い本文欄を潰すので使わず、伸縮の主役
         # （§3の本文）を優先して各クラスタは1〜2行に抑える。
-        bottom = ttk.LabelFrame(self._main, text="4. VOICEVOX へ")
+        bottom = ttk.LabelFrame(self._main, text="4. 🔊 VOICEVOX へ")
         bottom.pack(side="bottom", fill="x", padx=PAD_X, pady=(PAD_Y // 2, PAD_Y))
 
         def _sep():
@@ -443,29 +454,35 @@ class App(_Base):
         p = ttk.Frame(bottom)
         p.pack(fill="x", padx=GAPX, pady=(0, GAPY))
         ttk.Label(p, text="再生・生成", style="Cluster.TLabel").pack(side="left", padx=(0, GAPX))
-        self.preview_btn = ttk.Button(p, text="▶ 試聴(カーソル行)",
+        # 仕上げの主要ボタンは右端（終端位置＝マウスを流す先）に大きく。packは後詰めから
+        # 切れるため、主要ボタンを最初に確保して狭い窓でも必ず残す。辞書は誤クリック防止に
+        # 間隔をあけ、優先度が低いので最後（＝最初に畳まれる）
+        self.synth_btn = ttk.Button(p, text="🔊 音声を生成", style="Primary.TButton",
+                                    command=self.start_synth, state="disabled")
+        self.synth_btn.pack(side="right")
+        # 補足説明はラベルでなくツールチップに（最小幅860でも行全体が収まるように）
+        self.preview_btn = ttk.Button(p, text="▶ 試聴",
                                       command=self.preview_selected, state="disabled")
         self.preview_btn.pack(side="left")
-        self.playall_btn = ttk.Button(p, text="▶▶ 連続再生(カーソル行から)",
+        _Tooltip(self.preview_btn, "カーソルのある行を1行だけ試し聴きします。")
+        self.playall_btn = ttk.Button(p, text="▶▶ 連続再生",
                                       command=self.play_all, state="disabled")
         self.playall_btn.pack(side="left", padx=4)
+        _Tooltip(self.playall_btn, "カーソル行から最後まで順に読み上げます。")
         self.resume_btn = ttk.Button(p, text="⏵ 続きから",
                                      command=self.play_from_bookmark, state="disabled")
         self.resume_btn.pack(side="left", padx=4)
+        _Tooltip(self.resume_btn, "前回の続き（しおりの行）から再生します。")
         self.stop_btn = ttk.Button(p, text="■ 停止",
                                    command=self.stop_playall, state="disabled")
         self.stop_btn.pack(side="left", padx=4)
-        ttk.Separator(p, orient="vertical").pack(side="left", fill="y", padx=GAPX)
-        self.synth_btn = ttk.Button(p, text="🔊 音声を生成", style="Primary.TButton",
-                                    command=self.start_synth, state="disabled")
-        self.synth_btn.pack(side="left")
         self.dict_btn = ttk.Button(p, text="読み方辞書...",
                                    command=self.open_dict_dialog, state="disabled")
-        self.dict_btn.pack(side="left", padx=(GAPX, 0))
+        self.dict_btn.pack(side="right", padx=(0, 14))
 
     # ---------------- §3 抽出結果（編集可能・伸縮の主役） ----------------
     def _build_result_section(self):
-        mid = ttk.LabelFrame(self._main, text="3. 抽出結果（手動で修正できます）")
+        mid = ttk.LabelFrame(self._main, text="3. ✏️ 抽出結果（手動で修正できます）")
         mid.pack(fill="both", expand=True, padx=PAD_X, pady=PAD_Y // 2)
 
         # 一括置換バー
@@ -532,14 +549,24 @@ class App(_Base):
             pass
 
     def _load_portraits(self):
-        """assets/立ち絵/ の透過PNGを読み込む。無ければ空dict（パネルを出さない）。"""
-        files = {"zundamon": "zundamon.png", "metan": "metan.png"}
+        """assets/立ち絵/ の透過PNGを読み込む。無ければ空dict（パネルを出さない）。
+        追加フレーム（_closed/_open/_blink）があれば まばたき・口パクに使う。
+        フレームは公式立ち絵の口パク差分（同ポーズ・同寸法）を想定。"""
         out = {}
-        for key, fn in files.items():
-            img = self._load_scaled_image(os.path.join(PORTRAIT_DIR, fn),
-                                          max_w=230, max_h=640)
-            if img is not None:
-                out[key] = img
+        for key in ("zundamon", "metan"):
+            frames = {}
+            for frame, suffix in (("base", ""), ("closed", "_closed"),
+                                  ("open", "_open"), ("blink", "_blink")):
+                img = self._load_scaled_image(
+                    os.path.join(PORTRAIT_DIR, f"{key}{suffix}.png"),
+                    max_w=230, max_h=640)
+                if img is not None:
+                    frames[frame] = img
+            # 口閉じがあれば基準ポーズに（open/blink と同ポーズなので差し替えが滑らか）
+            if "closed" in frames:
+                frames["base"] = frames["closed"]
+            if "base" in frames:
+                out[key] = frames
         return out
 
     def _load_scaled_image(self, path, max_w, max_h):
@@ -555,12 +582,22 @@ class App(_Base):
             return None
 
     def _build_portrait_panel(self, parent):
-        # 立ち絵は下端そろえ（地面に立つ見た目）。透過部の背景はテーマに追従させる。
+        # 上に状態の吹き出し、下に立ち絵（下端そろえ＝地面に立つ見た目）、最下段にクレジット。
+        # 透過部と吹き出しの配色は _paint がテーマに追従させる。
+        self._bubble = tk.Label(parent, textvariable=self.status_var,
+                                wraplength=212, justify="left",
+                                bd=0, padx=10, pady=8, anchor="w")
+        self._bubble.pack(side="top", fill="x", pady=(0, 6))
         self._portrait_label = tk.Label(parent, bd=0, anchor="s")
         self._portrait_label.pack(side="top", fill="both", expand=True)
         ttk.Label(parent, text="VOICEVOX / 立ち絵:坂本アヒル",
                   style="Credit.TLabel").pack(side="bottom", pady=(4, 2))
+        self._portrait_key = None
+        self._mouth_after = None
+        self._mouth_open = False
+        self._blink_after = None
         self._update_portrait()
+        self._blink_after = self.after(3800, self._blink_tick)
 
     def _portrait_key_for(self, label):
         s = label or ""
@@ -570,16 +607,81 @@ class App(_Base):
             return "zundamon"
         return None
 
+    def _speaker_label_for_id(self, speaker_id):
+        for s in self.speakers:
+            if s[1] == speaker_id:
+                return s[0]
+        return ""
+
+    def _portrait_frames(self):
+        return self._portraits.get(getattr(self, "_portrait_key", None)) or {}
+
+    def _show_frame(self, name):
+        """現在のキャラの指定フレームを表示（無ければ base にフォールバック）。"""
+        if not getattr(self, "_portrait_label", None):
+            return
+        frames = self._portrait_frames()
+        img = frames.get(name) or frames.get("base")
+        if img is not None:
+            self._portrait_label.config(image=img)
+            self._portrait_label.image = img  # GC防止の参照保持
+
     def _update_portrait(self, event=None):
         """選択中の話者に応じて立ち絵を切り替える（対応が無ければ既定=ずんだもん）。"""
         if not getattr(self, "_portrait_label", None):
             return
         label = self.speaker_cb.get() if getattr(self, "speaker_cb", None) else ""
         key = self._portrait_key_for(label)
-        img = self._portraits.get(key) or self._portraits.get("zundamon")
-        if img is not None:
-            self._portrait_label.config(image=img)
-            self._portrait_label.image = img  # GC防止の参照保持
+        if key not in self._portraits:
+            key = "zundamon" if "zundamon" in self._portraits else \
+                next(iter(self._portraits), None)
+        self._portrait_key = key
+        self._show_frame("open" if self._mouth_open else "base")
+
+    # --- まばたき（アイドル時の小さな生命感。blinkフレームが無ければ何もしない） ---
+    def _blink_tick(self):
+        try:
+            if self._portrait_frames().get("blink") and not self._mouth_open:
+                self._show_frame("blink")
+                self.after(130, lambda: self._show_frame(
+                    "open" if self._mouth_open else "base"))
+            self._blink_after = self.after(random.randint(2800, 6400),
+                                           self._blink_tick)
+        except tk.TclError:
+            self._blink_after = None
+
+    # --- 口パク（試聴・連続再生の間だけ。openフレームが無ければ何もしない） ---
+    def _start_mouth(self, speaker_id=None):
+        if not self._portraits or not getattr(self, "_portrait_label", None):
+            return
+        if speaker_id is not None:
+            key = self._portrait_key_for(self._speaker_label_for_id(speaker_id))
+            if key in self._portraits:
+                self._portrait_key = key
+        self._stop_mouth(restore=False)
+        self._mouth_after = self.after(90, self._mouth_tick)
+
+    def _mouth_tick(self):
+        try:
+            if not self._portrait_frames().get("open"):
+                self._mouth_after = None
+                return
+            self._mouth_open = not self._mouth_open
+            self._show_frame("open" if self._mouth_open else "base")
+            self._mouth_after = self.after(110, self._mouth_tick)
+        except tk.TclError:
+            self._mouth_after = None
+
+    def _stop_mouth(self, restore=True):
+        if getattr(self, "_mouth_after", None):
+            try:
+                self.after_cancel(self._mouth_after)
+            except tk.TclError:
+                pass
+            self._mouth_after = None
+        self._mouth_open = False
+        if restore:
+            self._update_portrait()  # 既定話者の base に戻す
 
     def _on_resize_toggle_side(self, event=None):
         """窓が狭いときは立ち絵パネルを自動で畳み、メインの横幅を確保する。"""
@@ -1210,7 +1312,7 @@ class App(_Base):
         try:
             wb = core.vv_synthesize_one(self.base_url, line, speaker_id, **voice)
             self._preview_buf = wb
-            self.q.put(("preview_playing", line))
+            self.q.put(("preview_playing", line, speaker_id))
             # ワーカースレッドなので同期再生でブロックして問題ない
             core.play_wav_blocking(wb)
             self.q.put(("preview_done", True, line))
@@ -1286,10 +1388,11 @@ class App(_Base):
             # 再生中に次の行を裏で合成しておく（行間の待ちをほぼゼロに）
             with ThreadPoolExecutor(max_workers=1) as ex:
                 nxt = ex.submit(synth, targets[0])
-                for k, (lineno, ln, _sid) in enumerate(targets):
+                for k, (lineno, ln, sid) in enumerate(targets):
                     if stop.is_set():
                         break
-                    self.q.put(("playall_line", lineno, ln, played, len(targets)))
+                    self.q.put(("playall_line", lineno, ln, sid,
+                                played, len(targets)))
                     wb = nxt.result()
                     if k + 1 < len(targets):
                         nxt = ex.submit(synth, targets[k + 1])
@@ -1437,12 +1540,13 @@ class App(_Base):
         self.text.insert("1.0", content)
         self.status_var.set(f"全{len(self.replace_rules)}ルールで計{total}件置換しました。")
 
-    # ---------------- テーマ（ライト/ダーク・落ち葉カラー） ----------------
-    # 秋の落ち葉をイメージした暖色系パレット。ライトもダームも clam ベースで統一的に配色。
+    # ---------------- テーマ（選択式・4種） ----------------
+    # すべて clam ベースの統一配色。ライト/ダーク＝落ち葉、くっきり＝高コントラスト、
+    # ずんだ＝ずんだもんの若草色。文字と地の色差（コントラスト）を優先して選定。
     LIGHT = dict(
         bg="#f4efe6", card="#faf6ee", field="#ffffff", textbg="#ffffff",
-        fg="#3d342c", subtle="#93867a", head_fg="#5a4636",
-        accent="#c56a2c", accent_hi="#dd7d3a", accent_fg="#ffffff",
+        fg="#3d342c", subtle="#827564", head_fg="#5a4636",
+        accent="#b95f22", accent_hi="#d0712f", accent_fg="#ffffff",
         btn="#ece1cf", btn_hi="#e2d3b9", border="#ddd0bd",
         sel="#f0dcbf", disabled="#b7ab9a",
     )
@@ -1453,14 +1557,47 @@ class App(_Base):
         btn="#3c362f", btn_hi="#4a433a", border="#4a4239",
         sel="#5c4632", disabled="#6b6255",
     )
+    HC = dict(  # くっきり：白地＋濃紺文字＋強い枠線。小さな文字も読みやすく
+        bg="#ffffff", card="#ffffff", field="#ffffff", textbg="#ffffff",
+        fg="#111111", subtle="#3d3d3d", head_fg="#000000",
+        accent="#0a58ca", accent_hi="#2f74d8", accent_fg="#ffffff",
+        btn="#ededed", btn_hi="#dcdcdc", border="#5a5a5a",
+        sel="#bcd7ff", disabled="#8a8a8a",
+    )
+    ZUNDA = dict(  # ずんだ：ずんだもんの若草色。やわらかい緑の明色テーマ
+        bg="#edf6e8", card="#f7fbf3", field="#ffffff", textbg="#ffffff",
+        fg="#243329", subtle="#5f7264", head_fg="#2c5c3d",
+        accent="#357a4c", accent_hi="#43955e", accent_fg="#ffffff",
+        btn="#d9ead0", btn_hi="#c9e0bd", border="#b9cfae",
+        sel="#c9ecca", disabled="#9db3a2",
+    )
+    # (設定キー, 表示名, パレット)。表示名がテーマ選択プルダウンの並びになる
+    THEMES = [("light", "🍂 ライト", LIGHT), ("dark", "🌙 ダーク", DARK),
+              ("hc", "☀️ くっきり", HC), ("zunda", "🌿 ずんだ", ZUNDA)]
 
     def toggle_theme(self):
-        self.dark_var.set(not self.dark_var.get())
+        """ライト⇄ダークの簡易切替（旧APIとの互換用。選択はテーマプルダウンで）。"""
+        self.theme_var.set("light" if self.theme_var.get() == "dark" else "dark")
         self.apply_theme()
 
+    def _theme_selected(self, event=None):
+        i = self.theme_cb.current()
+        if 0 <= i < len(self.THEMES):
+            self.theme_var.set(self.THEMES[i][0])
+            self.apply_theme()
+
     def apply_theme(self):
-        self._paint(self.DARK if self.dark_var.get() else self.LIGHT)
-        # 検索/再生のハイライトは明色固定なので、文字色を黒にして両テーマで読めるように
+        keys = [k for k, _l, _p in self.THEMES]
+        key = self.theme_var.get()
+        if key not in keys:
+            key = "dark" if self.dark_var.get() else "light"
+            self.theme_var.set(key)
+        label, pal = next((l, p) for k, l, p in self.THEMES if k == key)
+        self.dark_var.set(key == "dark")  # 旧設定キー "dark" との互換を維持
+        if getattr(self, "theme_cb", None):
+            self.theme_cb.set(label)      # プルダウン表示を現テーマに同期
+        self._paint(pal)
+        # 検索/再生のハイライトは明色固定なので、文字色を黒にして全テーマで読めるように
         for tag, bg in (("playing", "#cde8ff"), ("hit", "#fff3a3"), ("curhit", "#ffb347")):
             self.text.tag_config(tag, background=bg, foreground="#000000")
 
@@ -1495,7 +1632,7 @@ class App(_Base):
         # 主要ボタン（アクセント＝落ち葉オレンジ・太字）
         style.configure("Primary.TButton", background=p["accent"],
                         foreground=p["accent_fg"], bordercolor=p["accent"],
-                        font=self._primary_font, relief="flat", padding=(11, 6))
+                        font=self._primary_font, relief="flat", padding=(14, 8))
         style.map("Primary.TButton",
                   background=[("pressed", p["accent_hi"]), ("active", p["accent_hi"]),
                               ("disabled", p["btn"])],
@@ -1537,6 +1674,11 @@ class App(_Base):
                             highlightthickness=0, borderwidth=0)
         if getattr(self, "_portrait_label", None):
             self._portrait_label.config(bg=p["bg"])  # 立ち絵の透過部を背景色に
+        if getattr(self, "_bubble", None):
+            # キャラ横の吹き出し（状態表示）。カード色＋細枠でテーマに追従
+            self._bubble.config(bg=p["card"], fg=p["fg"],
+                                highlightbackground=p["border"],
+                                highlightcolor=p["border"], highlightthickness=1)
         # コンボボックスのドロップダウン一覧（option DB経由）
         self.option_add("*TCombobox*Listbox.background", p["field"])
         self.option_add("*TCombobox*Listbox.foreground", p["fg"])
@@ -1714,6 +1856,7 @@ class App(_Base):
             "paren_ruby": self.pruby_var.get(), "normalize": self.norm_var.get(),
             "denoise": self.denoise_var.get(),
             "dark": self.dark_var.get(),
+            "theme": self.theme_var.get(),
             "unit": self._unit(), "nlines": self.nlines_var.get(),
             "srt": self.srt_var.get(),
             "font_size": int(self.text_font.cget("size")),
@@ -1751,6 +1894,12 @@ class App(_Base):
             self.norm_var.set(bool(s.get("normalize", False)))
             self.denoise_var.set(bool(s.get("denoise", True)))
             self.dark_var.set(bool(s.get("dark", False)))
+            # テーマ：新キー "theme" を優先。無い旧設定は "dark": true → ダーク で引き継ぐ
+            theme = s.get("theme")
+            if theme is None and bool(s.get("dark", False)):
+                theme = "dark"
+            if theme in {k for k, _l, _p in self.THEMES}:
+                self.theme_var.set(theme)
             self._set_advanced(bool(s.get("adv_open", False)))
             unit = s.get("unit")
             if unit is None and s.get("combine"):
@@ -1823,6 +1972,13 @@ class App(_Base):
     def _on_close(self):
         if self._playall_stop is not None:
             self._playall_stop.set()  # 連続再生中でも即終了できるように
+        for attr in ("_blink_after", "_mouth_after"):  # 立ち絵アニメの後始末
+            h = getattr(self, attr, None)
+            if h:
+                try:
+                    self.after_cancel(h)
+                except tk.TclError:
+                    pass
         self._save_settings()
         self._save_text_cache()
         self.destroy()
@@ -1844,7 +2000,8 @@ class App(_Base):
                     # 本文が変わったので復元ポイントは _on_text_modified が自動で無効化する
                     self.progress.config(value=self.progress["maximum"])
                     n = len([l for l in cleaned.split("\n") if l.strip()])
-                    self.status_var.set(f"抽出完了：{n}行 / {len(cleaned)}文字")
+                    self.status_var.set(f"抽出完了：{n}行 / {len(cleaned)}文字"
+                                        "（3.で直して → 4.で音声に🍂）")
                     self._set_busy(False)
                     if warnings:
                         messagebox.showwarning("注意", "\n".join(warnings))
@@ -1888,11 +2045,13 @@ class App(_Base):
                             self.text.insert("1.0", cleaned)
                         self.status_var.set(f"クリップボード画像をOCRしました（{len(cleaned)}文字を追記）")
                 elif kind == "preview_playing":
-                    _, line = msg
+                    _, line, sid = msg
+                    self._start_mouth(sid)  # 立ち絵の口パク（喋る話者のキャラに切替）
                     self.status_var.set(f"試聴 再生中: {line[:30]}")
                 elif kind == "preview_done":
                     _, ok, info = msg
                     self._previewing = False
+                    self._stop_mouth()
                     if self.speakers and not self.busy:
                         self.preview_btn.config(state="normal")
                         self.playall_btn.config(state="normal")
@@ -1902,9 +2061,10 @@ class App(_Base):
                         self.status_var.set("試聴エラー")
                         messagebox.showerror("エラー", info[-1500:])
                 elif kind == "playall_line":
-                    _, lineno, line, done, total = msg
+                    _, lineno, line, sid, done, total = msg
                     # 再生中の行にカーソルを移してハイライト表示。しおりも更新
                     self._bookmark = lineno
+                    self._start_mouth(sid)  # 行の話者に合わせてキャラ切替＋口パク
                     self.text.tag_remove("playing", "1.0", "end")
                     self.text.tag_add("playing", f"{lineno}.0", f"{lineno}.end")
                     self.text.tag_config("playing", background="#cde8ff")
@@ -1915,6 +2075,7 @@ class App(_Base):
                     _, ok, info, played = msg
                     self._previewing = False
                     self._playall_stop = None
+                    self._stop_mouth()
                     self.text.tag_remove("playing", "1.0", "end")
                     self.stop_btn.config(state="disabled")
                     if self.speakers and not self.busy:
