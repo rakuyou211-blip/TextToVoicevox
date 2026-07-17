@@ -52,6 +52,15 @@ def _recognize_one(path, languages, reflow=True, strip_labels=True):
     request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
     request.setUsesLanguageCorrection_(True)
     try:
+        # 日本語対応の Revision3 (macOS 13+) を明示する。生成時の既定revisionは
+        # 実行環境・リンク方法に依存し、古い版に落ちると日本語精度が下がるため。
+        # 未対応OS (macOS 12以前) では設定せず既定のまま（例外時も現状維持）。
+        revs = Vision.VNRecognizeTextRequest.supportedRevisions()
+        if revs and revs.containsIndex_(3):
+            request.setRevision_(3)
+    except Exception:
+        pass
+    try:
         request.setRecognitionLanguages_(languages)
         ok, err = handler.performRequests_error_([request], None)
     except Exception:

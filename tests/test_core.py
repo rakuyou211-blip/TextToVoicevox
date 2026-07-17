@@ -1358,3 +1358,421 @@ class TestCliSpeakerTags:
         assert ("こんにちは", 3) in calls
         assert ("地の文です。", 3) in calls
         assert all("@" not in t for t, _ in calls)
+
+
+# ============================================================
+#  split_sentences（括弧・連続終端記号の対応）
+# ============================================================
+class TestSplitSentencesBrackets:
+    def test_quote_not_split_inside(self):
+        assert core.split_sentences("「もう帰る。」と彼は言った。") == \
+            ["「もう帰る。」と彼は言った。"]
+
+    def test_consecutive_enders_grouped(self):
+        assert core.split_sentences("えっ！？そうなの？") == ["えっ！？", "そうなの？"]
+
+    def test_stray_closer_attached(self):
+        # 前行から迷い込んだ閉じ括弧は前の文に取り込む（現行の「」B分断より自然）
+        assert core.split_sentences("A。」B") == ["A。」", "B"]
+
+    def test_quote_inside_sentence(self):
+        assert core.split_sentences("彼は「危ない！」と叫んだ。") == \
+            ["彼は「危ない！」と叫んだ。"]
+
+    def test_halfwidth_parens(self):
+        # normalize_ascii 適用後の (…?) でも分割しない
+        assert core.split_sentences("(テスト?)です。次の文。") == \
+            ["(テスト?)です。", "次の文。"]
+
+    def test_unclosed_bracket_reset_by_newline(self):
+        # 開き括弧が閉じないOCRテキストでも改行で必ず切れる（行を跨いで巻き込まない）
+        assert core.split_sentences("「壊れた行。\n次の文。") == \
+            ["「壊れた行。", "次の文。"]
+
+    def test_orphan_fullwidth_closer_clamped(self):
+        # 開きの無い】で深さが負にならず、以降の分割が正常に続く
+        assert core.split_sentences("見出し】本文です。次です。") == \
+            ["見出し】本文です。", "次です。"]
+
+    def test_multiline_dialogue_single_unit(self):
+        assert core.split_sentences("「そうか。それなら行こう。」") == \
+            ["「そうか。それなら行こう。」"]
+
+
+# ============================================================
+#  fix_ocr_confusables（同形文字の文脈補正）
+# ============================================================
+class TestFixOcrConfusables:
+    def test_choonpu_from_ichi(self):
+        assert core.fix_ocr_confusables("サ一ビスを開始") == "サービスを開始"
+        assert core.fix_ocr_confusables("エラ一コ一ド") == "エラーコード"
+
+    def test_ichi_from_choonpu_between_kanji(self):
+        assert core.fix_ocr_confusables("第ー章") == "第一章"
+
+    def test_real_ichi_protected(self):
+        # 直後がひらがな・漢字なら本物の「一」（助数詞・固有名詞）
+        for s in ("メロン一つ", "アメリカ一の", "ケーキ一個", "一ノ瀬さん"):
+            assert core.fix_ocr_confusables(s) == s
+
+    def test_kanji_to_katakana(self):
+        assert core.fix_ocr_confusables("デジ夕ル") == "デジタル"
+        assert core.fix_ocr_confusables("卜ヨタと二ュース") == "トヨタとニュース"
+        assert core.fix_ocr_confusables("口ッカーと工アコン") == "ロッカーとエアコン"
+
+    def test_kanji_words_protected(self):
+        # 漢字文脈・実在語は変換しない
+        for s in ("口コミを見る", "その口コミが", "お口ケアの話", "夕方のこと",
+                  "力士の力", "山口ロープウェイ", "工場で働く", "二人の話",
+                  # 口・二はカタカナ語との実在複合語が多く、語頭変換は
+                  # 小書きカナ・長音が続くときだけ（口ボットは既知の限界として温存）
+                  "彼は口パクだった", "入り口ドア", "口ボット",
+                  "あと二ヶ月で完成", "まだ二カ月かかる", "二チームに分けた",
+                  "残り二コマ", "百カ日の法要"):
+            assert core.fix_ocr_confusables(s) == s
+
+    def test_compound_choonpu_misread(self):
+        # 「ー→一」誤認の隣のカタカナを漢字と誤判定しない（2パス順序の回帰テスト）
+        assert core.fix_ocr_confusables("顧客ニ一ズ") == "顧客ニーズ"
+        assert core.fix_ocr_confusables("診察カ一ド") == "診察カード"
+
+    def test_katakana_to_kanji(self):
+        assert core.fix_ocr_confusables("入カ完了") == "入力完了"
+        assert core.fix_ocr_confusables("人エ知能") == "人工知能"
+        assert core.fix_ocr_confusables("第ニ章") == "第二章"
+
+    def test_counter_and_prev_guards(self):
+        # 「数カ月」等の助数詞・「誰カ」等は変換しない
+        for s in ("数カ月と何カ国", "十数カ所", "誰カが来た", "入カした"):
+            assert core.fix_ocr_confusables(s) == s
+
+    def test_digit_tokens(self):
+        assert core.fix_ocr_confusables("2O26年1l時30分") == "2026年11時30分"
+
+    def test_alnum_tokens_protected(self):
+        for s in ("H2Oの化学式", "500mlのペットボトル", "Illustrator",
+                  # 英字がトークン先頭に固まる形は実在の型番・記号名
+                  "O157が検出された", "O2センサー", "型番はl0です"):
+            assert core.fix_ocr_confusables(s) == s
+
+    def test_context_skips_ocr_spaces(self):
+        # OCR特有の文字間空白があっても前後の実文字で判定する
+        assert core.fix_ocr_confusables("サ 一 ビス") == "サ ー ビス"
+
+    def test_empty(self):
+        assert core.fix_ocr_confusables("") == ""
+
+
+# ============================================================
+#  expand_readable_chars（読み上げ困難な記号の展開）
+# ============================================================
+class TestExpandReadableChars:
+    def test_circled_numbers(self):
+        assert core.expand_readable_chars("①と⑳と㉑と㊿") == "1と20と21と50"
+
+    def test_consecutive_numbers_separated(self):
+        # 連続する丸数字・隣接する算用数字と連結して別の数を作らない
+        assert core.expand_readable_chars("手順は①②③の順") == "手順は1、2、3の順"
+        assert core.expand_readable_chars("手順①2番目") == "手順1、2番目"
+
+    def test_roman_numerals(self):
+        assert core.expand_readable_chars("Ⅲ章とⅻ") == "3章と12"
+
+    def test_company_and_units(self):
+        assert core.expand_readable_chars("㈱山田と50㎡と25℃") == \
+            "株式会社山田と50平方メートルと25度"
+
+    def test_plain_text_unchanged(self):
+        s = "普通のテキスト ABC 123。"
+        assert core.expand_readable_chars(s) == s
+
+    def test_clean_text_normalize_applies(self):
+        out = core.clean_text("①これは㈱テストの話。", normalize=True)
+        assert out == "1これは株式会社テストの話。"
+
+    def test_clean_text_without_normalize_keeps(self):
+        out = core.clean_text("①これは㈱テストの話。", normalize=False)
+        assert "①" in out and "㈱" in out
+
+
+# ============================================================
+#  denoise_capture（クレジット行・数値行・英数見出しの改善）
+# ============================================================
+class TestDenoiseCaptureNew:
+    def test_photo_credit_dropped(self):
+        raw = "本文の記事です。\n写真：ロイター\n撮影＝共同"
+        out = core.denoise_capture(raw)
+        assert "写真：ロイター" not in out
+        assert "撮影＝共同" not in out
+        assert "本文の記事です。" in out
+
+    def test_credit_sentence_with_hiragana_kept(self):
+        raw = "本文の記事です。\n写真は田中さんの提供です"
+        assert "写真は田中さんの提供です" in core.denoise_capture(raw)
+
+    def test_count_with_double_suffix_dropped(self):
+        raw = "本文の記事です。\n1.2万人\n1,234万回"
+        out = core.denoise_capture(raw)
+        assert "1.2万人" not in out
+        assert "1,234万回" not in out
+
+    def test_count_sentence_kept(self):
+        raw = "本文の記事です。\n1.2万人が視聴した。"
+        assert "1.2万人が視聴した。" in core.denoise_capture(raw)
+
+    def test_single_suffix_counts_still_dropped(self):
+        # 従来から落ちていた単独カウント行の回帰ガード
+        raw = "本文の記事です。\n1.2K\n3M\n1位\n50%"
+        out = core.denoise_capture(raw)
+        for noise in ("1.2K", "3M", "1位", "50%"):
+            assert noise not in out.split("\n")
+
+    def test_price_not_strict_noise(self):
+        # 「円」はカウント接尾辞に含めない（価格はラベル除去・非日本語文書でも消さない）
+        assert not core._denoise_is_strict_noise("1,980円")
+        assert core._denoise_is_strict_noise("1.2万人")
+
+    def test_product_headline_kept(self):
+        raw = "日本語の記事本文です。\niPhone 17 Pro Max\nNintendo Switch 2"
+        out = core.denoise_capture(raw)
+        assert "iPhone 17 Pro Max" in out
+        assert "Nintendo Switch 2" in out
+
+    def test_ascii_fragments_still_dropped(self):
+        # 英字だけ・数字だけの断片は従来どおり落ちる（日本語主体の文書で判定が効く）
+        raw = ("日本語の記事本文がここにあります。\n"
+               "記事の続きも日本語で書かれています。\n"
+               "THE\nNEWS\n2026 07 14")
+        out = core.denoise_capture(raw)
+        for noise in ("THE", "NEWS", "2026 07 14"):
+            assert noise not in out.split("\n")
+
+    def test_english_sns_overlays_still_dropped(self):
+        # 製品名保護がSNSの視聴数・経過時間・英語日付まで残さない（v1.11相当を維持）
+        raw = ("日本語の記事本文がここにあります。\n"
+               "記事の続きも日本語で書かれています。\n"
+               "1.2K views\n10K views\nposted 3 hours ago\nJul 14, 2026")
+        out = core.denoise_capture(raw)
+        for noise in ("1.2K views", "10K views", "posted 3 hours ago",
+                      "Jul 14, 2026"):
+            assert noise not in out.split("\n")
+
+
+# ============================================================
+#  strip_aozora（踊り字・くの字点・底本フッターの拡充）
+# ============================================================
+class TestStripAozoraExpanded:
+    def test_odoriji_expanded(self):
+        assert core.strip_aozora("こゝろ") == "こころ"
+        assert core.strip_aozora("つゞく") == "つづく"
+        assert core.strip_aozora("バナヽ") == "バナナ"
+
+    def test_odoriji_at_head_untouched(self):
+        # 直前がかなでない踊り字は展開しない（句読点・文頭の複製防止）
+        assert core.strip_aozora("ゝあ") == "ゝあ"
+        assert core.strip_aozora("。ゝ") == "。ゝ"
+
+    def test_kunoji_expanded(self):
+        assert core.strip_aozora("どき／＼した") == "どきどきした"
+        assert core.strip_aozora("しみ／″＼と") == "しみじみと"
+
+    def test_kunoji_after_non_kana_untouched(self):
+        # AA的な／＼は展開しない
+        assert core.strip_aozora("矢印／＼記号") == "矢印／＼記号"
+
+    def test_kunoji_ambiguous_unit_untouched(self):
+        # 直前2文字のさらに前もかな＝繰り返し単位が2文字と確定できない場合は
+        # 展開しない（かはる／″＼を「かはるばる」にしない）
+        assert core.strip_aozora("かはる／″＼") == "かはる／″＼"
+        assert core.strip_aozora("おもひ／＼に") == "おもひ／＼に"
+
+    def test_footer_removed(self):
+        body = "本文です。\n" * 10
+        raw = body + "底本：「吾輩は猫である」新潮文庫\n1990年発行"
+        out = core.strip_aozora(raw)
+        assert "底本：" not in out
+        assert "本文です。" in out
+
+    def test_footer_like_line_in_first_half_kept(self):
+        # テキスト前半の「底本：」は削らない（連結txtの安全弁）
+        raw = "底本：メモ\n" + "本文です。\n" * 20
+        assert "底本：メモ" in core.strip_aozora(raw)
+
+    def test_concat_works_last_footer_only(self):
+        # 複数作品の連結txt: 中間の底本行で後続作品を巻き込まず、末尾の奥付だけ削る
+        raw = ("作品Aの本文です。\n" * 30
+               + "底本：「作品A」文庫X\n"
+               + "作品Bの本文です。\n" * 20
+               + "底本：「作品B」文庫Y\n1990年発行")
+        out = core.strip_aozora(raw)
+        assert "作品Bの本文です。" in out
+        assert "底本：「作品B」文庫Y" not in out
+
+    def test_mid_footer_never_deletes_following_work(self):
+        # 末尾に底本が無い連結txtでは、中間の底本行の後に続く作品を削らない
+        # （底本以降が _AOZORA_FOOTER_MAX_CHARS を超える＝奥付ではなく本文とみなす）
+        raw = ("作品Aの本文です。\n" * 30
+               + "底本：「作品A」文庫X\n"
+               + "作品Bの本文です。\n" * 300)
+        out = core.strip_aozora(raw)
+        assert "作品Bの本文です。" in out
+
+    def test_symbol_note_block_removed(self):
+        raw = ("タイトル\n"
+               + "-" * 20 + "\n"
+               + "【テキスト中に現れる記号について】\n"
+               + "《》：ルビ\n"
+               + "-" * 20 + "\n"
+               + "本文が始まります。")
+        out = core.strip_aozora(raw)
+        assert "記号について" not in out
+        assert "本文が始まります。" in out
+
+    def test_plain_hr_lines_kept(self):
+        # 記号説明の見出しが無い水平線は本文の一部として残す
+        raw = "前半\n" + "-" * 20 + "\n中身\n" + "-" * 20 + "\n後半"
+        assert core.strip_aozora(raw) == raw
+
+
+# ============================================================
+#  preprocess_image（透過白合成・モード正規化・OS別の上限とグレースケール）
+# ============================================================
+class TestPreprocessImage:
+    def _img(self, mode, size, color=None):
+        from PIL import Image
+        return Image.new(mode, size, color) if color is not None \
+            else Image.new(mode, size)
+
+    def test_transparent_composited_white(self):
+        out = core.preprocess_image(
+            self._img("RGBA", (100, 100), (0, 0, 0, 0)), enable=False)
+        assert out.mode == "RGB"
+        assert out.getpixel((50, 50)) == (255, 255, 255)
+
+    def test_cmyk_normalized_for_png(self):
+        out = core.preprocess_image(self._img("CMYK", (50, 50)), enable=False)
+        assert out.mode in ("RGB", "L")
+
+    def test_disable_keeps_color_and_size_cap_only(self, monkeypatch):
+        monkeypatch.setattr(core, "IS_WIN", False)
+        monkeypatch.setattr(core, "IS_MAC", True)
+        out = core.preprocess_image(
+            self._img("RGB", (5000, 100), (10, 20, 30)), enable=False)
+        assert out.mode == "RGB"
+        assert max(out.size) == 4000
+
+    def test_mac_keeps_color_when_enabled(self, monkeypatch):
+        monkeypatch.setattr(core, "IS_WIN", False)
+        monkeypatch.setattr(core, "IS_MAC", True)
+        out = core.preprocess_image(self._img("RGB", (2000, 1000), (200, 30, 30)))
+        assert out.mode == "RGB"
+
+    def test_windows_caps_at_ocr_limit(self, monkeypatch):
+        monkeypatch.setattr(core, "IS_WIN", True)
+        monkeypatch.setattr(core, "IS_MAC", False)
+        # A4×300dpi相当がOcrEngineの上限(2600)以内に収まる
+        out = core.preprocess_image(self._img("RGB", (3508, 2480), "white"))
+        assert max(out.size) <= core.WIN_OCR_MAX_DIM
+        # 2倍拡大後も上限を超えない
+        out2 = core.preprocess_image(self._img("RGB", (1400, 1000), "white"))
+        assert max(out2.size) <= core.WIN_OCR_MAX_DIM
+        assert out2.mode == "L"   # Windowsはグレースケール強調
+
+    def test_non_windows_keeps_4000_cap(self, monkeypatch):
+        monkeypatch.setattr(core, "IS_WIN", False)
+        monkeypatch.setattr(core, "IS_MAC", True)
+        out = core.preprocess_image(self._img("RGB", (5000, 1000), "white"))
+        assert max(out.size) == 4000
+
+
+# ============================================================
+#  _parse_windows_ocr_result（Windows OCRの座標パイプライン）
+# ============================================================
+class TestParseWindowsOcrResult:
+    # 折り返された2行（右端まで届く1行目）→ reflow で1文に連結される
+    _WRAPPED = [
+        {"text": "これは長い本文の一行目でありまして", "x0": 0.05, "x1": 0.95,
+         "y0": 0.30, "y1": 0.34},
+        {"text": "二行目に続きます。", "x0": 0.05, "x1": 0.60,
+         "y0": 0.35, "y1": 0.39},
+    ]
+
+    def test_lines_reflowed(self):
+        data = [{"path": "a.png", "ok": True,
+                 "text": "これは長い本文の一行目でありまして\n二行目に続きます。",
+                 "lines": self._WRAPPED}]
+        out = core._parse_windows_ocr_result(data)
+        assert out["a.png"] == "これは長い本文の一行目でありまして二行目に続きます。"
+
+    def test_old_format_uses_text(self):
+        data = [{"path": "b.png", "ok": True, "text": "旧形式テキスト"}]
+        assert core._parse_windows_ocr_result(data)["b.png"] == "旧形式テキスト"
+
+    def test_broken_lines_fall_back_to_text(self):
+        data = [{"path": "c.png", "ok": True, "text": "fallback",
+                 "lines": [{"broken": True}]}]
+        assert core._parse_windows_ocr_result(data)["c.png"] == "fallback"
+
+    def test_failed_item_empty(self):
+        data = [{"path": "d.png", "ok": False, "text": "", "error": "x"}]
+        assert core._parse_windows_ocr_result(data)["d.png"] == ""
+
+    def test_single_dict_lines_wrapped(self):
+        # ConvertTo-Json が1要素配列をオブジェクトに畳んだ場合
+        data = [{"path": "e.png", "ok": True, "text": "一行だけ",
+                 "lines": {"text": "一行だけ", "x0": 0.1, "x1": 0.5,
+                           "y0": 0.1, "y1": 0.15}}]
+        assert core._parse_windows_ocr_result(data)["e.png"] == "一行だけ"
+
+    def test_strip_labels_toggle(self):
+        # 本文ブロック＋最上部の孤立短ラベル。strip_labels=True でのみ除去される
+        body = [
+            {"text": f"本文の段落{i}行目がここに続いています。", "x0": 0.05,
+             "x1": 0.95, "y0": 0.30 + i * 0.05, "y1": 0.33 + i * 0.05}
+            for i in range(4)
+        ]
+        label = {"text": "NEWSロゴ", "x0": 0.02, "x1": 0.18,
+                 "y0": 0.02, "y1": 0.05}
+        data = [{"path": "f.png", "ok": True, "text": "raw",
+                 "lines": [label] + body}]
+        with_strip = core._parse_windows_ocr_result(data, strip_labels=True)
+        without = core._parse_windows_ocr_result(data, strip_labels=False)
+        assert "NEWSロゴ" not in with_strip["f.png"]
+        assert "NEWSロゴ" in without["f.png"]
+
+
+# ============================================================
+#  extract_files の fix_confusables（OCR由来テキストのみ補正）
+# ============================================================
+class TestExtractFilesFixConfusables:
+    def _fake_ocr(self, monkeypatch, result_text):
+        monkeypatch.setattr(
+            core, "run_ocr",
+            lambda paths, lang="ja", strip_labels=True:
+                {p: result_text for p in paths})
+
+    def _png(self, tmp_path):
+        from PIL import Image
+        p = tmp_path / "img.png"
+        Image.new("RGB", (200, 100), "white").save(p)
+        return str(p)
+
+    def test_ocr_text_fixed_when_enabled(self, tmp_path, monkeypatch):
+        self._fake_ocr(monkeypatch, "卜ヨタのサ一ビス")
+        text, warnings = core.extract_files([self._png(tmp_path)],
+                                            fix_confusables=True)
+        assert text == "トヨタのサービス"
+        assert not warnings
+
+    def test_ocr_text_untouched_when_disabled(self, tmp_path, monkeypatch):
+        self._fake_ocr(monkeypatch, "卜ヨタのサ一ビス")
+        text, _ = core.extract_files([self._png(tmp_path)],
+                                     fix_confusables=False)
+        assert text == "卜ヨタのサ一ビス"
+
+    def test_text_layer_never_fixed(self, tmp_path):
+        # txt入力（テキスト層）には fix_confusables=True でも適用しない
+        src = tmp_path / "novel.txt"
+        src.write_text("口コミとサ一ビス", encoding="utf-8")
+        text, _ = core.extract_files([str(src)], fix_confusables=True)
+        assert text == "口コミとサ一ビス"

@@ -61,7 +61,9 @@ GAPY = 4     # grid の行間
 
 
 class _Tooltip:
-    """軽量ツールチップ（ホバーで説明を表示）。既存のバインドを壊さないよう add='+'。"""
+    """軽量ツールチップ（ホバーで説明を表示）。既存のバインドを壊さないよう add='+'。
+    text には文字列のほか「呼び出しの度に評価される関数」も渡せる（無効ボタンに
+    “なぜ押せないか”を状態に応じて出すため）。関数が空文字を返せば表示しない。"""
     def __init__(self, widget, text, delay=500):
         self.widget = widget
         self.text = text
@@ -88,7 +90,8 @@ class _Tooltip:
             self._id = None
 
     def _show(self):
-        if self._tip or not self.text:
+        text = self.text() if callable(self.text) else self.text
+        if self._tip or not text:
             return
         try:
             x = self.widget.winfo_rootx() + 14
@@ -96,7 +99,7 @@ class _Tooltip:
             self._tip = tw = tk.Toplevel(self.widget)
             tw.wm_overrideredirect(True)
             tw.wm_geometry(f"+{x}+{y}")
-            tk.Label(tw, text=self.text, justify="left", background="#ffffe0",
+            tk.Label(tw, text=text, justify="left", background="#ffffe0",
                      foreground="#000000", relief="solid", borderwidth=1,
                      padx=6, pady=3).pack()
         except tk.TclError:
@@ -140,6 +143,8 @@ class App(_Base):
         self._saved_dlg_speaker = None  # 設定から復元するセリフ話者ラベル
         self._cleared_text = None       # 「本文を全消去」で退避した本文（復元用）
         self._suppress_modified = False  # <<Modified>>ハンドラの一時抑止（全消去/復元の自編集用）
+        self._vdetail_open = False      # プリセット/セリフ行の開閉状態（§4の折りたたみ）
+        self._resize_after = None       # <Configure>デバウンス用のafterハンドル
         self.encoders = core.audio_encoders()  # 使える音声変換 {"m4a":..., "mp3":...}
 
         self.dark_var = tk.BooleanVar(value=False)   # 旧設定キー互換（theme=="dark"と同期）
@@ -151,6 +156,7 @@ class App(_Base):
         # ライト/ダークとも clam ベースのデザインパレットを常に適用する（起動時に美観を反映）
         self.apply_theme()
         self._restore_text_cache()
+        self._update_step_highlight()   # 本文の有無に応じて「次に押すボタン」を絞る
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._poll_queue)
         self.after(600, self._auto_connect)  # 起動時にエンジンへ自動接続
@@ -188,7 +194,7 @@ class App(_Base):
         self._build_result_section()
 
         if self._side is not None:
-            self.bind("<Configure>", self._on_resize_toggle_side, add="+")
+            self.bind("<Configure>", self._on_configure, add="+")
 
     # ---------------- スタイル（フォント） ----------------
     def _setup_styles(self):
@@ -276,6 +282,7 @@ class App(_Base):
         self.ascii_var = tk.BooleanVar(value=True)
         self.smartjoin_var = tk.BooleanVar(value=False)
         self.denoise_var = tk.BooleanVar(value=True)
+        self.fixconf_var = tk.BooleanVar(value=True)
         common_defs = [
             (self.pre_var, "画像前処理（精度向上）",
              "写真やスキャンを補正してOCRの精度を上げます。"),
@@ -286,6 +293,9 @@ class App(_Base):
              "ページ幅で折り返された行を1文につなげます。"),
             (self.denoise_var, "画面キャプチャのノイズを除去",
              "字幕・局ロゴ・UIラベルなど画面上の余計な文字を取り除きます。"),
+            (self.fixconf_var, "OCR誤字を補正（力⇄カ・一⇄ー）",
+             "OCRが取り違えやすい同形文字を前後の文脈で自動修正します。\n"
+             "画像・スキャンPDFのOCR結果にだけ適用されます（テキストファイルは対象外）。"),
         ]
         for i, (var, label, tip) in enumerate(common_defs):
             cb = ttk.Checkbutton(common, text=label, variable=var)
@@ -305,7 +315,9 @@ class App(_Base):
              "句点で終わらない改行を前の行につなげます。"),
             (self.pruby_var, "括弧ルビ除去 例:漢字(かんじ)",
              "漢字の後の括弧内の読みがなを削除します。"),
-            (self.norm_var, "全角英数→半角", "全角の英数字を半角に変換します。"),
+            (self.norm_var, "全角英数→半角・記号を読みに展開",
+             "全角の英数字を半角にし、①や㈱・㎡などの記号を\n"
+             "読み（1・株式会社・平方メートル）に展開します。"),
         ]
         for i, (var, label, tip) in enumerate(adv_defs):
             cb = ttk.Checkbutton(self._adv_frame, text=label, variable=var)
@@ -319,6 +331,9 @@ class App(_Base):
         self.extract_btn = ttk.Button(run, text="▶ テキスト抽出 実行",
                                        style="Primary.TButton", command=self.start_extract)
         self.extract_btn.pack(side="left")
+        _Tooltip(self.extract_btn,
+                 "追加したファイルからテキストを抽出します"
+                 f"（{'⌘' if core.IS_MAC else 'Ctrl+'}Return）。")
         self.progress = ttk.Progressbar(run, mode="determinate", length=240)
         self.progress.pack(side="left", padx=10)
         # テーマ選択（🍂ライト/🌙ダーク/☀️くっきり/🌿ずんだ）。packは後詰めから縮むため、
@@ -346,6 +361,46 @@ class App(_Base):
             self._adv_frame.pack_forget()
             self._adv_btn.config(text="詳細設定 ▸")
 
+    def _tip_engine_gate(self, ready_text, busy_gated=True):
+        """エンジン接続が必要なボタンのツールチップ文を返す関数を作る。
+        無効中は「なぜ押せないか」、有効なら本来の説明を出す（ホバー時に評価）。
+        busy_gated: 処理・再生中に実際に無効化されるボタン（生成/試聴/連続再生）は
+        True。busy中も押せるボタン（辞書・vvproj保存）は False にして誤案内を防ぐ。"""
+        def _text():
+            if not self.speakers:
+                return ("VOICEVOXエンジン未接続です。\n"
+                        "「エンジン接続確認」を押すと使えるようになります。")
+            if busy_gated and (self.busy or self._previewing):
+                return "処理・再生の実行中です。完了までお待ちください。"
+            return ready_text
+        return _text
+
+    def _toggle_voice_detail(self):
+        self._set_voice_detail(not self._vdetail_open)
+
+    def _set_voice_detail(self, show):
+        """プリセット/セリフ別話者の行を開閉する（§2の詳細設定と同じpack切替）。"""
+        self._vdetail_open = bool(show)
+        if self._vdetail_open:
+            self._vb_frame.pack(fill="x", padx=GAPX, pady=(2, 0),
+                                before=self._vb_sep)
+            self._vdetail_btn.config(text="プリセット/セリフ ▾")
+        else:
+            self._vb_frame.pack_forget()
+            self._vdetail_btn.config(text="プリセット/セリフ ▸")
+
+    def _update_step_highlight(self):
+        """「次に押す主要ボタン」を1つに絞る：本文が空なら抽出、あれば音声生成を
+        Primary（オレンジ）にし、もう一方は同寸のSecondaryへ落とす（レイアウト不変）。"""
+        try:
+            has_text = bool(self.text.get("1.0", "end-1c").strip())
+            self.extract_btn.config(style="Secondary.TButton" if has_text
+                                    else "Primary.TButton")
+            self.synth_btn.config(style="Primary.TButton" if has_text
+                                  else "Secondary.TButton")
+        except (tk.TclError, AttributeError):
+            pass  # 構築途中・破棄中は無視
+
     # ---------------- §4 VOICEVOX へ ----------------
     def _build_voicevox_section(self):
         # 先に side="bottom" で確保し、ウィンドウが小さくても隠れないようにする（順序不変）。
@@ -356,7 +411,7 @@ class App(_Base):
         bottom.pack(side="bottom", fill="x", padx=PAD_X, pady=(PAD_Y // 2, PAD_Y))
 
         def _sep():
-            ttk.Separator(bottom, orient="horizontal").pack(fill="x", padx=GAPX, pady=2)
+            ttk.Separator(bottom, orient="horizontal").pack(fill="x", padx=GAPX, pady=4)
 
         # === 接続 ===
         c = ttk.Frame(bottom)
@@ -380,6 +435,13 @@ class App(_Base):
         self.speaker_cb = ttk.Combobox(va, width=30, state="disabled")
         self.speaker_cb.pack(side="left", padx=(2, GAPX))
         self.speaker_cb.bind("<<ComboboxSelected>>", self._update_portrait, add="+")
+        # プリセット/セリフ別話者の行（vb）は使わない人も多いので折りたたみ式にする。
+        # トグルは独立行を作らず右端に置き、行数削減の効果を保つ
+        self._vdetail_btn = ttk.Button(va, text="プリセット/セリフ ▸", width=17,
+                                       command=self._toggle_voice_detail)
+        self._vdetail_btn.pack(side="right")
+        _Tooltip(self._vdetail_btn,
+                 "声のプリセット保存と、セリフ行（「」開始）を別話者で読む設定を開閉します。")
         params = ttk.Frame(va)
         params.pack(side="left")
         self.speed_var = tk.DoubleVar(value=1.0)
@@ -396,8 +458,10 @@ class App(_Base):
             ttk.Spinbox(params, from_=lo, to=hi, increment=inc, width=w,
                         textvariable=var).grid(row=0, column=2 * col + 1)
 
+        # vb行は既定で畳む（_set_voice_detail が pack/pack_forget で開閉。
+        # 子ウィジェットはツリーに繋がるため、未表示でもD&D登録や値設定は効く）
         vb = ttk.Frame(bottom)
-        vb.pack(fill="x", padx=GAPX, pady=(2, 0))
+        self._vb_frame = vb
         ttk.Label(vb, text="プリセット:").pack(side="left")
         self.preset_cb = ttk.Combobox(vb, width=14, state="readonly", values=[])
         self.preset_cb.pack(side="left", padx=2)
@@ -411,7 +475,9 @@ class App(_Base):
         self.dlg_speaker_cb = ttk.Combobox(vb, width=24, state="disabled")
         self.dlg_speaker_cb.pack(side="left", padx=2)
         ttk.Label(vb, text="※行頭「@話者名:」でも指定可").pack(side="left", padx=GAPX)
-        _sep()
+        # vb再表示時の挿入位置アンカー（pack(before=)用に参照を保持する）
+        self._vb_sep = ttk.Separator(bottom, orient="horizontal")
+        self._vb_sep.pack(fill="x", padx=GAPX, pady=4)
 
         # === 出力（形式と保存） ===
         oa = ttk.Frame(bottom)
@@ -448,6 +514,9 @@ class App(_Base):
         self.vvproj_btn = ttk.Button(ob, text="プロジェクト保存(.vvproj)",
                                      command=self.save_vvproj, state="disabled")
         self.vvproj_btn.pack(side="left", padx=2)
+        _Tooltip(self.vvproj_btn, self._tip_engine_gate(
+            "VOICEVOXエディタでそのまま開けるプロジェクト(.vvproj)を保存します。",
+            busy_gated=False))
         _sep()
 
         # === 再生・生成 ===
@@ -457,28 +526,46 @@ class App(_Base):
         # 仕上げの主要ボタンは右端（終端位置＝マウスを流す先）に大きく。packは後詰めから
         # 切れるため、主要ボタンを最初に確保して狭い窓でも必ず残す。辞書は誤クリック防止に
         # 間隔をあけ、優先度が低いので最後（＝最初に畳まれる）
+        mod = "⌘" if core.IS_MAC else "Ctrl+"
         self.synth_btn = ttk.Button(p, text="🔊 音声を生成", style="Primary.TButton",
                                     command=self.start_synth, state="disabled")
         self.synth_btn.pack(side="right")
-        # 補足説明はラベルでなくツールチップに（最小幅860でも行全体が収まるように）
+        _Tooltip(self.synth_btn, self._tip_engine_gate(
+            f"本文を音声ファイルに書き出します（{mod}G）。"))
+        # 補足説明はラベルでなくツールチップに（最小幅860でも行全体が収まるように）。
+        # 無効中は「なぜ押せないか」を _tip_engine_gate が状態に応じて表示する
         self.preview_btn = ttk.Button(p, text="▶ 試聴",
                                       command=self.preview_selected, state="disabled")
         self.preview_btn.pack(side="left")
-        _Tooltip(self.preview_btn, "カーソルのある行を1行だけ試し聴きします。")
+        _Tooltip(self.preview_btn, self._tip_engine_gate(
+            f"カーソルのある行を1行だけ試し聴きします（{mod}P）。"))
         self.playall_btn = ttk.Button(p, text="▶▶ 連続再生",
                                       command=self.play_all, state="disabled")
         self.playall_btn.pack(side="left", padx=4)
-        _Tooltip(self.playall_btn, "カーソル行から最後まで順に読み上げます。")
+        _Tooltip(self.playall_btn, self._tip_engine_gate(
+            "カーソル行から最後まで順に読み上げます。"))
         self.resume_btn = ttk.Button(p, text="⏵ 続きから",
                                      command=self.play_from_bookmark, state="disabled")
         self.resume_btn.pack(side="left", padx=4)
-        _Tooltip(self.resume_btn, "前回の続き（しおりの行）から再生します。")
+
+        def _resume_tip():
+            if not self.speakers:
+                return ("VOICEVOXエンジン接続後、連続再生すると\n"
+                        "しおりが作られ、続きから再生できます。")
+            if self._bookmark is None:
+                return "連続再生するとしおり（最後に再生した行）が作られ、続きから再生できます。"
+            return "前回の続き（しおりの行）から再生します。"
+        _Tooltip(self.resume_btn, _resume_tip)
         self.stop_btn = ttk.Button(p, text="■ 停止",
                                    command=self.stop_playall, state="disabled")
         self.stop_btn.pack(side="left", padx=4)
+        _Tooltip(self.stop_btn, "再生を停止します（Esc。再生中だけ押せます）。")
         self.dict_btn = ttk.Button(p, text="読み方辞書...",
                                    command=self.open_dict_dialog, state="disabled")
         self.dict_btn.pack(side="right", padx=(0, 14))
+        _Tooltip(self.dict_btn, self._tip_engine_gate(
+            "固有名詞などの読み方をVOICEVOXのユーザー辞書に登録します。",
+            busy_gated=False))
 
     # ---------------- §3 抽出結果（編集可能・伸縮の主役） ----------------
     def _build_result_section(self):
@@ -504,14 +591,23 @@ class App(_Base):
         self.rule_cb = ttk.Combobox(rep, width=16, state="readonly", values=[])
         self.rule_cb.pack(side="left", padx=2)
         self.rule_cb.bind("<<ComboboxSelected>>", self._rule_selected)
-        ttk.Button(rep, text="登録", width=4, command=self.add_rule).pack(side="left", padx=1)
-        ttk.Button(rep, text="削除", width=4, command=self.del_rule).pack(side="left", padx=1)
+        # 低頻度の「登録/削除」はメニューにまとめ、最頻用の「全ルール適用」だけボタンで残す
+        self.rule_menu_btn = ttk.Menubutton(rep, text="ルール ▾", width=8)
+        rule_menu = tk.Menu(self.rule_menu_btn, tearoff=0)
+        rule_menu.add_command(label="今の置換内容をルールに登録", command=self.add_rule)
+        rule_menu.add_command(label="選択中のルールを削除", command=self.del_rule)
+        self.rule_menu_btn.config(menu=rule_menu)
+        self.rule_menu_btn.pack(side="left", padx=1)
+        _Tooltip(self.rule_menu_btn, "置換ルールの登録・削除（保存され次回起動時も使えます）。")
         ttk.Button(rep, text="全ルール適用", command=self.apply_all_rules).pack(side="left", padx=4)
-        # 本文の全消去 / 復元（右端）
-        self.restore_btn = ttk.Button(rep, text="復元", width=5,
-                                      command=self.restore_text, state="disabled")
+        # 本文の全消去 / 復元は1ボタンで切替（押せない「復元」を常設しない）。
+        # 属性名 restore_btn は結線・テストの互換のため維持。幅固定でラベル切替時に跳ねない
+        self.restore_btn = ttk.Button(rep, text="本文を全消去", width=12,
+                                      command=self.clear_text)
         self.restore_btn.pack(side="right", padx=2)
-        ttk.Button(rep, text="本文を全消去", command=self.clear_text).pack(side="right", padx=2)
+        _Tooltip(self.restore_btn, lambda: (
+            "全消去した本文を元に戻します。" if self._cleared_text is not None
+            else "本文をすべて消します（直後に「復元」で戻せます）。"))
 
         body = ttk.Frame(mid)
         body.pack(fill="both", expand=True)
@@ -533,11 +629,61 @@ class App(_Base):
                 self.bind_all(f"<{mod}-plus>", lambda e: self.change_font(+1))
                 self.bind_all(f"<{mod}-minus>", lambda e: self.change_font(-1))
                 self.bind_all(f"<{mod}-0>", lambda e: self.change_font(0))
+                # 主要操作: 抽出(Return)・音声生成(G)・ファイル追加(O)・txt保存(S)・試聴(P)
+                self.bind_all(f"<{mod}-Return>", self._kb_extract)
+                self.bind_all(f"<{mod}-g>", lambda e: self._kb_invoke(self.synth_btn))
+                self.bind_all(f"<{mod}-o>", self._kb_add_files)
+                self.bind_all(f"<{mod}-s>", self._kb_save_txt)
+                self.bind_all(f"<{mod}-p>", lambda e: self._kb_invoke(self.preview_btn))
             except tk.TclError:
                 pass  # Command修飾子はmacOS以外に無い
+        self.bind_all("<Escape>", lambda e: self._kb_invoke(self.stop_btn))
+        # Textクラスの既定バインド（Ctrl+O=行挿入・Ctrl+P=行移動・Ctrl/Cmd+Return=改行）は
+        # bind_all（allタグ＝classより後）では抑止できないため、ウィジェット段で先取りして
+        # "break"（各ハンドラの戻り値）で止める
+        for seq, handler in (("<Control-Return>", self._kb_extract),
+                             ("<Command-Return>", self._kb_extract),
+                             ("<Control-o>", self._kb_add_files),
+                             ("<Control-p>",
+                              lambda e: self._kb_invoke(self.preview_btn))):
+            try:
+                self.text.bind(seq, handler)
+            except tk.TclError:
+                pass
         self._search_win = None
         self._search_hits = []
         self._search_idx = -1
+
+    # ---------------- 主要操作のキーボードショートカット ----------------
+    def _kb_invoke(self, btn):
+        """ショートカットからボタンを押す（無効中は何もしない）。"""
+        try:
+            if btn.instate(["!disabled"]):
+                btn.invoke()
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _kb_extract(self, event=None):
+        """Ctrl/Cmd+Return で抽出実行。一括置換・検索欄の<Return>バインドと
+        二重発火しないよう、Entry系にフォーカスがあるときは何もしない。"""
+        w = getattr(event, "widget", None)
+        try:
+            if w is not None and w.winfo_class() in ("Entry", "TEntry",
+                                                     "TCombobox", "TSpinbox"):
+                return None
+        except (tk.TclError, AttributeError):
+            pass
+        return self._kb_invoke(self.extract_btn)
+
+    def _kb_add_files(self, event=None):
+        if not self.busy:
+            self.add_files()
+        return "break"
+
+    def _kb_save_txt(self, event=None):
+        self.save_txt()   # 空本文は save_txt 側がガードする
+        return "break"
 
     # ---------------- キャラ立ち絵パネル（任意・ローカル資産） ----------------
     def _set_window_icon(self):
@@ -683,6 +829,31 @@ class App(_Base):
         if restore:
             self._update_portrait()  # 既定話者の base に戻す
 
+    # 立ち絵の自動開閉しきい値。表示/非表示で値を分ける（ヒステリシス）ことで、
+    # 境界付近でウィンドウをドラッグしたときの pack/pack_forget 連打・チラつきを防ぐ
+    _SIDE_SHOW_W = 1120
+    _SIDE_HIDE_W = 1060
+
+    def _on_configure(self, event=None):
+        """<Configure>はリサイズ中に連発するため、after_idleで1回にまとめてから
+        立ち絵の開閉判定へ渡す（デバウンス）。"""
+        if getattr(self, "_resize_after", None):
+            try:
+                self.after_cancel(self._resize_after)
+            except tk.TclError:
+                pass
+        try:
+            self._resize_after = self.after_idle(self._on_resize_debounced)
+        except tk.TclError:
+            self._resize_after = None
+
+    def _on_resize_debounced(self):
+        self._resize_after = None
+        try:
+            self._on_resize_toggle_side()
+        except tk.TclError:
+            pass  # destroy中のafterコールバック
+
     def _on_resize_toggle_side(self, event=None):
         """窓が狭いときは立ち絵パネルを自動で畳み、メインの横幅を確保する。"""
         if self._side is None:
@@ -691,12 +862,11 @@ class App(_Base):
             w = self.winfo_width()
         except tk.TclError:
             return
-        want = w >= 1080
-        if want and not self._side_shown:
+        if w >= self._SIDE_SHOW_W and not self._side_shown:
             self._side.pack(side="right", fill="y", padx=(0, PAD_X), pady=PAD_Y,
                             before=self._main)
             self._side_shown = True
-        elif not want and self._side_shown:
+        elif w < self._SIDE_HIDE_W and self._side_shown:
             self._side.pack_forget()
             self._side_shown = False
 
@@ -839,6 +1009,8 @@ class App(_Base):
                 preprocess=self.pre_var.get(),
                 # 映像内ラベル除去は「ノイズ除去」チェックと同じON/OFFで効かせる（座標段階で適用）
                 strip_labels=self.denoise_var.get(),
+                # 同形文字の文脈補正はOCR由来テキストにだけ効く（テキスト層は対象外）
+                fix_confusables=self.fixconf_var.get(),
             )
             clean_opts = dict(
                 mode=self.mode_var.get(),
@@ -1114,15 +1286,20 @@ class App(_Base):
         self._set_busy(True)
         self.status_var.set("クリップボード画像をOCR中...")
         threading.Thread(target=self._clipboard_worker,
-                         args=(data, self.pre_var.get(), clean_opts), daemon=True).start()
+                         args=(data, self.pre_var.get(), clean_opts,
+                               self.fixconf_var.get()), daemon=True).start()
 
-    def _clipboard_worker(self, img, preprocess, clean_opts):
+    def _clipboard_worker(self, img, preprocess, clean_opts, fix_confusables=False):
         try:
-            tmpdir = tempfile.mkdtemp(prefix="t2v_clip_")
-            png = os.path.join(tmpdir, "clip.png")
-            core.preprocess_image(img, enable=preprocess).save(png)
-            res = core.run_ocr([png], strip_labels=clean_opts.get("denoise", True))
-            cleaned = core.clean_text(res.get(png, ""), **clean_opts)
+            # OCRが済めばPNG（＝クリップボード画像のコピー）は不要。%TEMP%に残さない
+            with tempfile.TemporaryDirectory(prefix="t2v_clip_") as tmpdir:
+                png = os.path.join(tmpdir, "clip.png")
+                core.preprocess_image(img, enable=preprocess).save(png)
+                res = core.run_ocr([png], strip_labels=clean_opts.get("denoise", True))
+                raw = res.get(png, "")
+            if fix_confusables and raw:
+                raw = core.fix_ocr_confusables(raw)
+            cleaned = core.clean_text(raw, **clean_opts)
             self.q.put(("clip_done", cleaned))
         except Exception:
             self.q.put(("error", traceback.format_exc()))
@@ -1436,8 +1613,10 @@ class App(_Base):
         finally:
             self._suppress_modified = False
         if self._cleared_text is not None:
+            # 本文が変わったので古い退避内容は破棄し、ボタンを「全消去」へ戻す
             self._cleared_text = None
-            self.restore_btn.config(state="disabled")
+            self.restore_btn.config(text="本文を全消去", command=self.clear_text)
+        self._update_step_highlight()
 
     def _edit_body(self, fn):
         """本文の全消去/復元まわりの自編集を、<<Modified>>フックに拾わせずに実行する。"""
@@ -1462,7 +1641,8 @@ class App(_Base):
             return
         self._edit_body(lambda: self.text.delete("1.0", "end"))
         self._cleared_text = content
-        self.restore_btn.config(state="normal")
+        self.restore_btn.config(text="復元", command=self.restore_text)
+        self._update_step_highlight()
         self.status_var.set("本文を全消去しました（「復元」ボタン／Ctrl・Cmd+Zで戻せます）。")
 
     def restore_text(self):
@@ -1480,7 +1660,8 @@ class App(_Base):
             self.text.insert("1.0", restored)
         self._edit_body(_do)
         self._cleared_text = None
-        self.restore_btn.config(state="disabled")
+        self.restore_btn.config(text="本文を全消去", command=self.clear_text)
+        self._update_step_highlight()
         self.status_var.set("本文を復元しました。")
 
     # ---------------- 置換ルールの保存・適用 ----------------
@@ -1523,7 +1704,8 @@ class App(_Base):
 
     def apply_all_rules(self):
         if not self.replace_rules:
-            self.status_var.set("保存済みのルールがありません（「登録」で追加できます）。")
+            self.status_var.set(
+                "保存済みのルールがありません（「ルール ▾」→「登録」で追加できます）。")
             return
         content = self.text.get("1.0", "end-1c")
         total = 0
@@ -1637,6 +1819,23 @@ class App(_Base):
                   background=[("pressed", p["accent_hi"]), ("active", p["accent_hi"]),
                               ("disabled", p["btn"])],
                   foreground=[("disabled", p["disabled"])])
+        # 準主要ボタン＝「次に押すボタン」ハイライトの降格先。フォント・paddingを
+        # Primaryと同一にし、Primary⇄Secondary切替でボタン寸法が変わらないようにする
+        style.configure("Secondary.TButton", background=p["btn"],
+                        foreground=p["fg"], bordercolor=p["border"],
+                        font=self._primary_font, relief="flat", padding=(14, 8))
+        style.map("Secondary.TButton",
+                  background=[("pressed", p["btn_hi"]), ("active", p["btn_hi"]),
+                              ("disabled", p["bg"])],
+                  foreground=[("disabled", p["disabled"])])
+        # ルール操作のMenubutton（TButtonと同じ見た目に揃える）
+        style.configure("TMenubutton", background=p["btn"], foreground=p["fg"],
+                        bordercolor=p["border"], relief="flat", padding=(7, 3),
+                        arrowcolor=p["fg"])
+        style.map("TMenubutton",
+                  background=[("pressed", p["btn_hi"]), ("active", p["btn_hi"]),
+                              ("disabled", p["bg"])],
+                  foreground=[("disabled", p["disabled"])])
         # 入力系
         for w in ("TEntry", "TSpinbox", "TCombobox"):
             style.configure(w, fieldbackground=p["field"], foreground=p["fg"],
@@ -1716,7 +1915,8 @@ class App(_Base):
         self._search_entry.bind("<Return>", lambda e: self._search_jump(+1))
         self._search_var.trace_add("write", lambda *a: self._search_refresh())
         win.protocol("WM_DELETE_WINDOW", self._close_search)
-        win.bind("<Escape>", lambda e: self._close_search())
+        # "break" を返し、Escの全体バインド（再生停止）と二重発火しないようにする
+        win.bind("<Escape>", lambda e: (self._close_search(), "break")[1])
 
     def _close_search(self):
         self.text.tag_remove("hit", "1.0", "end")
@@ -1855,6 +2055,7 @@ class App(_Base):
             "smart_join": self.smartjoin_var.get(),
             "paren_ruby": self.pruby_var.get(), "normalize": self.norm_var.get(),
             "denoise": self.denoise_var.get(),
+            "fix_confusables": self.fixconf_var.get(),
             "dark": self.dark_var.get(),
             "theme": self.theme_var.get(),
             "unit": self._unit(), "nlines": self.nlines_var.get(),
@@ -1873,6 +2074,7 @@ class App(_Base):
             "base_url": self.url_var.get().strip() or self.base_url,
             "geometry": self.geometry(),
             "adv_open": bool(self._adv_open),
+            "voice_detail_open": bool(self._vdetail_open),
         }
 
     def _load_settings(self):
@@ -1893,6 +2095,7 @@ class App(_Base):
             self.pruby_var.set(bool(s.get("paren_ruby", False)))
             self.norm_var.set(bool(s.get("normalize", False)))
             self.denoise_var.set(bool(s.get("denoise", True)))
+            self.fixconf_var.set(bool(s.get("fix_confusables", True)))
             self.dark_var.set(bool(s.get("dark", False)))
             # テーマ：新キー "theme" を優先。無い旧設定は "dark": true → ダーク で引き継ぐ
             theme = s.get("theme")
@@ -1931,6 +2134,10 @@ class App(_Base):
                                 if isinstance(p, dict) and p.get("name")]
                 self._refresh_presets()
             self.dlg_var.set(bool(s.get("dlg_enabled", False)))
+            # プリセット/セリフ行：保存した開閉状態を復元。セリフ別話者ONなら
+            # 設定が隠れて見えないままにならないよう自動で開く
+            self._set_voice_detail(bool(s.get("voice_detail_open", False))
+                                   or self.dlg_var.get())
             self._saved_dlg_speaker = s.get("dlg_speaker") or None
             bm = s.get("bookmark")
             self._bookmark = int(bm) if isinstance(bm, (int, float)) else None
@@ -2001,7 +2208,7 @@ class App(_Base):
                     self.progress.config(value=self.progress["maximum"])
                     n = len([l for l in cleaned.split("\n") if l.strip()])
                     self.status_var.set(f"抽出完了：{n}行 / {len(cleaned)}文字"
-                                        "（3.で直して → 4.で音声に🍂）")
+                                        "（3.で直したら「🔊 音声を生成」へ🍂）")
                     self._set_busy(False)
                     if warnings:
                         messagebox.showwarning("注意", "\n".join(warnings))
@@ -2132,6 +2339,7 @@ class App(_Base):
                 self.playall_btn.config(state="normal")
                 if self._bookmark is not None:
                     self.resume_btn.config(state="normal")
+        self._update_step_highlight()
 
 
 if __name__ == "__main__":

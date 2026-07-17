@@ -46,7 +46,13 @@ def build_parser():
     p.add_argument("--paren-ruby", action="store_true",
                    help="「漢字(かんじ)」型ルビを除去（Web小説向け）")
     p.add_argument("--normalize", action="store_true",
-                   help="全角英数記号を半角に正規化")
+                   help="全角英数記号を半角に正規化し、囲み数字・組文字を読みに展開"
+                        "（①→1・㈱→株式会社・㎡→平方メートル）")
+    p.add_argument("--fix-confusables", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="OCRが取り違えやすい同形文字（力⇄カ・一⇄ー・O⇄0等）を"
+                        "前後の文脈で補正（OCR由来テキストのみ。既定ON。"
+                        "--no-fix-confusables で無効）")
     p.add_argument("--denoise", action=argparse.BooleanOptionalAction, default=True,
                    help="画面キャプチャの映像内オーバーレイ文字（時刻・局ロゴ・SNSハンドル・"
                         "矢印・英文ブロック、および局ロゴ/番組名/カテゴリ等のラベル）を"
@@ -79,7 +85,7 @@ def main(argv=None):
     print(f"[1/3] テキスト抽出中... ({len(args.inputs)}ファイル)")
     raw, warnings = core.extract_files(
         args.inputs, pdf_mode=("ocr" if args.pdf_ocr else "auto"), dpi=args.dpi,
-        strip_labels=args.denoise,
+        strip_labels=args.denoise, fix_confusables=args.fix_confusables,
         progress_cb=lambda d, t, m: print(f"  {m}"))
     for w in warnings:
         print(f"  警告: {w}", file=sys.stderr)

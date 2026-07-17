@@ -24,6 +24,7 @@ REQUIRED_WIDGETS = [
     "vvproj_btn", "speaker_cb", "dlg_speaker_cb", "preset_cb", "fmt_cb",
     "unit_cb", "preview_btn", "playall_btn", "resume_btn", "stop_btn",
     "synth_btn", "dict_btn", "rule_cb", "restore_btn", "theme_cb",
+    "rule_menu_btn",
 ]
 
 # 保持必須の tk.*Var / StringVar 群
@@ -32,7 +33,7 @@ REQUIRED_VARS = [
     "into_var", "vol_var", "nlines_var", "gap_var", "srt_var", "find_var",
     "repl_var", "mode_var", "pdf_var", "dpi_var", "pre_var", "blank_var",
     "ascii_var", "smartjoin_var", "join_var", "pruby_var", "norm_var",
-    "denoise_var", "dark_var", "dlg_var", "theme_var",
+    "denoise_var", "dark_var", "dlg_var", "theme_var", "fixconf_var",
 ]
 
 # 配置を変えても生かす結線メソッド
@@ -137,7 +138,8 @@ def test_settings_roundtrip_keys_present(app):
                 "unit", "nlines", "srt", "font_size", "speed", "speaker",
                 "pitch", "intonation", "volume", "fmt", "gap", "replace_rules",
                 "presets", "dlg_enabled", "dlg_speaker", "bookmark", "base_url",
-                "geometry", "adv_open", "theme"):
+                "geometry", "adv_open", "theme", "fix_confusables",
+                "voice_detail_open"):
         assert key in d, f"設定キー {key} が欠落"
 
 
@@ -149,6 +151,46 @@ def test_advanced_toggle(app):
     assert app._adv_open is False
     app._toggle_advanced()
     assert app._adv_open is True
+
+
+def test_voice_detail_toggle(app):
+    """§4のプリセット/セリフ行の開閉（既定は畳む。開閉往復でクラッシュしない）。"""
+    app._set_voice_detail(True)
+    assert app._vdetail_open is True
+    app._set_voice_detail(False)
+    assert app._vdetail_open is False
+    app._toggle_voice_detail()
+    assert app._vdetail_open is True
+    app._set_voice_detail(False)
+
+
+def test_clear_restore_button_toggles(app):
+    """全消去/復元の1ボタン切替: 全消去→「復元」表示→復元→「本文を全消去」に戻る。"""
+    app.text.insert("1.0", "テスト本文です。")
+    app.clear_text()
+    assert str(app.restore_btn["text"]) == "復元"
+    assert app.text.get("1.0", "end-1c").strip() == ""
+    app.restore_text()
+    assert str(app.restore_btn["text"]) == "本文を全消去"
+    assert "テスト本文です。" in app.text.get("1.0", "end-1c")
+
+
+def test_step_highlight_follows_body(app):
+    """「次に押すボタン」の絞り込み: 本文が空→抽出がPrimary / あり→生成がPrimary。"""
+    app.text.delete("1.0", "end")
+    app._update_step_highlight()
+    assert str(app.extract_btn["style"]) == "Primary.TButton"
+    assert str(app.synth_btn["style"]) == "Secondary.TButton"
+    app.text.insert("1.0", "本文あり")
+    app._update_step_highlight()
+    assert str(app.extract_btn["style"]) == "Secondary.TButton"
+    assert str(app.synth_btn["style"]) == "Primary.TButton"
+
+
+def test_kb_invoke_ignores_disabled(app):
+    """ショートカット経由のボタン起動は無効中は何もしない（"break"だけ返す）。"""
+    app.synth_btn.config(state="disabled")
+    assert app._kb_invoke(app.synth_btn) == "break"
 
 
 def test_portrait_key_mapping(app):

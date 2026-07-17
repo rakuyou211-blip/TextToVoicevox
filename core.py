@@ -16,13 +16,14 @@ import zipfile
 import tempfile
 import posixpath
 import subprocess
+import unicodedata
 from html.parser import HTMLParser
 from urllib.parse import unquote
 from xml.etree import ElementTree
 
 # アプリのバージョン（タイトルバー・CLI --version・不具合報告の目印に使う）。
 # リリースごとにここだけ更新する。
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.12.0"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
@@ -38,6 +39,10 @@ EPUB_EXT = {".epub"}
 DOC_EXT = TXT_EXT | DOCX_EXT | EPUB_EXT  # OCR不要のテキスト系入力
 
 CREATE_NO_WINDOW = 0x08000000 if IS_WIN else 0  # Winでサブプロセスのコンソール窓を出さない
+
+# Windows.Media.Ocr の OcrEngine.MaxImageDimension（実機では通常2600）。これを超える辺の
+# 画像は RecognizeAsync が例外を投げ「無言でOCR空振り」になるため、前処理で必ず収める。
+WIN_OCR_MAX_DIM = 2600
 
 
 # ============================================================
@@ -372,23 +377,203 @@ def strip_overlay_labels(lines: list) -> list:
     return keep
 
 
+# 文分割で「内側では区切らない」括弧の対。半角()も含める（normalize_ascii で
+# （）→() に変換された後に split_sentences が走るため）。深さ上限は、OCRで開き括弧が
+# 誤検出されたときに以降の文がまとまり続けるのを防ぐ暴走ガード。
+_SENT_OPENERS = "「『（(【"
+_SENT_CLOSERS = "」』）)】"
+_SENT_DEPTH_MAX = 3
+
+
 def split_sentences(text: str) -> list:
-    """文末記号で文を分割し、1文1要素のリストを返す（記号は保持）。"""
+    """文末記号で文を分割し、1文1要素のリストを返す（記号は保持）。
+    鉤括弧・丸括弧の内側では区切らない（「もう帰る。」と彼は言った。→1文のまま。
+    途中で切るとVOICEVOXの合成単位・ポーズ・SRT字幕が不自然になるため）。
+    文末記号の直後に続く閉じ括弧・連続する文末記号（えっ！？）は同じ文に取り込む。
+    改行は常に文の区切りで、括弧の深さもリセットする（OCRで括弧が欠けても
+    行を跨いで巻き込まない安全弁）。"""
     sentences = []
     buf = ""
-    for ch in text:
+    depth = 0
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
         if ch == "\n":
             if buf.strip():
                 sentences.append(buf.strip())
             buf = ""
+            depth = 0
+            i += 1
             continue
         buf += ch
-        if ch in _SENT_ENDERS:
+        if ch in _SENT_OPENERS:
+            depth = min(depth + 1, _SENT_DEPTH_MAX)
+        elif ch in _SENT_CLOSERS:
+            depth = max(depth - 1, 0)   # 【なし】等の非対称でも負にしない
+        elif ch in _SENT_ENDERS and depth == 0:
+            # 直後の閉じ括弧（A。」B の迷い込み）・連続する文末記号（！？）を取り込む
+            while i + 1 < n and text[i + 1] in _SENT_ENDERS + _SENT_CLOSERS:
+                i += 1
+                buf += text[i]
             sentences.append(buf.strip())
             buf = ""
+        i += 1
     if buf.strip():
         sentences.append(buf.strip())
     return [s for s in sentences if s]
+
+
+# ============================================================
+#  OCRの紛らわしい文字の文脈補正（fix_ocr_confusables）
+# ============================================================
+# 日本語OCR（特に言語補正の弱い Windows.Media.Ocr）は、字形がほぼ同一の
+# 「漢字⇄カタカナ」（力/カ・口/ロ・工/エ・二/ニ・卜/ト・夕/タ・一/ー）や
+# 「英字⇄数字」（O/0・l/1）を取り違える。VOICEVOX は誤字をそのまま読む
+# （例:「口ボット」→“くちボット”）ため読み上げ品質に直結する。
+# 方針は denoise と同じく保守的＝前後の文字種で確定できるときだけ直す（迷ったら触らない）。
+# 適用は extract_files(fix_confusables=True) で OCR 由来テキストに限る（txt/docx/EPUB の
+# テキスト層には適用しない）。OCR特有の文字間空白（例「サ 一 ビス」）に耐えるよう、
+# 前後の文字は空白を読み飛ばして参照する（改行はまたがない）。
+
+# 「数カ月」「三カ所」「百カ日」等の慣用表記。直後がこれらの助数詞漢字なら カ→力 に変えない。
+_CONF_KA_COUNTERS = set("月所国年条村寺載日")
+# 「誰か」「何か」の“か”をOCRがカタカナ「カ」に誤認したケース。力に変えると悪化するため
+# 直前がこれらの漢字なら カタカナ→漢字 変換をしない。
+_CONF_PREV_GUARD = set("誰何幾数僅")
+# 「口」「二」は語頭・ひらがな直後でもカタカナ語との実在複合語が多い
+# （口コミ・口パク・入り口ドア・二ヶ月・二チーム・二コマ…）。この2字の語頭変換は、
+# 実在語では後続し得ない「小書きカナ・長音」が直後のときだけに絞る
+# （口ッカー→ロッカー・二ュース→ニュース は直り、口パク・二チーム は温存）。
+_CONF_HEAD_STRICT = set("口二")
+_CONF_HEAD_STRICT_NEXT = set("ァィゥェォッャュョー")
+# 「一→ー」「カタカナ→漢字」変換で“文末に相当”とみなす直後の文字。
+_CONF_TRAIL_PUNCT = set("。、．，！？!?・…」』）)】")
+
+_CONF_KANJI_TO_KATA = {"力": "カ", "口": "ロ", "工": "エ", "二": "ニ",
+                       "卜": "ト", "夕": "タ"}
+# 逆方向は 卜（漢字として稀）と 夕/タ の対を外し、確実な4組のみ。
+_CONF_KATA_TO_KANJI = {"カ": "力", "ロ": "口", "エ": "工", "ニ": "二"}
+# 数字トークン内の英字誤認（2O26→2026・1l時→11時）。対象文字以外がすべて数字の
+# トークンだけ変換し、H2O・500ml のような型番・単位は保護する。
+_CONF_NUM_TOKEN = re.compile(r"[0-9A-Za-z]+")
+_CONF_NUM_ONLY = re.compile(r"[0-9OolI]+")
+# 英字が先頭に固まる形（O157・O2・l0）は実在の型番・記号名なので変換しない。
+# 2O26（数字に挟まれる）・1l（数字が先行）はOCR誤認として補正対象のまま。
+_CONF_LEADING_ALPHA = re.compile(r"[OolI]+[0-9]+")
+_CONF_DIGIT_MAP = str.maketrans("OolI", "0011")
+
+
+def _conf_is_kata(ch: str) -> bool:
+    """カタカナ（長音「ー」・半角カナ含む）か。"""
+    if not ch:
+        return False
+    o = ord(ch)
+    return 0x30A1 <= o <= 0x30FE or 0xFF66 <= o <= 0xFF9D
+
+
+def _conf_is_kanji(ch: str) -> bool:
+    if not ch:
+        return False
+    o = ord(ch)
+    return (0x3400 <= o <= 0x4DBF or 0x4E00 <= o <= 0x9FFF
+            or 0xF900 <= o <= 0xFAFF or ch in "々〆")
+
+
+def _conf_is_hira(ch: str) -> bool:
+    return bool(ch) and 0x3041 <= ord(ch) <= 0x309F
+
+
+def _conf_neighbor(text: str, i: int, step: int) -> str:
+    """空白（半角/タブ/全角）を読み飛ばした隣の実文字。行頭・行末は ""。"""
+    j = i + step
+    while 0 <= j < len(text) and text[j] in " \t　":
+        j += step
+    if 0 <= j < len(text) and text[j] != "\n":
+        return text[j]
+    return ""
+
+
+def _conf_pass_choonpu(text: str) -> str:
+    """第1パス: 一⇄ー の補正（判定は“この段階のテキスト”の近傍）。
+      1. カタカナ直後の「一」で、直後もカタカナ/長音/行末/句読点 → 長音「ー」
+         （サ一ビス→サービス。直後がひらがな・漢字なら「メロン一つ」型なので触らない）
+      2. 漢字に挟まれた「ー」 → 漢数字「一」（第ー章→第一章。長音は直前カナ以外に現れない）"""
+    out = list(text)
+    for i, ch in enumerate(text):
+        if ch == "一":
+            prev = _conf_neighbor(text, i, -1)
+            nxt = _conf_neighbor(text, i, +1)
+            if _conf_is_kata(prev) and (_conf_is_kata(nxt) or nxt == ""
+                                        or nxt in _CONF_TRAIL_PUNCT):
+                out[i] = "ー"
+        elif ch == "ー":
+            prev = _conf_neighbor(text, i, -1)
+            nxt = _conf_neighbor(text, i, +1)
+            if _conf_is_kanji(prev) and _conf_is_kanji(nxt):
+                out[i] = "一"
+    return "".join(out)
+
+
+def _conf_pass_kana_kanji(text: str) -> str:
+    """第2パス: 漢字⇄カタカナ の補正。一⇄ーの補正“後”のテキストで判定することで、
+    「顧客ニ一ズ」の「一」を漢字と誤解して正しい「ニ」を壊すような矛盾を防ぐ。
+      3. カタカナに挟まれた同形漢字 力口工二卜夕 → カタカナ（デジ夕ル→デジタル）。
+         語頭（直前が日本語・英数でない/ひらがな）でも直後カタカナなら適用（卜ヨタ→トヨタ）。
+         ただし「口」「二」の語頭変換は直後が小書きカナ・長音のときだけ
+         （口コミ・口パク・二ヶ月・二チーム等の実在複合語を壊さない）。
+         直後の「ヶヵ」は助数詞マーカーなので常に変換しない。
+      4. 漢字に挟まれたカタカナ カロエニ → 同形漢字（入カ完了→入力完了・第ニ章→第二章）。
+         直後がかな・英数・長音のときは「誰カ」「入カした」型の判別がつかないため触らない。
+         「数カ月」「百カ日」等の助数詞・「誰カ」等の直前語はガードで保護。"""
+    out = list(text)
+    for i, ch in enumerate(text):
+        if ch in _CONF_KANJI_TO_KATA:
+            prev = _conf_neighbor(text, i, -1)
+            nxt = _conf_neighbor(text, i, +1)
+            if not _conf_is_kata(nxt) or nxt in "ヶヵ":
+                continue
+            # 前が漢字・英数字なら熟語や型番の一部（山口ロープウェイ等）なので触らない。
+            # 前がカタカナ＝語中（デジ夕ル）、前がひらがな・句読点・行頭＝語頭
+            # （卜ヨタ・と二ュース）として適用する
+            if (_conf_is_kanji(prev)
+                    or (prev.isalnum() and not _conf_is_kata(prev)
+                        and not _conf_is_hira(prev))):
+                continue
+            if (not _conf_is_kata(prev) and ch in _CONF_HEAD_STRICT
+                    and nxt not in _CONF_HEAD_STRICT_NEXT):
+                continue
+            out[i] = _CONF_KANJI_TO_KATA[ch]
+        elif ch in _CONF_KATA_TO_KANJI:
+            prev = _conf_neighbor(text, i, -1)
+            nxt = _conf_neighbor(text, i, +1)
+            if (_conf_is_kanji(prev) and prev not in _CONF_PREV_GUARD
+                    and (_conf_is_kanji(nxt) or nxt == ""
+                         or nxt in _CONF_TRAIL_PUNCT)
+                    and not (ch == "カ" and nxt in _CONF_KA_COUNTERS)):
+                out[i] = _CONF_KATA_TO_KANJI[ch]
+    return "".join(out)
+
+
+def fix_ocr_confusables(text: str) -> str:
+    """OCRが取り違えやすい同形文字を、前後の文字種で確定できる場合だけ補正する。
+    2パス構成: 先に 一⇄ー（_conf_pass_choonpu）、その結果に対して 漢字⇄カタカナ
+    （_conf_pass_kana_kanji）。「診察カ一ド」のような複合誤認で、後段が「一」を
+    漢字と誤解して正しい「カ」を壊さないための順序依存（意図した連鎖）。
+    最後に数字トークン内の O/o→0・l/I→1（2O26年→2026年）。対象文字以外がすべて
+    数字のトークンだけ変換し、さらに「英字が先頭に固まる形」（O157・O2・l0）は
+    実在の型番・記号として保護する（H2O・500ml はトークン条件で保護される）。
+    既知の限界: 「ピカ一。」（ぴかいち）等ごく稀な語は誤補正し得る。「入カした」
+    「口ボット」のような、かな が続く・実在語と衝突し得る形は安全側に倒して補正しない。
+    半角英数のみ対象（全角は normalize_ascii 適用後なら半角になっている）。"""
+    fixed = _conf_pass_kana_kanji(_conf_pass_choonpu(text))
+
+    def _fix_token(m):
+        tok = m.group(0)
+        if (_CONF_NUM_ONLY.fullmatch(tok) and any(c.isdigit() for c in tok)
+                and not _CONF_LEADING_ALPHA.fullmatch(tok)):
+            return tok.translate(_CONF_DIGIT_MAP)
+        return tok
+    return _CONF_NUM_TOKEN.sub(_fix_token, fixed)
 
 
 # ============================================================
@@ -439,9 +624,29 @@ _DENOISE_DATE_TOKEN = (
 _DENOISE_DATE_TOKEN_RE = re.compile(_DENOISE_DATE_TOKEN)
 _DENOISE_DATE_SEP_RE = re.compile(r"[\s・,，.．\-]+")
 
-# 単独の数値・カウント行（例: 1.04 / 1.2万 / 1,234件）。単位の接尾辞まで許容。
+# 単独の数値・カウント行（例: 1.04 / 1.2万 / 1,234件 / 1.2万人）。位取り＋単位の
+# 2連接尾辞（万人・万回等、SNSの視聴数オーバーレイ）まで許容。「1.2万人が視聴」の
+# ような文はひらがな保護（判定1）で先に残るため掛からない。※「円」は価格表の本文に
+# なり得るため含めない。
 _DENOISE_NUM_LINE = re.compile(
-    r"^\s*[+\-]?\d+(?:[.,]\d+)*\s*(?:万|億|千|兆|%|％|人|件|回|票|位|K|k|M)?\s*$")
+    r"^\s*[+\-]?\d+(?:[.,]\d+)*\s*(?:万|億|千|兆|K|k|M)?(?:人|件|回|票|位|%|％)?\s*$")
+
+# 写真・映像クレジット行（例「写真：ロイター」「撮影＝共同」）。ひらがなを含む文
+# （「写真は田中さんの提供です」）はここでは判定せず必ず残す（自己完結ガード）。
+_DENOISE_CREDIT_RE = re.compile(
+    r"^[（(]?(?:写真|画像|映像|資料|提供|撮影|出典|引用)[:：=＝]")
+
+# 日本語記事中の英数見出し行（製品名・型番。例「iPhone 17 Pro Max」「Nintendo Switch 2」）。
+# 英字始まりで英字と数字の両方を含む短い行だけを保護し、「THE」「NEWS」等の英字断片・
+# 「2026 07 14」等の数字断片・「1.2K views」等の数字始まりオーバーレイは従来どおり落とす。
+_DENOISE_PRODUCT_RE = re.compile(r"[A-Za-z0-9 .\-']+")
+# 英語SNS/動画オーバーレイの定型（視聴数・経過時間・英語日付）。製品名保護の対象外にする。
+_DENOISE_SNS_OVERLAY_RE = re.compile(
+    r"\d[\d.,]*\s*[KkMmBb]?\s*(?:views?|likes?|subscribers?|followers?|replies|"
+    r"reposts?|comments?|votes?|shares?)\b"
+    r"|\b(?:seconds?|minutes?|hours?|days?|weeks?|months?|years?)\s+ago\b"
+    r"|^[A-Za-z]{3}\.?\s+\d{1,2},?\s+\d{4}$",
+    re.IGNORECASE)
 
 
 def _denoise_cjk_ratio(s: str) -> float:
@@ -526,6 +731,11 @@ def _denoise_is_strict_noise(s: str) -> bool:
     # D: SNSハンドル行（先頭@／＠で、行が実質ASCII＝ハンドルそのもの）
     if s[0] in "@＠" and _denoise_cjk_ratio(s) < _DENOISE_LINE_CJK_MIN:
         return True
+    # F: 写真・映像クレジット行（「写真：ロイター」）。ひらがなを含む本文は対象外
+    #    （strip_overlay_labels からも呼ばれるため、ここで自己完結的に保護する）
+    if (len(s) <= 20 and not _denoise_has_hiragana(s)
+            and _DENOISE_CREDIT_RE.match(s)):
+        return True
     return False
 
 
@@ -562,6 +772,12 @@ def denoise_capture(text: str) -> str:
             continue
         if _denoise_is_strict_noise(s):
             continue                             # 2. 厳密なノイズ → 落とす
+        if (_DENOISE_PRODUCT_RE.fullmatch(s) and len(s) <= 30
+                and len(s.split()) <= 5
+                and s[:1].isalpha() and any(c.isdigit() for c in s)
+                and not _DENOISE_SNS_OVERLAY_RE.search(s)):
+            out.append(ln)                       # 2'. 英数の製品名・型番見出し → 残す
+            continue
         if doc_is_jp and _denoise_jp_ratio(s) < _DENOISE_LINE_JP_MIN:
             continue                             # 3. 日本語がごく僅かな行（英字/外国語ブロック）→ 落とす
         out.append(ln)                           # 4. それ以外 → 残す
@@ -581,7 +797,8 @@ def clean_text(raw: str, mode: str = "sentence",
                 join_wrapped が True のときはそちら（積極連結）を優先する。
                 いずれも既定Falseでは元の改行を文の区切りとして尊重する（後方互換）。
     paren_ruby: True で「漢字(かんじ)」型ルビを除去（Web小説向け）
-    normalize: True で全角英数記号を半角に正規化
+    normalize: True で全角英数記号を半角に正規化し、囲み数字・組文字等の
+               読み上げ困難な記号を読みに展開（①→1・㈱→株式会社・㎡→平方メートル）
     denoise: True で画面キャプチャの“映像内オーバーレイ文字”を前処理で除去
              （既定Falseでは従来の出力を1バイトも変えない）
     """
@@ -593,6 +810,7 @@ def clean_text(raw: str, mode: str = "sentence",
         text = strip_paren_ruby(text)
     if normalize:
         text = normalize_ascii(text)
+        text = expand_readable_chars(text)
     # 連続する3つ以上の改行は2つに
     while "\n\n\n" in text:
         text = text.replace("\n\n\n", "\n\n")
@@ -628,14 +846,88 @@ def clean_text(raw: str, mode: str = "sentence",
 _AOZORA_RUBY = re.compile(r"《[^》]*》")          # ルビ本体
 _AOZORA_NOTE = re.compile(r"［＃[^］]*］")        # 入力者注（傍点・字下げ指定等）
 _AOZORA_BAR = "｜"                                # ルビ範囲の開始記号
+# 一の字点（ゝゞヽヾ）: 直前のかな1文字の繰り返し。ゞヾは繰り返しを濁音化。
+# 直前がかなのときだけ展開する（文頭・記号直後のゝは複製しない）。
+_ODORIJI_RE = re.compile(r"([ぁ-ゖァ-ヶ])([ゝゞヽヾ])")
+# くの字点の横書き代用表記（／＼・／″＼）: 直前のかな2文字の繰り返し。″付きは先頭を濁音化。
+# 直前2文字が両方かな かつ その前がかなでない（＝繰り返し単位が2文字と確定できる）
+# ときだけ展開する。3文字以上の繰り返し（かはる／″＼等）を2文字で複製すると
+# 実在しない語（かはるばる）を作ってしまうため、確定できない場合は原文のまま残す。
+# アスキーアートの／＼（前が記号・漢字）もこの条件で自然に除外される。
+# ／=U+FF0F ＼=U+FF3C。濁点の中間文字は青空文庫標準の″(U+2033)のほか゛/合成用濁点も許容。
+_KUNOJI_RE = re.compile(
+    r"(?<![ぁ-ゖァ-ヶー])([ぁ-ゖァ-ヶー][ぁ-ゖァ-ヶー])／([″゛゙])?＼")
+_AOZORA_FOOTER_RE = re.compile(r"^底本：", re.MULTILINE)
+_AOZORA_HR_RE = re.compile(r"-{10,}\s*")          # 記号説明ブロックの区切り線（行全体）
+
+
+def _dakuten(ch: str) -> str:
+    """かなを濁音化した1文字を返す（合成できない字はそのまま）。"""
+    d = unicodedata.normalize("NFC", ch + "゙")
+    return d if len(d) == 1 else ch
+
+
+def _expand_odoriji(m):
+    base, mark = m.group(1), m.group(2)
+    if mark in "ゞヾ":
+        return base + _dakuten(base)
+    return base + base
+
+
+def _expand_kunoji(m):
+    pair, mark = m.group(1), m.group(2)
+    if mark:
+        return pair + _dakuten(pair[0]) + pair[1]
+    return pair + pair
+
+
+def _strip_aozora_header(text: str) -> str:
+    """冒頭の記号説明ブロック（区切り線2本に挟まれた「テキスト中に現れる記号について」節）
+    を除去する。誤爆防止のため、先頭50行以内に区切り線が2本そろい、かつブロック内に
+    見出し文言を含むときだけ削る（Markdown風の水平線だけの本文は削らない）。"""
+    lines = text.split("\n")
+    hr = [i for i, ln in enumerate(lines[:50]) if _AOZORA_HR_RE.fullmatch(ln)]
+    if len(hr) >= 2:
+        s, e = hr[0], hr[1]
+        block = "\n".join(lines[s:e + 1])
+        if "テキスト中に現れる記号について" in block:
+            del lines[s:e + 1]
+            return "\n".join(lines)
+    return text
+
+
+# 底本フッターとして削除を許す末尾ブロックの上限サイズ。実際の底本情報は
+# 10〜30行・1500字程度に収まる。これより長い「底本：以降」は後続の本文
+# （複数作品の連結txt）を巻き込んでいる可能性が高いので削らない。
+_AOZORA_FOOTER_MAX_CHARS = 2000
+
+
+def _strip_aozora_footer(text: str) -> str:
+    """末尾の底本情報（「底本：…」の行以降）を除去する。VOICEVOXがそのまま読み上げて
+    しまうため。複数作品の連結txtで本文が消えないよう、(1) 最後の「底本：」行だけを
+    対象にし、(2) テキスト後半にあり、(3) そこから末尾までが十分短い（＝奥付だけ）
+    ときに限って削る。"""
+    m = None
+    for m in _AOZORA_FOOTER_RE.finditer(text):
+        pass
+    if (m and m.start() >= len(text) // 2
+            and len(text) - m.start() <= _AOZORA_FOOTER_MAX_CHARS):
+        return text[:m.start()].rstrip() + "\n"
+    return text
 
 
 def strip_aozora(text: str) -> str:
-    """青空文庫形式の注記を除去する（ルビ《…》・｜・［＃…］）。
-    通常のテキストにはまず現れない記号のため、常に適用して安全。"""
+    """青空文庫形式の注記類を除去・展開する:
+    ルビ《…》・｜・入力者注［＃…］の除去、踊り字（こゝろ→こころ・つゞく→つづく）と
+    くの字点（どき／＼→どきどき・しみ／″＼→しみじみ）の展開、冒頭の記号説明ブロックと
+    末尾の底本情報の除去。通常のテキストにはまず現れない記法のため、常に適用して安全。"""
     text = _AOZORA_RUBY.sub("", text)
     text = _AOZORA_NOTE.sub("", text)
-    return text.replace(_AOZORA_BAR, "")
+    text = text.replace(_AOZORA_BAR, "")
+    text = _ODORIJI_RE.sub(_expand_odoriji, text)
+    text = _KUNOJI_RE.sub(_expand_kunoji, text)
+    text = _strip_aozora_header(text)
+    return _strip_aozora_footer(text)
 
 
 # 「漢字(かんじ)」型ルビ: 漢字の直後の丸括弧内が すべて かな のときだけ除去する
@@ -651,6 +943,53 @@ def strip_paren_ruby(text: str) -> str:
 
 # 全角英数記号(FF01-FF5E) → 半角(21-7E)。全角スペースは対象外（既存処理が扱う）
 _Z2H = {c: c - 0xFEE0 for c in range(0xFF01, 0xFF5F)}
+
+
+# VOICEVOX(OpenJTalk)が読み飛ばし・誤読しやすい囲み数字・組文字・単位記号の読み。
+# unicodedataのNFKCは「㈱→(株)」「℃→°C」となり読み上げ目的を果たさないため明示表で持つ。
+# 数字系（丸数字・ローマ数字）は列挙で連続することがあり（①②③）、裸の数字に置換すると
+# 「123」に連結されて誤読されるため、記号系のtranslateとは別に読点区切りで展開する。
+def _build_readable_num_map():
+    m = {}
+    for i in range(20):                      # ①〜⑳
+        m[chr(0x2460 + i)] = str(i + 1)
+    for i in range(15):                      # ㉑〜㉟
+        m[chr(0x3251 + i)] = str(i + 21)
+    for i in range(15):                      # ㊱〜㊿
+        m[chr(0x32B1 + i)] = str(i + 36)
+    for i in range(12):                      # ローマ数字 Ⅰ〜Ⅻ / ⅰ〜ⅻ
+        m[chr(0x2160 + i)] = str(i + 1)
+        m[chr(0x2170 + i)] = str(i + 1)
+    return m
+
+
+_READABLE_NUM_MAP = _build_readable_num_map()
+_READABLE_NUM_RE = re.compile(
+    "[①-⑳㉑-㉟㊱-㊿Ⅰ-Ⅻⅰ-ⅻ]+")
+_READABLE_SYM_MAP = {ord(ch): yomi for ch, yomi in {
+    "㈱": "株式会社", "㈲": "有限会社", "㍿": "株式会社",
+    "㎜": "ミリメートル", "㎝": "センチメートル", "㍍": "メートル",
+    "㎞": "キロメートル", "㎎": "ミリグラム", "㎏": "キログラム",
+    "㎖": "ミリリットル", "㍑": "リットル",
+    "㎠": "平方センチメートル", "㎡": "平方メートル", "㎢": "平方キロメートル",
+    "㎥": "立方メートル", "℃": "度", "№": "ナンバー", "〒": "郵便番号",
+}.items()}
+
+
+def expand_readable_chars(text: str) -> str:
+    """VOICEVOXが読めない/誤読しやすい特殊文字を読みに展開する
+    （例: ①→1・Ⅲ→3・㈱→株式会社・50㎡→50平方メートル・25℃→25度）。
+    連続する丸数字は「①②③→1、2、3」と読点で区切り、前後の算用数字とも
+    連結しない（「手順①2番目」→「手順1、2番目」）。"""
+    def _num(m):
+        s = "、".join(_READABLE_NUM_MAP[c] for c in m.group(0))
+        if m.string[m.start() - 1: m.start()].isdigit():
+            s = "、" + s
+        if m.string[m.end(): m.end() + 1].isdigit():
+            s = s + "、"
+        return s
+    text = _READABLE_NUM_RE.sub(_num, text)
+    return text.translate(_READABLE_SYM_MAP)
 
 
 def normalize_ascii(text: str) -> str:
@@ -796,10 +1135,27 @@ def extract_epub(path: str) -> str:
 # ============================================================
 #  画像前処理 + OCR
 # ============================================================
-def preprocess_image(img, enable: bool = True, max_side: int = 4000):
-    """OCR精度向上のための前処理。enable=Falseでもサイズ上限だけは適用。"""
+def preprocess_image(img, enable: bool = True, max_side: int = None):
+    """OCR精度向上のための前処理。enable=Falseでも「透過の白合成・PNG保存可能な
+    モードへの正規化・サイズ上限」は常に適用する（OCRエンジンに渡す前提の整え。
+    透過をそのまま渡すとWin/Macとも透過部が黒く潰れてOCRを阻害する）。
+    enable=True の強調（グレースケール化・アンシャープ・コントラスト伸長）は
+    古典的エンジンの Windows.Media.Ocr にだけ有効なので Windows のみで行い、
+    macOS の Apple Vision（NN系・カラーで学習）にはカラーのまま渡す。
+    max_side 省略時は Windows OCR の上限 WIN_OCR_MAX_DIM / それ以外 4000
+    （呼び出し時に解決するのでテストから IS_WIN を差し替えられる）。"""
     from PIL import Image, ImageOps, ImageFilter
-    if img.mode != "L":
+    if max_side is None:
+        max_side = WIN_OCR_MAX_DIM if IS_WIN else 4000
+    if (img.mode in ("RGBA", "LA")
+            or (img.mode == "P" and "transparency" in img.info)):
+        # 透過は白背景に合成（macのウィンドウ撮影・クリップボード画像で頻出）
+        rgba = img.convert("RGBA")
+        bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        img = Image.alpha_composite(bg, rgba).convert("RGB")
+    elif img.mode not in ("RGB", "L", "P", "1"):
+        img = img.convert("RGB")   # CMYK/YCbCr等をPNG保存可能なモードへ
+    if enable and not IS_MAC and img.mode != "L":
         img = img.convert("L")
     w, h = img.size
     long_side = max(w, h)
@@ -809,9 +1165,11 @@ def preprocess_image(img, enable: bool = True, max_side: int = 4000):
     if long_side > max_side:
         s = max_side / long_side
         img = img.resize((int(img.width * s), int(img.height * s)), Image.LANCZOS)
-    if enable:
-        img = img.filter(ImageFilter.SHARPEN)
-        img = ImageOps.autocontrast(img)
+    if enable and not IS_MAC:
+        # SHARPENよりハローの少ないUnsharpMask。autocontrastはノイズの白点/黒点で
+        # 伸長が無効化されないよう外れ値1%を無視する
+        img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=100))
+        img = ImageOps.autocontrast(img, cutoff=1)
     return img
 
 
@@ -819,14 +1177,14 @@ def run_ocr(image_paths, lang="ja", strip_labels=True):
     """
     画像パスのリストをOS標準のオフラインOCRに渡し、{path: text} を返す。
     Windows: Windows.Media.Ocr（PowerShellヘルパー） / macOS: Apple Vision（pyobjc）
-    strip_labels=True のとき、macOSでは行座標を使って“映像内オーバーレイ・ラベル行”
-    （局ロゴ・番組名・日時・カテゴリ）を除去する。denoise と同じON/OFFで効かせる想定。
-    Windowsは座標を持たないためラベル除去は非適用（現状維持）。
+    どちらも行の外接矩形を使った折り返し連結(reflow_ocr_lines)を適用し、
+    strip_labels=True のときは“映像内オーバーレイ・ラベル行”（局ロゴ・番組名・
+    日時・カテゴリ）を座標で除去する。denoise と同じON/OFFで効かせる想定。
     """
     if not image_paths:
         return {}
     if IS_WIN:
-        return run_windows_ocr(image_paths, lang=lang)
+        return run_windows_ocr(image_paths, lang=lang, strip_labels=strip_labels)
     if IS_MAC:
         if APP_DIR not in sys.path:
             sys.path.insert(0, APP_DIR)  # 他ディレクトリからのimportでも ocr_mac を見つける
@@ -835,10 +1193,49 @@ def run_ocr(image_paths, lang="ja", strip_labels=True):
     raise RuntimeError("この環境ではオフラインOCRを利用できません（Windows / macOS のみ対応）。")
 
 
-def run_windows_ocr(image_paths, lang="ja"):
+def _parse_windows_ocr_result(data, strip_labels=True):
+    """ocr_win.ps1 の出力JSONを {path: text} に変換する（純関数・単体テスト用に分離）。
+    行の外接矩形(lines)があれば ocr_mac.py と同じ座標パイプラインを適用する:
+    strip_labels=True のときだけ strip_overlay_labels、reflow_ocr_lines は常時。
+    後処理に失敗した場合と旧形式（linesなし）は従来どおり text をそのまま使う。"""
+    if isinstance(data, dict):
+        data = [data]
+    result = {}
+    for item in data:
+        path = item.get("path", "")
+        text = item.get("text", "") if item.get("ok") else ""
+        lines = item.get("lines")
+        if isinstance(lines, dict):
+            lines = [lines]   # PS5.1のConvertTo-Jsonは1要素配列をオブジェクトに畳む
+        if item.get("ok") and isinstance(lines, list) and lines:
+            # 形式を検証してから使う。1行でも壊れていれば lines 全体を信用せず
+            # text へフォールバック（欠けた座標で誤った連結・除去をしないため）
+            valid = []
+            for l in lines:
+                try:
+                    valid.append({"text": str(l["text"]),
+                                  "x0": float(l["x0"]), "x1": float(l["x1"]),
+                                  "y0": float(l["y0"]), "y1": float(l["y1"])})
+                except (KeyError, TypeError, ValueError):
+                    valid = []
+                    break
+            if valid:
+                try:
+                    if strip_labels:
+                        valid = strip_overlay_labels(valid)
+                    text = reflow_ocr_lines(valid) if valid else ""
+                except Exception:
+                    pass  # 座標後処理に失敗しても行テキストで続行（本文は保持される）
+        result[path] = text
+    return result
+
+
+def run_windows_ocr(image_paths, lang="ja", strip_labels=True):
     """
     画像パスのリストをWindows標準OCRに渡し、{path: text} を返す。
     PowerShellヘルパー(ocr_win.ps1)を1回だけ起動して全件処理する。
+    ヘルパーが返す行の外接矩形はmacと同じ折り返し連結・ラベル除去に使う
+    （_parse_windows_ocr_result）。
     """
     if not image_paths:
         return {}
@@ -860,16 +1257,13 @@ def run_windows_ocr(image_paths, lang="ja"):
         if not os.path.exists(out_json):
             raise RuntimeError("OCR失敗: " + (proc.stderr or proc.stdout or "出力なし"))
 
-        with open(out_json, "r", encoding="utf-8") as f:
+        # utf-8-sig: PS5.1のOut-File -Encoding utf8はBOM付きで書くことがある
+        # （fatal経路）。BOMなしも読めるため常にこちらで開く。
+        with open(out_json, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
         if isinstance(data, dict) and "fatal" in data:
             raise RuntimeError(data["fatal"])
-        if isinstance(data, dict):
-            data = [data]
-        result = {}
-        for item in data:
-            result[item.get("path", "")] = item.get("text", "") if item.get("ok") else ""
-        return result
+        return _parse_windows_ocr_result(data, strip_labels=strip_labels)
     finally:
         # OCRが済めばmanifest.txt/result.json（＝抽出全文）は不要。%TEMP%に残さない。
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -885,12 +1279,15 @@ def _find_powershell():
 #  ファイルからの抽出（progress_cb(done, total, msg) で進捗通知）
 # ============================================================
 def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
-                  lang="ja", progress_cb=None, strip_labels=True):
+                  lang="ja", progress_cb=None, strip_labels=True,
+                  fix_confusables=False):
     """
     複数ファイル（PDF/画像/テキスト/Word/EPUB）からテキストを抽出して結合文字列を返す。
     pdf_mode: "auto"（テキスト層→無ければOCR） / "ocr"（常にOCR）
-    strip_labels: True で画像OCR時に“映像内オーバーレイ・ラベル行”を座標で除去（macOSのみ）。
+    strip_labels: True で画像OCR時に“映像内オーバーレイ・ラベル行”を座標で除去（Win/Mac両対応）。
                   denoise と同じ値を渡す想定（--no-denoise / GUIチェックOFFでラベル除去もしない）。
+    fix_confusables: True で OCR由来のテキストにだけ fix_ocr_confusables（同形文字の
+                     文脈補正）を適用する。txt/docx/EPUB・PDFテキスト層には適用しない。
     戻り値: (text, warnings:list)
     """
     from PIL import Image
@@ -972,7 +1369,10 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                 warnings.append(f"OCRエラー: {e}")
                 ocr_result = {}
             for key, png in ocr_jobs:
-                text_parts[key] = ocr_result.get(png, "")
+                t = ocr_result.get(png, "")
+                if fix_confusables and t:
+                    t = fix_ocr_confusables(t)
+                text_parts[key] = t
 
         # 出力順に結合（ファイル/ページ境界は空行）
         chunks = []
