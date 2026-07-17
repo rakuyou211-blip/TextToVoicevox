@@ -13,6 +13,10 @@ Hi. I'm rakuyou211, a solo hobby developer. I made this because I wanted my own 
 
 <sub>▲ The actual app. Drop in a file, pull out the text, pick a voice, then preview / export audio / write subtitles. A leading `@name:` on a line switches the speaker just for that line. (Shown connected to VOICEVOX; dark mode supported.)</sub>
 
+▶ **See it running**: [demo video (YouTube, 36s, in Japanese)](https://youtu.be/AWVs6Evw4E0)
+
+<sub>The narration in that video was made with this app.</sub>
+
 ---
 
 ## What it does
