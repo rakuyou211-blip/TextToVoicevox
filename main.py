@@ -13,6 +13,7 @@ import shutil
 import threading
 import traceback
 import tempfile
+import unicodedata
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -56,8 +57,12 @@ _PORTRAIT_BAD = set('<>:"/\\|?*')
 
 def _portrait_key(name):
     """キャラ名/ファイル名を照合用キーに正規化する（ファイル名に使えない文字・空白を
-    除く）。話者名「小夜/SAYO」やファイル名の表記ゆれを吸収して同じキャラに寄せる。"""
-    s = _PORTRAIT_ALIASES.get(str(name), str(name))
+    除く）。話者名「小夜/SAYO」やファイル名の表記ゆれを吸収して同じキャラに寄せる。
+    Unicodeは NFC に正規化する: macOSの os.listdir は濁点を分解した NFD 形の
+    ファイル名を返すことがあり、VOICEVOX API のキャラ名（NFC）と見た目は同じでも
+    文字列比較で不一致になる（ずんだもん・春日部つむぎ等の立ち絵が出ない罠）。"""
+    s = unicodedata.normalize("NFC", str(name))
+    s = _PORTRAIT_ALIASES.get(s, s)
     return "".join(c for c in s if c not in _PORTRAIT_BAD and not c.isspace())
 
 # ドラッグ＆ドロップ対応（tkinterdnd2 が無くてもアプリは動く）

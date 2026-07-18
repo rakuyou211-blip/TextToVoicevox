@@ -14,6 +14,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core
 
 
+@pytest.fixture(autouse=True)
+def _isolate_synth_cache(tmp_path_factory, monkeypatch):
+    """合成キャッシュを一時ディレクトリに逃がす（全テスト共通）。
+    CLIの合成テストは vv_synthesize_one の呼び出しを数えるが、実エンジンが
+    起動している環境では vv_dict_hash が実値を返しキャッシュ経路が有効になるため、
+    リポジトリの voice_cache/ を汚染したりヒットして呼び出し数が狂う。
+    キャッシュを毎テスト空の一時領域に固定して決定的にする。"""
+    d = tmp_path_factory.mktemp("voice_cache")
+    monkeypatch.setattr(core, "SYNTH_CACHE_DIR", str(d))
+
+
 # ============================================================
 #  is_cjk
 # ============================================================

@@ -233,6 +233,11 @@ def test_portrait_key_normalization():
     assert main_mod._portrait_key("春日部つむぎ") == "春日部つむぎ"
     assert main_mod._portrait_key("小夜/SAYO") == "小夜SAYO"     # 「/」を除く
     assert main_mod._portrait_key("†聖騎士 紅桜†") == "†聖騎士紅桜†"  # 空白を除く
+    # macOSのNFD（濁点分解）ファイル名も NFC のキャラ名と一致する（見た目同じ→照合可）
+    import unicodedata
+    nfd = unicodedata.normalize("NFD", "ずんだもん")
+    assert nfd != "ずんだもん"
+    assert main_mod._portrait_key(nfd) == main_mod._portrait_key("ずんだもん")
 
 
 def test_portrait_key_mapping(app):
