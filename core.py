@@ -2106,25 +2106,6 @@ def vv_speaker_sample(base_url, speaker_uuid, style_id, timeout=15):
     raise RuntimeError("この話者のサンプル音声が見つかりませんでした。")
 
 
-def vv_speaker_portrait(base_url, speaker_uuid, timeout=15):
-    """話者（キャラ）の公式立ち絵ポートレート（PNGバイト列）を返す。
-    /speaker_info の portrait（base64）を使う。エンジン同梱の公式画像を、
-    利用者自身のローカルの立ち絵表示に使う想定（このアプリはVOICEVOXの
-    フロントエンドで、キャラを表示する用途はガイドラインの範囲内）。
-    リポジトリには同梱・再配布しない（取り込みは各利用者のローカルのみ）。"""
-    import base64
-    import requests
-    r = requests.get(base_url + "/speaker_info",
-                     params={"speaker_uuid": speaker_uuid,
-                             "resource_format": "base64"},
-                     timeout=timeout)
-    r.raise_for_status()
-    data = r.json().get("portrait")
-    if not data:
-        raise RuntimeError("この話者の立ち絵が見つかりませんでした。")
-    return base64.b64decode(data)
-
-
 def _format_kana(kana: str) -> str:
     """audio_query の kana（AquesTalk風記法）からアクセント記号・区切りを除いて
     人が読みやすい形にする。"""
