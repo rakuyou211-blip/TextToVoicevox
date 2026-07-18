@@ -24,7 +24,7 @@ REQUIRED_WIDGETS = [
     "vvproj_btn", "speaker_cb", "dlg_speaker_cb", "preset_cb", "fmt_cb",
     "unit_cb", "preview_btn", "playall_btn", "resume_btn", "stop_btn",
     "synth_btn", "dict_btn", "rule_cb", "restore_btn", "theme_cb",
-    "rule_menu_btn",
+    "rule_menu_btn", "sample_btn", "pause_btn", "report_btn", "engine_lbl",
 ]
 
 # 保持必須の tk.*Var / StringVar 群
@@ -34,6 +34,7 @@ REQUIRED_VARS = [
     "repl_var", "mode_var", "pdf_var", "dpi_var", "pre_var", "blank_var",
     "ascii_var", "smartjoin_var", "join_var", "pruby_var", "norm_var",
     "denoise_var", "dark_var", "dlg_var", "theme_var", "fixconf_var",
+    "urlskip_var",
 ]
 
 # 配置を変えても生かす結線メソッド
@@ -139,7 +140,7 @@ def test_settings_roundtrip_keys_present(app):
                 "pitch", "intonation", "volume", "fmt", "gap", "replace_rules",
                 "presets", "dlg_enabled", "dlg_speaker", "bookmark", "base_url",
                 "geometry", "adv_open", "theme", "fix_confusables",
-                "voice_detail_open"):
+                "voice_detail_open", "remove_urls"):
         assert key in d, f"設定キー {key} が欠落"
 
 
@@ -193,6 +194,35 @@ def test_kb_invoke_ignores_disabled(app):
     assert app._kb_invoke(app.synth_btn) == "break"
 
 
+def test_conn_compact_toggle(app):
+    """接続クラスタのコンパクト化往復（成功時に畳み・失敗時に戻す想定の状態遷移）。"""
+    app._set_conn_compact(True)
+    assert not app._conn_detail.winfo_manager()      # 詳細が畳まれている
+    assert app._conn_edit_btn.winfo_manager()
+    app._set_conn_compact(False)
+    assert app._conn_detail.winfo_manager()
+    assert not app._conn_edit_btn.winfo_manager()
+
+
+def test_shape_report_merge_enables_button(app):
+    """整形レポートの蓄積でボタンが有効化され、件数が正しく返る。"""
+    assert str(app.report_btn["state"]) == "disabled"
+    n_r, n_c = app._merge_report({"removed": ["NEWS"],
+                                  "confusables": [("口ボット", "ロボット")]})
+    assert (n_r, n_c) == (1, 1)
+    assert str(app.report_btn["state"]) == "normal"
+
+
+def test_synth_button_restore(app):
+    """生成キャンセル系のボタン復帰（テキスト・コマンドが元に戻る）。"""
+    import threading
+    app._synth_cancel = threading.Event()
+    app.synth_btn.config(text="⛔ キャンセル", command=app.cancel_synth)
+    app._synth_restore_button()
+    assert app._synth_cancel is None
+    assert str(app.synth_btn["text"]) == "🔊 音声を生成"
+
+
 def test_portrait_key_mapping(app):
     """話者ラベル→立ち絵キーの対応（立ち絵の有無に依存しない純ロジック）。"""
     assert app._portrait_key_for("四国めたん（ノーマル）") == "metan"
@@ -223,3 +253,24 @@ def test_animation_methods_safe(app):
     app._blink_tick()
     app._show_frame("open")
     app._show_frame("そんなフレームない")   # 未知名は base にフォールバック
+
+
+def test_report_window_single_instance(app):
+    """整形レポートは多重に開かない（開き直すと最新内容で作り直される）。"""
+    app._merge_report({"removed": ["NEWS"]})
+    app.show_shape_report()
+    app.show_shape_report()
+    tops = [w for w in app.winfo_children()
+            if isinstance(w, __import__("tkinter").Toplevel)]
+    assert len(tops) == 1
+    app._report_win.destroy()
+
+
+def test_check_engine_guarded_while_previewing(app):
+    """連続再生（_previewing）中は接続確認を実行しない（⏸ボタン無効化の取り残し防止）。"""
+    app._previewing = True
+    before = app.engine_var.get()
+    app.check_engine()
+    assert app.engine_var.get() == before      # 「接続確認中...」に変わらない
+    assert app.busy is False
+    app._previewing = False

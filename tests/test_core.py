@@ -1748,7 +1748,7 @@ class TestExtractFilesFixConfusables:
     def _fake_ocr(self, monkeypatch, result_text):
         monkeypatch.setattr(
             core, "run_ocr",
-            lambda paths, lang="ja", strip_labels=True:
+            lambda paths, lang="ja", strip_labels=True, errors=None:
                 {p: result_text for p in paths})
 
     def _png(self, tmp_path):
@@ -1776,3 +1776,269 @@ class TestExtractFilesFixConfusables:
         src.write_text("口コミとサ一ビス", encoding="utf-8")
         text, _ = core.extract_files([str(src)], fix_confusables=True)
         assert text == "口コミとサ一ビス"
+
+
+# ============================================================
+#  段組の列分割（_split_columns / reflow_ocr_lines の読み順）
+# ============================================================
+class TestSplitColumns:
+    def _col(self, x0, x1, n, prefix):
+        # 縦に並んだn行の列を合成（右端まで届く行＝折り返し扱いになる長い行）
+        return [{"text": f"{prefix}{i}", "x0": x0, "x1": x1,
+                 "y0": 0.1 + i * 0.05, "y1": 0.13 + i * 0.05}
+                for i in range(n)]
+
+    def test_two_columns_read_in_order(self):
+        left = self._col(0.05, 0.45, 4, "左")
+        right = self._col(0.55, 0.95, 4, "右")
+        # y順で交互に混ぜて入力しても、列単位（左→右）で出力される
+        mixed = [l for pair in zip(left, right) for l in pair]
+        out = core.reflow_ocr_lines(mixed)
+        joined = out.replace("\n", "")
+        assert joined.index("左3") < joined.index("右0")
+
+    def test_narrow_label_column_not_split(self):
+        # 設定画面型の「狭いラベル列/値列」は段組と誤検出しない（幅ガード）
+        labels = self._col(0.05, 0.15, 4, "項目")   # 幅0.10 < 0.25
+        values = self._col(0.30, 0.90, 4, "値")
+        out = core.reflow_ocr_lines(labels + values)
+        # 単一列扱い＝y順（ラベルと値が交互）のまま
+        lines = out.split("\n")
+        assert lines[0].startswith("項目0")
+        assert "値0" in out
+
+    def test_few_lines_not_split(self):
+        # 各列1〜2行では列分割しない（行数ガード）
+        a = self._col(0.05, 0.45, 2, "A")
+        b = self._col(0.55, 0.95, 2, "B")
+        out = core.reflow_ocr_lines(a + b)
+        assert out  # クラッシュせず出力される（従来動作）
+
+
+# ============================================================
+#  章見出し検出（detect_chapters）
+# ============================================================
+class TestDetectChapters:
+    def test_basic_headings(self):
+        lines = ["第一章", "本文です。", "第2章 出会い", "続き。", "エピローグ"]
+        assert core.detect_chapters(lines) == \
+            [("第一章", 0), ("第2章 出会い", 2), ("エピローグ", 4)]
+
+    def test_sentences_not_detected(self):
+        lines = ["第一章では以下を説明します。",
+                 "これはプロローグ的な話だが見出しではない文はどうかというと長い。"]
+        assert core.detect_chapters(lines) == []
+
+    def test_no_headings(self):
+        assert core.detect_chapters(["ただの本文。", "続き。"]) == []
+
+
+# ============================================================
+#  整形レポート用ヘルパー
+# ============================================================
+class TestDenoiseRemovedLines:
+    def test_removed_lines_listed(self):
+        raw = "本文の記事です。\nNEWS\n06:02\n続きの本文です。"
+        removed = core.denoise_removed_lines(raw)
+        assert "NEWS" in removed and "06:02" in removed
+        assert "本文の記事です。" not in removed
+
+    def test_no_noise_empty(self):
+        assert core.denoise_removed_lines("本文だけです。") == []
+
+
+class TestVoicevoxCredit:
+    def test_dedup_and_format(self):
+        labels = ["ずんだもん（ノーマル）", "ずんだもん（あまあま）",
+                  "四国めたん（ノーマル）"]
+        assert core.voicevox_credit(labels) == \
+            "VOICEVOX:ずんだもん、VOICEVOX:四国めたん"
+
+    def test_empty(self):
+        assert core.voicevox_credit([]) == ""
+
+
+# ============================================================
+#  低品質OCRの再判定（2パスリトライのしきい値）
+# ============================================================
+class TestOcrRetryHeuristics:
+    def test_needs_retry_on_garbage(self):
+        assert core._ocr_needs_retry("")                       # 空
+        assert core._ocr_needs_retry("a1b2")                   # 少なすぎ
+        assert core._ocr_needs_retry("!@#$%^&*()_+=~~~~|||")   # 日本語比率ゼロ
+
+    def test_good_text_no_retry(self):
+        assert not core._ocr_needs_retry("これは正常に読めた日本語の文章です。")
+
+    def test_retry_needs_clear_win(self):
+        # 僅差では差し替えない（1.2倍超のヒステリシス）
+        assert not core._ocr_retry_better("日本語十文字の結果", "日本語十文字の結果あ")
+        assert core._ocr_retry_better("あい", "しっかり読めた日本語の文章です")
+
+    def test_flatten_illumination_shape(self):
+        from PIL import Image
+        img = Image.new("RGB", (200, 100), (120, 120, 120))
+        out = core.flatten_illumination(img)
+        assert out.mode == "L" and out.size == (200, 100)
+
+
+class TestParseWindowsOcrErrors:
+    def test_error_collected(self):
+        data = [{"path": r"C:\img\a.png", "ok": False, "text": "",
+                 "error": "boom"}]
+        errors = []
+        out = core._parse_windows_ocr_result(data, errors=errors)
+        assert out[r"C:\img\a.png"] == ""
+        assert errors and "boom" in errors[0]
+
+
+class TestSplitColumnsChatGuard:
+    def test_chat_bubbles_keep_time_order(self):
+        # 左右の吹き出しが交互のチャットスクショは段組と誤検出しない
+        # （行が同じ高さに並ばない＝対にならないため単一列扱い）
+        chat = []
+        for i in range(3):
+            chat.append({"text": f"受信{i}のメッセージ本文です", "x0": 0.03,
+                         "x1": 0.36, "y0": 0.05 + i * 0.20, "y1": 0.08 + i * 0.20})
+            chat.append({"text": f"送信{i}のメッセージ本文です", "x0": 0.60,
+                         "x1": 0.95, "y0": 0.15 + i * 0.20, "y1": 0.18 + i * 0.20})
+        lines = core.reflow_ocr_lines(chat).split("\n")
+        assert lines[0].startswith("受信0")
+        assert lines[1].startswith("送信0")
+
+
+class TestDetectChaptersBoundary:
+    def test_prefix_sentences_not_detected(self):
+        # 見出し語で始まる本文（前方一致）は境界チェックで除外される
+        for s in ("その3人が事件の鍵を握る", "はじめに言葉ありき",
+                  "終章のない物語だった", "その十年後…", "第一章、それは"):
+            assert core.detect_chapters([s]) == [], s
+
+    def test_headings_with_boundary_detected(self):
+        assert core.detect_chapters(["第一章", "第2章 出会い", "序章：始まり"]) == \
+            [("第一章", 0), ("第2章 出会い", 1), ("序章：始まり", 2)]
+
+
+# ============================================================
+#  v1.14.0: 読み上げ向け正規化・URL除去・章/読み系ヘルパー
+# ============================================================
+class TestNormalizeReadings:
+    def test_thousands_separator_removed(self):
+        assert core.normalize_readings("価格は1,234円と12,345,678円") == \
+            "価格は1234円と12345678円"
+
+    def test_list_commas_kept(self):
+        # 桁区切りでないカンマ（後ろが3桁でない）は残す
+        assert core.normalize_readings("1,23と1,2345") == "1,23と1,2345"
+
+    def test_nakaguro_run_to_ellipsis(self):
+        assert core.normalize_readings("待って・・・すごい・・・・") == \
+            "待って…すごい…"
+        assert core.normalize_readings("A・B") == "A・B"   # 区切りの中黒は残す
+
+    def test_clean_text_normalize_applies(self):
+        out = core.clean_text("売上は1,234円・・・", normalize=True)
+        assert out == "売上は1234円…"
+
+
+class TestStripUrls:
+    def test_urls_and_emails_removed(self):
+        raw = "詳細は https://example.com/news?id=1 とinfo@example.comへ。"
+        out = core.strip_urls(raw)
+        assert "https" not in out and "@" not in out
+        assert "詳細は" in out and "へ。" in out
+
+    def test_clean_text_remove_urls_option(self):
+        raw = "本文です。\nhttps://example.com/x\n続きです。"
+        out = core.clean_text(raw, remove_urls=True)
+        assert "example" not in out
+        assert "本文です。" in out and "続きです。" in out
+
+    def test_default_off_keeps_urls(self):
+        raw = "https://example.com"
+        assert "example" in core.clean_text(raw)
+
+
+class TestConfusablesHa:
+    def test_ha_between_kanji_fixed(self):
+        assert core.fix_ocr_confusables("十ハ番の演目") == "十八番の演目"
+
+    def test_katakana_ha_words_protected(self):
+        for s in ("ハイテクの話", "ハワイへ行く", "彼はハンサム",
+                  # 調性のハ（クラシック曲名で頻出）は変換しない
+                  "交響曲第5番ハ短調", "前奏曲嬰ハ長調"):
+            assert core.fix_ocr_confusables(s) == s
+
+
+class TestEstimateReadSeconds:
+    def test_speed_scales(self):
+        base = core.estimate_read_seconds("あ" * 320)
+        assert 55 <= base <= 65          # 320字 ≒ 1分
+        assert core.estimate_read_seconds("あ" * 320, speed=2.0) < base
+
+
+class TestOcrRetryRotation:
+    def test_rotation_candidates_tried(self, monkeypatch, tmp_path):
+        # 1回目が低品質のとき、回転候補が試され最良が採用される
+        from PIL import Image
+        calls = []
+
+        def fake_run_ocr(paths, lang="ja", strip_labels=True, errors=None):
+            calls.append(paths[0])
+            # 2番目の候補（rot90）だけ良い結果を返す
+            if "rot90" in paths[0]:
+                return {paths[0]: "回転したらしっかり読めた日本語の文章です。"}
+            return {paths[0]: ""}
+        monkeypatch.setattr(core, "run_ocr", fake_run_ocr)
+        monkeypatch.setattr(core, "IS_MAC", True)
+        img = Image.new("RGB", (200, 100), "white")
+        out = core.ocr_retry_if_poor("", img, str(tmp_path))
+        assert out == "回転したらしっかり読めた日本語の文章です。"
+        assert any("flat" in c for c in calls)
+        assert any("rot90" in c for c in calls)
+        # 良い結果が出た時点で rot270 は試さない（早期打ち切り）
+        assert not any("rot270" in c for c in calls)
+
+
+class TestStripUrlsSurgical:
+    def test_japanese_after_url_preserved(self):
+        # URLの直後に空白なしで日本語が続く書き方（日本語では普通）で本文を消さない
+        assert core.strip_urls("詳しくはhttps://example.com/infoをご覧ください。") == \
+            "詳しくはをご覧ください。"
+        assert core.strip_urls("公式サイト（https://example.com）で確認。") == \
+            "公式サイト（）で確認。"
+
+    def test_www_slang_not_eaten(self):
+        # ネットスラングの w 連打 + 句点は www. と誤マッチしない
+        assert core.strip_urls("面白すぎwww.まじで") == "面白すぎwww.まじで"
+
+    def test_trailing_punct_kept(self):
+        assert core.strip_urls("文末 https://example.com. 次") == "文末 . 次"
+
+    def test_fullwidth_url_removed_with_normalize(self):
+        out = core.clean_text("参考ｈｔｔｐｓ：／／ｅｘａｍｐｌｅ．ｃｏｍです。",
+                              normalize=True, remove_urls=True)
+        assert out == "参考です。"
+
+
+class TestConfusablesHaNumberContext:
+    def test_bungo_particle_ha_protected(self):
+        # 文語カタカナ文の係助詞ハ（漢字+ハ+漢字）は数値文脈でないため変換しない
+        for s in ("吾輩ハ猫デアル", "天皇ハ神聖ニシテ", "被告人ハ無罪"):
+            assert core.fix_ocr_confusables(s) == s
+        # ニ→二（既存仕様）は発火し得るが、ハは八にならない
+        assert "八" not in core.fix_ocr_confusables("天ハ人ノ上ニ人ヲ造ラズ")
+
+    def test_number_context_fixed(self):
+        assert core.fix_ocr_confusables("二十ハ歳になった") == "二十八歳になった"
+
+
+class TestChapterHeadingSpacePreserved:
+    def test_clean_text_keeps_heading_space(self):
+        # 「第N章 タイトル」の区切り空白は clean_text で保護され、章検出が効く
+        out = core.clean_text("第1章 はじまり\n本文 です。\n第二章　再会\n続き。")
+        lines = out.split("\n")
+        assert lines[0] == "第1章 はじまり"
+        assert lines[1] == "本文です。"          # 本文の空白は従来どおり除去
+        assert core.detect_chapters(lines) == \
+            [("第1章 はじまり", 0), ("第二章　再会", 2)]

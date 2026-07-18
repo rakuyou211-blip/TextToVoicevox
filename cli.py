@@ -27,8 +27,8 @@ def build_parser():
     p.add_argument("inputs", nargs="+", help="入力ファイル（PDF/画像/txt/docx/epub）")
     p.add_argument("-o", "--out", required=True, help="出力フォルダ")
     p.add_argument("--wav", action="store_true", help="音声も生成する（要エンジン）")
-    p.add_argument("--format", choices=["wav", "m4a", "mp3"], default="wav",
-                   help="音声の形式（既定: wav）")
+    p.add_argument("--format", choices=["wav", "m4a", "mp3", "m4b"], default="wav",
+                   help="音声の形式（既定: wav。m4b=章付きオーディオブック・全文結合）")
     p.add_argument("--speaker", default="", help="話者名（部分一致可。既定: 最初の話者）")
     p.add_argument("--speed", type=float, default=1.0, help="話速 0.5〜2.0")
     p.add_argument("--pitch", type=float, default=0.0, help="音高 -0.15〜0.15")
@@ -53,6 +53,10 @@ def build_parser():
                    help="OCRが取り違えやすい同形文字（力⇄カ・一⇄ー・O⇄0等）を"
                         "前後の文脈で補正（OCR由来テキストのみ。既定ON。"
                         "--no-fix-confusables で無効）")
+    p.add_argument("--strip-urls", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="URL・メールアドレスを除去（読み上げると1文字ずつ"
+                        "読まれるため。既定ON。--no-strip-urls で無効）")
     p.add_argument("--denoise", action=argparse.BooleanOptionalAction, default=True,
                    help="画面キャプチャの映像内オーバーレイ文字（時刻・局ロゴ・SNSハンドル・"
                         "矢印・英文ブロック、および局ロゴ/番組名/カテゴリ等のラベル）を"
@@ -78,6 +82,12 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     os.makedirs(args.out, exist_ok=True)
 
+    # M4Bの結合強制は --srt 警告より先に確定させる（m4b+--srtは正しく保存される）
+    if args.wav and args.format == "m4b" and not args.combine:
+        print("M4B（オーディオブック）は全文を1ファイルに結合します"
+              "（--combine を自動適用）。")
+        args.combine = True
+
     if args.srt and not args.combine:
         print("警告: --srt は --combine と併用したときだけ保存されます"
               "（今回は字幕を出力しません）。", file=sys.stderr)
@@ -92,7 +102,7 @@ def main(argv=None):
     text = core.clean_text(raw, mode=args.mode, join_wrapped=args.join_wrapped,
                            smart_join=args.smart_join,
                            paren_ruby=args.paren_ruby, normalize=args.normalize,
-                           denoise=args.denoise)
+                           denoise=args.denoise, remove_urls=args.strip_urls)
     if not text:
         raise SystemExit("テキストを抽出できませんでした。")
 
@@ -117,7 +127,8 @@ def main(argv=None):
     voice = dict(speed=args.speed, pitch=args.pitch,
                  intonation=args.intonation, volume=args.volume)
     encoders = core.audio_encoders()
-    if args.format != "wav" and args.format not in encoders:
+    need = "m4a" if args.format in ("m4a", "m4b") else args.format
+    if args.format != "wav" and need not in encoders:
         raise SystemExit(f"{args.format.upper()}への変換ツールがありません"
                          "（Mac: afconvert / それ以外: ffmpeg が必要）。")
 
@@ -125,6 +136,8 @@ def main(argv=None):
     # その行だけ指定話者に切り替える）。未解決タグは行全体を既定話者で読む。
     speak_lines, sids = [], []
     for ln in lines:
+        if ln.strip().startswith(("#", "＃")):
+            continue   # 行頭#はメモ行（GUIと同じく読み上げ対象外）
         name, rest = core.parse_speaker_tag(ln)
         if name is not None:
             m = core.resolve_speaker(name, speakers)
@@ -136,6 +149,10 @@ def main(argv=None):
         speak_lines.append(ln)
         sids.append(sp[1])
 
+    if not speak_lines:
+        raise SystemExit("読み上げ対象の行がありません"
+                         "（すべて空行・#メモ行・未解決タグでした）。")
+
     wavs = []
     for i, (spoken, sid) in enumerate(zip(speak_lines, sids)):
         wavs.append(core.vv_synthesize_one(args.url, spoken, sid, **voice))
@@ -146,6 +163,25 @@ def main(argv=None):
         merged = core.concat_wavs(wavs, gap_sec=args.gap)
         core.encode_audio(merged, out_audio, args.format, encoders)
         print(f"保存: {out_audio}")
+        if args.format == "m4b":
+            try:
+                import mp4chapters
+                heads = core.detect_chapters(speak_lines)
+                if heads:
+                    starts, t = [], 0.0
+                    for w in wavs:
+                        starts.append(t)
+                        t += core.wav_duration(w) + args.gap
+                    chs = [(title, starts[i]) for title, i in heads]
+                    if chs[0][1] > 0:
+                        chs.insert(0, ("冒頭", 0.0))
+                    mp4chapters.add_chapters(out_audio, chs)
+                    print(f"チャプター{len(chs)}個を埋め込みました")
+                else:
+                    print("章見出し（第N章等）が無いためチャプターなしで保存しました")
+            except Exception as e:
+                print(f"警告: チャプター埋め込みに失敗（音声は保存済み）: {e}",
+                      file=sys.stderr)
         if args.srt:
             srt_path = os.path.join(args.out, "voicevox_output.srt")
             durations = [core.wav_duration(w) for w in wavs]
@@ -157,6 +193,16 @@ def main(argv=None):
             fn = os.path.join(args.out, f"{i+1:03d}.{args.format}")
             core.encode_audio(wb, fn, args.format, encoders)
         print(f"保存: {args.out} に {len(wavs)}ファイル")
+    # 公開時に必要なクレジット表記（VOICEVOX利用規約）
+    label_of = {s[1]: s[0] for s in speakers}
+    used = []
+    for sid in sids:
+        lb = label_of.get(sid, "")
+        if lb and lb not in used:
+            used.append(lb)
+    credit = core.voicevox_credit(used)
+    if credit:
+        print(f"※音声を公開する場合はクレジット表記が必要です: {credit}")
     print("完了")
     return 0
 

@@ -10,12 +10,15 @@ import os
 _LANG_MAP = {"ja": ["ja-JP", "en-US"], "en": ["en-US"]}
 
 
-def recognize_files(image_paths, lang="ja", reflow=True, strip_labels=True):
+def recognize_files(image_paths, lang="ja", reflow=True, strip_labels=True,
+                    errors=None):
     """画像パスのリストをOCRし {path: text} を返す。読めなかったファイルは ""。
     reflow=True のとき、Visionが返す行の外接矩形（座標）を使って“折り返しで割れた1文”を
     確実に連結する（見出し・箇条書き・別段落は連結しない）。
     strip_labels=True のとき、連結の前に“映像内オーバーレイ・ラベル行”（局ロゴ・番組名・
-    日時・カテゴリ）を座標で除去する（core.strip_overlay_labels）。"""
+    日時・カテゴリ）を座標で除去する（core.strip_overlay_labels）。
+    errors: list を渡すと一部ファイルの失敗理由（"ファイル名: 理由"）を追記する
+    （呼び出し元が警告として表示できる。全滅時は従来どおり例外）。"""
     try:
         import Vision  # noqa: F401  先にimport可否だけ確認して分かりやすいエラーにする
     except ImportError:
@@ -24,7 +27,9 @@ def recognize_files(image_paths, lang="ja", reflow=True, strip_labels=True):
             "setup.command を実行してください。")
     languages = _LANG_MAP.get(lang, [lang])
     result = {}
-    errors = []
+    if errors is None:
+        errors = []
+    n_before = len(errors)
     for path in image_paths:
         try:
             result[path] = _recognize_one(path, languages, reflow=reflow,
@@ -32,9 +37,9 @@ def recognize_files(image_paths, lang="ja", reflow=True, strip_labels=True):
         except Exception as e:
             result[path] = ""
             errors.append(f"{os.path.basename(path)}: {e}")
-    if errors and not any(result.values()):
+    if len(errors) > n_before and not any(result.values()):
         # 全滅した場合のみ致命的エラーとして通知（一部失敗は空文字で続行）
-        raise RuntimeError("OCR失敗: " + " / ".join(errors[:3]))
+        raise RuntimeError("OCR失敗: " + " / ".join(errors[n_before:][:3]))
     return result
 
 
