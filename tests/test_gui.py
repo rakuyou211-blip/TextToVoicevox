@@ -638,3 +638,38 @@ def test_confirm_speaker_tags_jump_uses_widget_line(app, monkeypatch):
     assert app._confirm_speaker_tags() is False
     # カーソルが3行目（タグ行）に移動している
     assert app.text.index("insert").startswith("3.")
+
+
+def test_recover_if_stuck_resets_preview(app):
+    """停止後も再生状態が残ったら強制復帰する（試聴が無反応になるのを防ぐ安全網）。"""
+    app.speakers = [("ずんだもん（ノーマル）", 3, "u")]
+    app._build_char_map()
+    app.char_cb.current(0); app._char_selected()
+    app._previewing = True          # ワーカーが応答せず残った状態を模擬
+    app.preview_btn.config(state="disabled")
+    app._recover_if_stuck()
+    assert app._previewing is False
+    assert str(app.preview_btn["state"]) == "normal"
+
+
+def test_preview_blocked_gives_feedback(app):
+    """再生中に試聴を押すと無音returnせず理由を状態欄に出す。"""
+    app._previewing = True
+    app.status_var.set("")
+    app.preview_selected()
+    assert app.status_var.get() != ""   # フィードバックが出る
+    app._previewing = False
+
+
+def test_preview_no_engine_shows_dialog(app, monkeypatch):
+    """未接続で試聴すると案内ダイアログ（無音で終わらない）。"""
+    from tkinter import messagebox
+    shown = []
+    monkeypatch.setattr(messagebox, "showinfo",
+                        lambda *a, **k: shown.append(a))
+    app.speakers = []
+    app._char_map = {}
+    app._previewing = False
+    app.busy = False
+    app.preview_selected()
+    assert shown   # ダイアログが出た

@@ -2413,10 +2413,16 @@ class App(_Base):
     # ---------------- 試聴 ----------------
     def preview_selected(self):
         if self._previewing or self.busy:
+            # 無音returnだと「押しても反応しない」に見えるので理由を出す
+            self.status_var.set("再生／処理の実行中です。停止してからお試しください"
+                                "（止まらないときは■停止/Esc）。")
             return
         default_sp = self._current_speaker()
         if default_sp is None:
-            messagebox.showinfo("情報", "話者を選択してください（先にエンジン接続確認）。")
+            messagebox.showinfo(
+                "情報", "先にVOICEVOXエンジンに接続してください。\n"
+                "4. の「エンジン接続確認」を押すか、VOICEVOXアプリ（またはエンジン）を"
+                "起動してください。接続できると話者が選べて試聴できます。")
             return
         if not core.can_play():
             messagebox.showinfo("情報", "この環境では試聴(再生)を利用できません。")
@@ -2521,10 +2527,15 @@ class App(_Base):
     # ---------------- 連続再生（カーソル行から最後まで） ----------------
     def play_all(self):
         if self._previewing or self.busy:
+            self.status_var.set("再生／処理の実行中です。停止してからお試しください"
+                                "（止まらないときは■停止/Esc）。")
             return
         default_sp = self._current_speaker()
         if default_sp is None:
-            messagebox.showinfo("情報", "話者を選択してください（先にエンジン接続確認）。")
+            messagebox.showinfo(
+                "情報", "先にVOICEVOXエンジンに接続してください。\n"
+                "4. の「エンジン接続確認」を押すか、VOICEVOXアプリ（またはエンジン）を"
+                "起動してください。")
             return
         if not core.can_play():
             messagebox.showinfo("情報", "この環境では再生を利用できません。")
@@ -2611,6 +2622,29 @@ class App(_Base):
             self._preview_stop.set()   # 試聴・声サンプルの再生も同じボタンで止める
         self.stop_btn.config(state="disabled")
         self.status_var.set("停止しています...")
+        # 万一ワーカーが応答せず状態が残ったら（完了通知が来ない等）強制復帰する。
+        # これが無いと _previewing が立ちっぱなしになり、以降の試聴・連続再生が
+        # 反応しなくなる（＝「試聴が動かない」に見える）
+        self.after(1500, self._recover_if_stuck)
+
+    def _recover_if_stuck(self):
+        """停止後も再生状態が残っていたらUIを強制的に待機状態へ戻す（安全網）。"""
+        if not self._previewing:
+            return
+        self._previewing = False
+        self._preview_stop = None
+        self._playall_stop = None
+        self._playall_pause = None
+        self._stop_mouth()
+        self.text.tag_remove("playing", "1.0", "end")
+        self.pause_btn.config(text="⏸ 一時停止", state="disabled")
+        if self.speakers and not self.busy:
+            self.preview_btn.config(state="normal")
+            self.playall_btn.config(state="normal")
+            self.sample_btn.config(state="normal")
+            if self._bookmark is not None:
+                self.resume_btn.config(state="normal")
+        self.status_var.set("停止しました（待機中）。")
 
     def _playall_worker(self, targets, voice):
         stop = self._playall_stop
