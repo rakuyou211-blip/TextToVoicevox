@@ -598,3 +598,43 @@ def test_synth_partial_decline_cleans_up(app, tmp_path, monkeypatch):
     assert not part.exists()
     assert app.busy is False
     assert "キャンセル" in app.status_var.get()
+
+
+def test_synth_worker_mkdtemp_failure_unlocks_ui(app, monkeypatch):
+    """spool作成失敗（ディスクフル等）でもbusyが解除される（永久ロック防止）。"""
+    import main as main_mod
+    monkeypatch.setattr(main_mod.tempfile, "mkdtemp",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no space")))
+    app._set_busy(True)
+    app._synth_cancel = None
+    # ワーカーを直接呼ぶ（スレッドなし）: 例外が ("error",…) として積まれる
+    app._synth_worker([("あ", 3, 0)], [[0]], {"speed": 1.0, "pitch": 0.0,
+                      "intonation": 1.0, "volume": 1.0}, str(app), "combine",
+                      0.4, "wav", False)
+    kinds = []
+    try:
+        while True:
+            kinds.append(app.q.get_nowait()[0])
+    except Exception:
+        pass
+    assert "error" in kinds
+
+
+def test_confirm_speaker_tags_no_tags_passes(app):
+    """@タグが無ければ確認をスキップして True。"""
+    app.speakers = [("ずんだもん（ノーマル）", 3, "u")]
+    app.text.delete("1.0", "end")
+    app.text.insert("1.0", "普通の本文です。")
+    assert app._confirm_speaker_tags() is True
+
+
+def test_confirm_speaker_tags_jump_uses_widget_line(app, monkeypatch):
+    """未解決タグで「いいえ」→ウィジェットの絶対行にジャンプ（先頭空行分ずれない）。"""
+    from tkinter import messagebox
+    monkeypatch.setattr(messagebox, "askyesno", lambda *a, **k: False)
+    app.speakers = [("ずんだもん（ノーマル）", 3, "u")]
+    app.text.delete("1.0", "end")
+    app.text.insert("1.0", "\n\n@すんだもん: タイプミス\n地の文")
+    assert app._confirm_speaker_tags() is False
+    # カーソルが3行目（タグ行）に移動している
+    assert app.text.index("insert").startswith("3.")

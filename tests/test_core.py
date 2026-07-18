@@ -2690,3 +2690,33 @@ class TestCliV117:
         assert n_first == 2
         assert cli.main([str(src), "-o", str(tmp_path / "o2"), "--wav"]) == 0
         assert len(calls) == n_first   # 2回目は全行キャッシュヒット＝合成0回
+
+
+class TestReviewFixesV117:
+    """v1.17.0の追いレビューで確定した指摘の回帰テスト。"""
+
+    def test_set_limit_evict_flag(self, tmp_path, monkeypatch):
+        # set_synth_cache_limit(evict=True) は設定直後に超過分を削除する。
+        # evict=False（既定）だと put間引き・ジョブ終了を待つまで削除されない
+        monkeypatch.setattr(core, "SYNTH_CACHE_DIR", str(tmp_path / "vc"))
+        monkeypatch.setattr(core, "_synth_cache_protect_since", 0.0)
+        big = b"RIFF" + b"x" * (2 * 1024 * 1024)   # 2MB強
+        for k in ("a", "b", "c"):
+            core.synth_cache_put(k, big)
+        core.set_synth_cache_limit(50)             # 既定=evictしない
+        assert core.synth_cache_stats()[0] == 3
+        core.set_synth_cache_limit(50, evict=True)  # 50MB上限では消えない
+        assert core.synth_cache_stats()[0] == 3
+        # 上限を実データより小さくして evict=True → 超過分が即削除される
+        core.set_synth_cache_limit(50)
+        monkeypatch.setattr(core, "_SYNTH_CACHE_MAX_BYTES", 3 * 1024 * 1024)
+        core._synth_cache_evict()   # 上限3MB < 実6MB
+        assert core.synth_cache_stats()[1] <= 3 * 1024 * 1024
+        core.set_synth_cache_limit(500)
+
+    def test_unresolved_tags_line_numbers_are_absolute(self):
+        # 先頭に空行があっても、返る行番号はその空行を含む絶対行番号
+        # （GUIがウィジェット全文を渡すため、ジャンプ先がずれない）
+        sp = [("ずんだもん（ノーマル）", 3, "u")]
+        text = "\n\n@すんだもん: タイプミス\n地の文"
+        assert core.unresolved_speaker_tags(text, sp) == [(3, "すんだもん")]

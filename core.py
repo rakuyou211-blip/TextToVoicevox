@@ -2217,9 +2217,11 @@ _synth_cache_protect_since = 0.0
 _synth_cache_put_count = 0   # evict間引き用（putごとの全stat走査はO(N^2)になる）
 
 
-def set_synth_cache_limit(mb):
+def set_synth_cache_limit(mb, evict=False):
     """キャッシュ上限をMB単位で設定する（settings.json の synth_cache_mb から）。
-    10時間級の本を常用するなら2000MB程度にすると再生成が本当に即完了になる。"""
+    10時間級の本を常用するなら2000MB程度にすると再生成が本当に即完了になる。
+    evict=True で設定直後に超過分を削除する（上限を下げた直後に反映させる用途。
+    put間引き・ジョブ終了時のevictを待たずに効かせる）。"""
     global _SYNTH_CACHE_MAX_BYTES
     try:
         mb = int(mb)
@@ -2227,6 +2229,8 @@ def set_synth_cache_limit(mb):
         return
     if 50 <= mb <= 100000:
         _SYNTH_CACHE_MAX_BYTES = mb * 1024 * 1024
+        if evict:
+            _synth_cache_evict()
 
 
 def synth_cache_protect(since_ts):

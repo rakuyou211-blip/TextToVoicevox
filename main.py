@@ -1676,6 +1676,25 @@ class App(_Base):
         except Exception:
             self.q.put(("engine", None, None, quiet))
 
+    def _confirm_speaker_tags(self, tail="該当行はタグ文字列ごと既定話者が読み上げます。"
+                                          "続けますか？\n（「いいえ」で最初の該当行へジャンプ）"):
+        """未解決の@話者タグを合成/vvproj出力の前に確認する。続行なら True。
+        検証はウィジェット全文（strip前）で行い、返る行番号がウィジェットの
+        行番号と一致するようにする（先頭空行があってもジャンプ先がずれない）。"""
+        bad = core.unresolved_speaker_tags(
+            self.text.get("1.0", "end-1c"), self.speakers)
+        if not bad:
+            return True
+        ln0, name0 = bad[0]
+        if messagebox.askyesno(
+                "@話者タグの確認",
+                f"解決できない@話者タグが{len(bad)}行あります"
+                f"（例: {ln0}行目「@{name0}:」）。\n{tail}"):
+            return True
+        self.text.mark_set("insert", f"{ln0}.0")
+        self.text.see(f"{ln0}.0")
+        return False
+
     def start_synth(self):
         if self.busy or self._previewing:
             self.status_var.set("再生／処理の実行中です。停止・完了してからお試しください。")
@@ -1689,19 +1708,11 @@ class App(_Base):
             messagebox.showinfo("情報", "話者を選択してください（先にエンジン接続確認）。")
             return
         # @話者タグのタイプミスは合成前に指摘する（従来は行全体をタグごと既定話者が
-        # 読む仕様のため、長編では全編を聴き直すまで気づけなかった）
-        bad = core.unresolved_speaker_tags(text, self.speakers)
-        if bad:
-            ln0, name0 = bad[0]
-            if not messagebox.askyesno(
-                    "@話者タグの確認",
-                    f"解決できない@話者タグが{len(bad)}行あります"
-                    f"（例: {ln0}行目「@{name0}:」）。\n"
-                    "該当行はタグ文字列ごと既定話者が読み上げます。続けますか？\n"
-                    "（「いいえ」で最初の該当行へジャンプ）"):
-                self.text.mark_set("insert", f"{ln0}.0")
-                self.text.see(f"{ln0}.0")
-                return
+        # 読む仕様のため、長編では全編を聴き直すまで気づけなかった）。
+        # 検証はウィジェット全文（strip前）で行う＝返る行番号がウィジェットの
+        # 行番号と一致し、「いいえ」のジャンプ先が先頭空行の分ずれない
+        if not self._confirm_speaker_tags():
+            return
         # 行別話者を解決して (テキスト, style_id, 段落番号) のジョブ一覧を作る
         default_id = default_sp[1]
         jobs = []
@@ -1805,11 +1816,14 @@ class App(_Base):
         # 行WAVはスプール（一時フォルダ）へ書き、メモリには (パス, 再生秒) だけ
         # 保持する。従来は全行のWAVバイト列をリストに持ち、10時間級の本で
         # メモリが数GBに達していた（結合時はさらに倍）。
-        spool = tempfile.mkdtemp(prefix="t2v_spool_")
-        # 生成中に自分の前半行のキャッシュを自分で追い出さないよう保護
-        core.synth_cache_protect(time.time())
+        # mkdtemp は try の中で作る（ディスクフル等で失敗しても except が
+        # ("error",…) を積みUIのbusyが解除されるように。外に置くと通知されず永久ロック）
+        spool = None
         try:
             from concurrent.futures import ThreadPoolExecutor
+            spool = tempfile.mkdtemp(prefix="t2v_spool_")
+            # 生成中に自分の前半行のキャッシュを自分で追い出さないよう保護
+            core.synth_cache_protect(time.time())
             done_count = [0]
             lock = threading.Lock()
             t0 = time.monotonic()
@@ -1867,9 +1881,20 @@ class App(_Base):
                     done_prefix += 1
                 if unit == "combine" and done_prefix > 0:
                     part = target + ".part.wav"
-                    core.concat_wavs_to_file(
-                        [wavs[i][0] for i in range(done_prefix)], part,
-                        gap_sec=gap)
+                    try:
+                        core.concat_wavs_to_file(
+                            [wavs[i][0] for i in range(done_prefix)], part,
+                            gap_sec=gap)
+                    except Exception:
+                        # 連結失敗（4GB超・ディスクフル等）は部分保存を諦め、
+                        # 書きかけの .part を残さずキャンセル扱いにする
+                        try:
+                            os.remove(part)
+                        except OSError:
+                            pass
+                        self.q.put(("synth_cancelled", done_count[0],
+                                    len(jobs), 0))
+                        return
                     self.q.put(("synth_partial", {
                         "part": part, "done": done_prefix, "total": len(jobs),
                         "durs": [wavs[i][1] for i in range(done_prefix)],
@@ -1975,7 +2000,8 @@ class App(_Base):
             self.q.put(("error", traceback.format_exc()))
         finally:
             core.synth_cache_protect(0.0)   # 保護解除（ここで上限へ戻すevictも走る）
-            shutil.rmtree(spool, ignore_errors=True)
+            if spool:
+                shutil.rmtree(spool, ignore_errors=True)
 
     def _partial_save_worker(self, info):
         """キャンセル時の部分保存: 連結済みの .part.wav を目的の形式で書き出す。
@@ -2068,17 +2094,9 @@ class App(_Base):
             messagebox.showinfo("情報", "話者を選択してください（先にエンジン接続確認）。")
             return
         # 合成前と同じく@タグのタイプミスを事前に指摘（プロジェクトに混入させない）
-        bad = core.unresolved_speaker_tags(text, self.speakers)
-        if bad:
-            ln0, name0 = bad[0]
-            if not messagebox.askyesno(
-                    "@話者タグの確認",
-                    f"解決できない@話者タグが{len(bad)}行あります"
-                    f"（例: {ln0}行目「@{name0}:」）。\n"
-                    "該当行はタグ文字列ごと既定話者のブロックになります。続けますか？"):
-                self.text.mark_set("insert", f"{ln0}.0")
-                self.text.see(f"{ln0}.0")
-                return
+        if not self._confirm_speaker_tags(
+                "該当行はタグ文字列ごと既定話者のブロックになります。続けますか？"):
+            return
         out = filedialog.asksaveasfilename(
             title="VOICEVOXプロジェクトを保存", defaultextension=".vvproj",
             filetypes=[("VOICEVOXプロジェクト", "*.vvproj")],
@@ -2893,9 +2911,17 @@ class App(_Base):
                     textvariable=mb_var).pack(side="left", padx=4)
 
         def _apply_limit():
-            core.set_synth_cache_limit(self._get_num(mb_var, 500))
-            _refresh()
-            self.status_var.set("キャッシュ上限を変更しました"
+            # 上限を下げたら即座に超過分を削除する（evict=True。実行中ジョブが
+            # あっても _synth_cache_evict は保護中エントリを尊重する）。数千
+            # ファイルの削除でUIが固まらないよう別スレッドで走らせ、後で再表示
+            mb = self._get_num(mb_var, 500)
+
+            def _work():
+                core.set_synth_cache_limit(mb, evict=True)
+                self.q.put(("cache_limit_applied",))
+            self._cache_refresh = _refresh
+            threading.Thread(target=_work, daemon=True).start()
+            self.status_var.set("キャッシュ上限を変更しています…"
                                 "（次回起動にも引き継がれます）。")
         ttk.Button(row, text="適用", command=_apply_limit).pack(side="left")
 
@@ -3541,7 +3567,10 @@ class App(_Base):
             bm = s.get("bookmark")
             self._bookmark = int(bm) if isinstance(bm, (int, float)) else None
             self._saved_speaker = s.get("speaker") or None
+            # 上限を設定し、前回セッションからの超過分を起動時に一度掃除する
+            # （上限を下げた設定で終了した場合の持ち越し解消。別スレッドで）
             core.set_synth_cache_limit(s.get("synth_cache_mb", 500))
+            threading.Thread(target=core._synth_cache_evict, daemon=True).start()
             if s.get("base_url"):
                 self.base_url = s["base_url"]
                 self.url_var.set(self.base_url)
@@ -3792,6 +3821,17 @@ class App(_Base):
         elif kind == "dict_status":
             _, info = msg
             self.status_var.set(info)
+        elif kind == "cache_limit_applied":
+            # キャッシュ上限のevict完了。ダイアログが開いていれば統計を更新
+            r = getattr(self, "_cache_refresh", None)
+            if r is not None and getattr(self, "_cache_win", None) is not None \
+                    and self._cache_win.winfo_exists():
+                try:
+                    r()
+                except tk.TclError:
+                    pass
+            self.status_var.set("キャッシュ上限を変更しました"
+                                "（次回起動にも引き継がれます）。")
         elif kind == "synth_done":
             _, info, target, credit = msg
             self._synth_restore_button()
