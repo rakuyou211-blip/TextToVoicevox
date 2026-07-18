@@ -1277,17 +1277,33 @@ class App(_Base):
             self._portrait_label.config(image=img)
             self._portrait_label.image = img  # GC防止の参照保持
 
-    def _update_portrait(self, event=None):
-        """選択中の話者に応じて立ち絵を切り替える。そのキャラの立ち絵が無ければ
-        別キャラを誤表示せず、枠だけ残して画像を消す（全キャラ対応の素直な挙動）。"""
+    def _show_no_portrait(self, char=""):
+        """立ち絵が無いキャラのとき、空にするだけでなく「置けば出る」案内を出す。
+        別キャラを誤表示しない一方で、なぜ空なのか・どうすれば出るかが分かるように。"""
         if not getattr(self, "_portrait_label", None):
             return
-        key = self._portrait_key_for(self._current_speaker_label())
+        char = self._char_name(char) if char else ""
+        fname = f"{_portrait_key(char)}.png" if char else "キャラ名.png"
+        msg = (f"「{char}」の立ち絵はまだありません。\n\n"
+               f"assets/立ち絵/ に\n{fname}\nを置くと、ここに表示されます。\n"
+               "（全キャラ対応・入れ方は同フォルダの README を参照）"
+               if char else "立ち絵を assets/立ち絵/ に置くと表示されます。")
+        self._portrait_label.config(image="", text=msg, wraplength=210,
+                                    justify="center", fg="#9a8f7d")
+        self._portrait_label.image = None
+
+    def _update_portrait(self, event=None):
+        """選択中の話者に応じて立ち絵を切り替える。そのキャラの立ち絵が無ければ
+        別キャラを誤表示せず、案内テキストを出す（全キャラ対応の素直な挙動）。"""
+        if not getattr(self, "_portrait_label", None):
+            return
+        label = self._current_speaker_label()
+        key = self._portrait_key_for(label)
         self._portrait_key = key
         if key is None:
-            self._portrait_label.config(image="")
-            self._portrait_label.image = None
+            self._show_no_portrait(label)
             return
+        self._portrait_label.config(text="")   # 案内を消して画像へ
         self._show_frame("open" if self._mouth_open else "base")
 
     # --- まばたき（アイドル時の小さな生命感。blinkフレームが無ければ何もしない） ---
@@ -1309,12 +1325,13 @@ class App(_Base):
         if speaker_id is not None:
             # 喋る行のキャラに立ち絵を合わせる。立ち絵が無いキャラなら別キャラの口を
             # 動かさず枠だけにする（全キャラ対応：連続再生で話者が変わっても誤表示なし）
-            key = self._portrait_key_for(self._speaker_label_for_id(speaker_id))
+            label = self._speaker_label_for_id(speaker_id)
+            key = self._portrait_key_for(label)
             self._portrait_key = key
             if key is None:
-                self._portrait_label.config(image="")
-                self._portrait_label.image = None
+                self._show_no_portrait(label)
                 return
+            self._portrait_label.config(text="")   # 案内を消して画像へ
         self._stop_mouth(restore=False)
         self._mouth_after = self.after(90, self._mouth_tick)
 
