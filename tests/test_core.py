@@ -2042,3 +2042,34 @@ class TestChapterHeadingSpacePreserved:
         assert lines[1] == "本文です。"          # 本文の空白は従来どおり除去
         assert core.detect_chapters(lines) == \
             [("第1章 はじまり", 0), ("第二章　再会", 2)]
+
+
+class TestSpeakableText:
+    def test_skips_memo_and_strips_tags(self):
+        text = "# 台本メモ\n@ずんだもん: こんにちは\n本文です。\n＃これもメモ\n"
+        assert core.speakable_text(text) == "こんにちは\n本文です。"
+
+    def test_plain_text_unchanged(self):
+        assert core.speakable_text("一行目。\n二行目。") == "一行目。\n二行目。"
+
+    def test_blank_and_tag_only_lines_dropped(self):
+        assert core.speakable_text("\n@ずんだもん:\n\n") == ""
+
+
+class TestFilenameSnippet:
+    def test_basic_japanese(self):
+        assert core.filename_snippet("こんにちは、世界。") == "こんにちは、世界。"
+
+    def test_strips_forbidden_chars_and_spaces(self):
+        assert core.filename_snippet('a<b>:c"/d\\|?*e f') == "abcdef"
+
+    def test_max_chars(self):
+        assert core.filename_snippet("あ" * 30) == "あ" * 12
+
+    def test_empty_when_nothing_usable(self):
+        assert core.filename_snippet("  \t　 ") == ""
+        assert core.filename_snippet("???") == ""
+
+    def test_no_trailing_ascii_dot(self):
+        # 末尾の半角ピリオドはWindowsで不正なファイル名になるため落とす
+        assert not core.filename_snippet("End of file.").endswith(".")

@@ -166,6 +166,8 @@ class App(_Base):
         self._report_win = None         # 整形レポートのウィンドウ（多重表示防止）
         self._synth_cancel = None       # 音声生成のキャンセルEvent（生成中のみ非None）
         self._playall_pause = None      # 連続再生の一時停止Event（再生中のみ非None）
+        self._cache_saved = None        # 最後に自動保存した本文（無変化なら書き込まない）
+        self._conn_retry_until = 0.0    # VOICEVOX起動後の自動接続リトライの期限
         self.encoders = core.audio_encoders()  # 使える音声変換 {"m4a":..., "mp3":...}
 
         self.dark_var = tk.BooleanVar(value=False)   # 旧設定キー互換（theme=="dark"と同期）
@@ -181,6 +183,7 @@ class App(_Base):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._poll_queue)
         self.after(600, self._auto_connect)  # 起動時にエンジンへ自動接続
+        self.after(60000, self._autosave_tick)  # 本文の自動保存（クラッシュ対策）
 
     # ---------------- UI構築 ----------------
     def _build_ui(self):
@@ -252,6 +255,18 @@ class App(_Base):
         ttk.Button(btns, text="フォルダ追加", command=self.add_folder).pack(fill="x", pady=2)
         ttk.Button(btns, text="選択削除", command=self.remove_selected).pack(fill="x", pady=2)
         ttk.Button(btns, text="全クリア", command=self.clear_files).pack(fill="x", pady=2)
+        # 並べ替え（ファイルの順序＝読み上げ・結合の順序なので調整できるように）
+        mv = ttk.Frame(btns)
+        mv.pack(fill="x", pady=2)
+        up = ttk.Button(mv, text="▲ 上へ", width=6,
+                        command=lambda: self._move_selected(-1))
+        up.pack(side="left", expand=True, fill="x")
+        dn = ttk.Button(mv, text="▼ 下へ", width=6,
+                        command=lambda: self._move_selected(+1))
+        dn.pack(side="left", expand=True, fill="x", padx=(2, 0))
+        for b in (up, dn):
+            _Tooltip(b, "選択したファイルの順序を入れ替えます\n"
+                        "（上から順に抽出・結合されます）。")
         self.clip_btn = ttk.Button(btns, text="クリップボードOCR", command=self.clipboard_ocr)
         self.clip_btn.pack(fill="x", pady=(8, 2))
 
@@ -714,6 +729,17 @@ class App(_Base):
         # 本文が（全消去/復元“以外”の理由で）変わったら復元ポイントを無効化する一元フック
         self.text.bind("<<Modified>>", self._on_text_modified)
 
+        # 右クリックメニュー（編集・この行を試聴・辞書登録・@タグ・＃メモ行）。
+        # macのTk(aqua)は右クリック=Button-2（Ctrl+クリックも慣習）、Win/LinuxはButton-3
+        self._text_menu = tk.Menu(self.text, tearoff=0)
+        seqs = (("<Button-2>", "<Control-Button-1>") if core.IS_MAC
+                else ("<Button-3>",))
+        for seq in seqs:
+            try:
+                self.text.bind(seq, self._show_text_menu)
+            except tk.TclError:
+                pass
+
         # ショートカット: 検索(Ctrl/Cmd+F)・文字サイズ(Ctrl/Cmd + = / - / 0)
         self._font_size0 = int(self.text_font.cget("size"))  # リセット用の既定サイズ
         for mod in ("Control", "Command"):
@@ -805,6 +831,140 @@ class App(_Base):
             pass
         self.toggle_pause()
         return "break"
+
+    # ---------------- 本文の右クリックメニュー ----------------
+    def _show_text_menu(self, event):
+        """本文の右クリックメニューを状態に応じて組み立てて表示する。
+        編集の基本操作に加え、「この行を試聴」「選択語を辞書登録」「@話者タグ」
+        「＃メモ行」といった“この画面でよくやる次の一手”への近道を出す。"""
+        # クリック位置へカーソルを移す（選択範囲内の右クリックは選択を保つ）
+        try:
+            idx = self.text.index(f"@{event.x},{event.y}")
+            in_sel = bool(self.text.tag_ranges("sel")) and \
+                self.text.compare("sel.first", "<=", idx) and \
+                self.text.compare(idx, "<", "sel.last")
+            if not in_sel:
+                self.text.mark_set("insert", idx)
+        except tk.TclError:
+            pass
+        has_sel = bool(self.text.tag_ranges("sel"))
+        sel = self.text.get("sel.first", "sel.last").strip() if has_sel else ""
+        line = self.text.get("insert linestart", "insert lineend")
+        can_speak = ("normal" if (self.speakers and not self.busy
+                                  and not self._previewing) else "disabled")
+        m = self._text_menu
+        m.delete(0, "end")
+        m.add_command(label="切り取り", state="normal" if has_sel else "disabled",
+                      command=lambda: self.text.event_generate("<<Cut>>"))
+        m.add_command(label="コピー", state="normal" if has_sel else "disabled",
+                      command=lambda: self.text.event_generate("<<Copy>>"))
+        m.add_command(label="貼り付け",
+                      command=lambda: self.text.event_generate("<<Paste>>"))
+        m.add_command(label="すべて選択", command=self._select_all_text)
+        m.add_separator()
+        m.add_command(label="▶ この行を試聴", state=can_speak,
+                      command=self.preview_selected)
+        m.add_command(
+            label=(f"「{sel[:10]}」を読み方辞書に登録..." if sel
+                   else "選択語を読み方辞書に登録..."),
+            state="normal" if (sel and self.speakers) else "disabled",
+            command=lambda w=sel: self._register_word_to_dict(w))
+        m.add_separator()
+        # @話者タグ: キャラ名だけのサブメニュー（スタイル名まで並べると多すぎるため。
+        # 「@ずんだもん:」は resolve_speaker の前方一致で最初のスタイルに解決される）
+        if getattr(self, "_tag_menu", None) is not None:
+            self._tag_menu.destroy()   # 前回のサブメニューを捨てる（Widgetの取り残し防止）
+        tag_menu = tk.Menu(m, tearoff=0)
+        self._tag_menu = tag_menu
+        names = []
+        for lb, _sid, _u in self.speakers:
+            n = lb.split("（")[0].strip()
+            if n and n not in names:
+                names.append(n)
+        for n in names[:30]:
+            tag_menu.add_command(
+                label=n, command=lambda n=n: self._insert_speaker_tag(n))
+        if names:
+            m.add_cascade(label="この行を別の話者で読む（@タグ挿入）", menu=tag_menu)
+        else:
+            m.add_command(label="この行を別の話者で読む（@タグ挿入）",
+                          state="disabled")
+        if core.parse_speaker_tag(line)[0] is not None:
+            m.add_command(label="この行の@話者タグを外す",
+                          command=self._remove_speaker_tag)
+        memo_on = line.strip().startswith(("#", "＃"))
+        m.add_command(label=("＃メモ解除（読み上げ対象に戻す）" if memo_on
+                             else "＃メモ行にする（読み上げから除外）"),
+                      command=self._toggle_memo_lines)
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+        return "break"
+
+    def _select_all_text(self):
+        self.text.tag_add("sel", "1.0", "end-1c")
+        self.text.mark_set("insert", "1.0")
+
+    def _register_word_to_dict(self, word):
+        """選択したテキストを単語欄に入れた状態で読み方辞書を開く（誤読修正の近道）。"""
+        self.open_dict_dialog()
+        self._dict_surface.set(word[:25])
+        self._dict_pron.set("")
+
+    def _insert_speaker_tag(self, name):
+        """カーソル行の行頭に「@話者名: 」タグを挿入する（既存タグは置き換え）。"""
+        ln = int(self.text.index("insert").split(".")[0])
+        line = self.text.get(f"{ln}.0", f"{ln}.end")
+        existing, rest = core.parse_speaker_tag(line)
+        self.text.edit_separator()
+        if existing is not None:
+            self.text.delete(f"{ln}.0", f"{ln}.end")
+            self.text.insert(f"{ln}.0", f"@{name}: {rest}")
+        else:
+            self.text.insert(f"{ln}.0", f"@{name}: ")
+        self.text.edit_separator()
+        self.status_var.set(f"この行は「{name}」が読むよ（行頭の@タグで指定）")
+
+    def _remove_speaker_tag(self):
+        """カーソル行の行頭の「@話者名:」タグを外し、本文だけを残す。"""
+        ln = int(self.text.index("insert").split(".")[0])
+        line = self.text.get(f"{ln}.0", f"{ln}.end")
+        name, rest = core.parse_speaker_tag(line)
+        if name is None:
+            return
+        self.text.edit_separator()
+        self.text.delete(f"{ln}.0", f"{ln}.end")
+        self.text.insert(f"{ln}.0", rest)
+        self.text.edit_separator()
+
+    def _toggle_memo_lines(self):
+        """カーソル行（選択があれば選択範囲の全行）の＃メモ行を切り替える。
+        混在時は「全行をメモにする」に倒す（台本の一括コメントアウトと同じ感覚）。"""
+        try:
+            first = int(self.text.index("sel.first").split(".")[0])
+            last = int(self.text.index("sel.last").split(".")[0])
+        except tk.TclError:
+            first = last = int(self.text.index("insert").split(".")[0])
+        lines = [(i, self.text.get(f"{i}.0", f"{i}.end"))
+                 for i in range(first, last + 1)]
+        non_empty = [l for _i, l in lines if l.strip()]
+        if not non_empty:
+            return
+        make_memo = not all(l.strip().startswith(("#", "＃")) for l in non_empty)
+        self.text.edit_separator()
+        for i, l in lines:
+            s = l.lstrip()
+            if not s:
+                continue
+            if make_memo:
+                if not s.startswith(("#", "＃")):
+                    self.text.insert(f"{i}.0", "# ")
+            elif s.startswith(("#", "＃")):
+                off = len(l) - len(s)
+                n = 2 if s[1:2] == " " else 1   # 「# 」は空白ごと外す
+                self.text.delete(f"{i}.{off}", f"{i}.{off + n}")
+        self.text.edit_separator()
 
     # ---------------- キャラ立ち絵パネル（任意・ローカル資産） ----------------
     def _set_window_icon(self):
@@ -1109,6 +1269,27 @@ class App(_Base):
             self.listbox.delete(i)
             del self.files[i]
 
+    def _move_selected(self, delta):
+        """選択したファイルを1つ上/下へ動かす（ファイル順＝抽出・結合の順序）。
+        複数選択にも対応し、端に達したら何もしない（選択のまとまりは崩さない）。"""
+        sel = list(self.listbox.curselection())
+        if not sel:
+            self.status_var.set("並べ替えるファイルを選択してください。")
+            return
+        if (delta < 0 and sel[0] == 0) or \
+                (delta > 0 and sel[-1] == len(self.files) - 1):
+            return   # もう端にいる
+        for i in (sel if delta < 0 else reversed(sel)):
+            j = i + delta
+            self.files[i], self.files[j] = self.files[j], self.files[i]
+            label = self.listbox.get(i)
+            self.listbox.delete(i)
+            self.listbox.insert(j, label)
+        self.listbox.selection_clear(0, "end")
+        for i in sel:
+            self.listbox.selection_set(i + delta)
+        self.listbox.see(sel[0] + delta)
+
     def clear_files(self):
         self.files.clear()
         self.listbox.delete(0, "end")
@@ -1177,11 +1358,28 @@ class App(_Base):
     def launch_voicevox(self):
         try:
             core.launch_voicevox()
-            self.status_var.set("VOICEVOXを起動しました。少し待ってから接続確認してください。")
+            self.status_var.set("VOICEVOXを起動したよ。準備ができたら自動でつなぐね🍂")
+            self._start_connect_retry()
         except FileNotFoundError as e:
             messagebox.showwarning("VOICEVOX", str(e))
         except Exception as e:
             messagebox.showerror("VOICEVOX", f"起動に失敗: {e}")
+
+    def _start_connect_retry(self, seconds=90):
+        """VOICEVOX起動後、エンジンが応答するまで自動で接続を試みる
+        （従来は起動→手動で「エンジン接続確認」の2ステップだった）。"""
+        self._conn_retry_until = time.monotonic() + seconds
+        self.after(3000, self._connect_retry_tick)
+
+    def _connect_retry_tick(self):
+        if self.speakers or time.monotonic() > self._conn_retry_until:
+            return   # 接続できた/諦めた（以降は手動の接続確認で）
+        if not (self.busy or self._previewing):
+            self.check_engine()
+        try:
+            self.after(3000, self._connect_retry_tick)
+        except tk.TclError:
+            pass   # 終了中
 
     def check_engine(self):
         # _previewing もガードする（連続再生中に実行すると _set_busy の往復で
@@ -1353,7 +1551,11 @@ class App(_Base):
                 if unit == "combine":
                     out_path = target
                 else:
-                    out_path = os.path.join(target, f"{gi+1:03d}.{fmt}")
+                    # 連番だけだと中身が分からないので、本文の先頭を添える
+                    # （001_こんにちは.wav。掛け合い動画の素材整理などで探しやすく）
+                    snippet = core.filename_snippet(jobs[idxs[0]][0])
+                    stem = f"{gi+1:03d}" + (f"_{snippet}" if snippet else "")
+                    out_path = os.path.join(target, f"{stem}.{fmt}")
                 group_wavs = [wavs[i] for i in idxs]
                 merged = (group_wavs[0] if len(group_wavs) == 1
                           else core.concat_wavs(group_wavs, gap_sec=gap))
@@ -1369,24 +1571,20 @@ class App(_Base):
                         f.write(core.make_srt(lines, durations, gap_sec=gap))
                     srt_count += 1
 
-            # 公開時に必要なクレジット表記（VOICEVOX利用規約）を完了案内に含める
+            # 公開時に必要なクレジット表記（VOICEVOX利用規約）を完了ダイアログに渡す
             used = []
             for _t, sid, _p in jobs:
                 lb = self._speaker_label_for_id(sid)
                 if lb and lb not in used:
                     used.append(lb)
             credit = core.voicevox_credit(used) or "VOICEVOX:（話者名）"
-            credit_note = (f"\n\n音声を公開する場合はクレジット表記が必要です:\n"
-                           f"{credit}")
             note = f"（字幕{srt_count}件も保存）" if srt_count else ""
             if unit == "combine":
-                self.q.put(("synth_done",
-                            f"結合{fmt.upper()}を保存しました{note}{chap_note}:\n"
-                            f"{target}{credit_note}"))
+                msg = (f"結合{fmt.upper()}を保存しました{note}{chap_note}:\n"
+                       f"{target}")
             else:
-                self.q.put(("synth_done",
-                            f"{len(groups)}個の{fmt.upper()}を保存しました{note}:\n"
-                            f"{target}{credit_note}"))
+                msg = f"{len(groups)}個の{fmt.upper()}を保存しました{note}:\n{target}"
+            self.q.put(("synth_done", msg, target, credit))
         except Exception:
             self.q.put(("error", traceback.format_exc()))
 
@@ -2032,6 +2230,45 @@ class App(_Base):
                    command=_toggle_detail).pack(side="right", padx=6)
         win.bind("<Escape>", lambda e: (win.destroy(), "break")[1])
 
+    # ---------------- 音声生成の完了ダイアログ ----------------
+    def _show_done_dialog(self, info, target, credit):
+        """音声生成の完了ダイアログ。保存先を開く・クレジット表記のコピーがその場で
+        できる（クレジットはVOICEVOX利用規約で公開時に必要。コピー導線で漏れを防ぐ）。"""
+        win = tk.Toplevel(self)
+        win.title("🎉 できあがり！")
+        win.transient(self)
+        win.resizable(False, False)
+        frm = ttk.Frame(win)
+        frm.pack(fill="both", expand=True, padx=14, pady=12)
+        ttk.Label(frm, text=info, wraplength=520,
+                  justify="left").pack(anchor="w")
+        ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=8)
+        ttk.Label(frm, text="音声を公開するときは、このクレジット表記をどこかに載せてね:",
+                  wraplength=520, justify="left").pack(anchor="w")
+        ttk.Label(frm, text=credit, style="Cluster.TLabel",
+                  wraplength=520, justify="left").pack(anchor="w", pady=(2, 0))
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(12, 0))
+
+        def _copy_credit():
+            self.clipboard_clear()
+            self.clipboard_append(credit)
+            self.status_var.set("クレジット表記をコピーしました。")
+        ttk.Button(btns, text="📂 保存先を開く",
+                   command=lambda: self._open_output_location(target)
+                   ).pack(side="left")
+        ttk.Button(btns, text="📋 クレジットをコピー",
+                   command=_copy_credit).pack(side="left", padx=6)
+        ttk.Button(btns, text="閉じる", command=win.destroy).pack(side="right")
+        win.bind("<Escape>", lambda e: (win.destroy(), "break")[1])
+
+    def _open_output_location(self, path):
+        """保存先をFinder/エクスプローラーで開く（ファイルなら選択状態で表示）。"""
+        try:
+            core.reveal_in_file_manager(path)
+        except Exception as e:
+            self.status_var.set(f"保存先を開けませんでした: {e}")
+
     # ---------------- 整形レポート（何が消え・何が直ったか） ----------------
     def _merge_report(self, report):
         """抽出/クリップボードOCRの整形レポートを蓄積し、ボタンの有効状態を更新する。
@@ -2181,11 +2418,6 @@ class App(_Base):
     # (設定キー, 表示名, パレット)。表示名がテーマ選択プルダウンの並びになる
     THEMES = [("light", "🍂 ライト", LIGHT), ("dark", "🌙 ダーク", DARK),
               ("hc", "☀️ くっきり", HC), ("zunda", "🌿 ずんだ", ZUNDA)]
-
-    def toggle_theme(self):
-        """ライト⇄ダークの簡易切替（旧APIとの互換用。選択はテーマプルダウンで）。"""
-        self.theme_var.set("light" if self.theme_var.get() == "dark" else "dark")
-        self.apply_theme()
 
     def _theme_selected(self, event=None):
         i = self.theme_cb.current()
@@ -2402,14 +2634,26 @@ class App(_Base):
     # ---------------- テキストの自動保存・復元 ----------------
     def _save_text_cache(self):
         text = self.text.get("1.0", "end-1c")
+        if text == self._cache_saved:
+            return   # 前回の保存から変化なし（無駄なディスク書き込みをしない）
         try:
             if text.strip():
                 with open(TEXT_CACHE_PATH, "w", encoding="utf-8") as f:
                     f.write(text)
             elif os.path.exists(TEXT_CACHE_PATH):
                 os.remove(TEXT_CACHE_PATH)
+            self._cache_saved = text
         except Exception:
             pass
+
+    def _autosave_tick(self):
+        """本文を60秒ごとに自動保存する（従来は終了時のみ＝クラッシュや強制終了で
+        編集が丸ごと消えていた。次回起動時の復元は従来と同じ仕組み）。"""
+        try:
+            self._save_text_cache()
+            self.after(60000, self._autosave_tick)
+        except tk.TclError:
+            pass   # 終了中
 
     def _restore_text_cache(self):
         try:
@@ -2645,8 +2889,9 @@ class App(_Base):
                         shaped = f"｜ノイズ除去{n_r}行・誤字補正{n_c}件（レポート参照）"
                     n = len([l for l in cleaned.split("\n") if l.strip()])
                     try:
+                        # ＃メモ行・@タグは読まれないので、めやすからも除いて概算する
                         est = core.fmt_duration(core.estimate_read_seconds(
-                            cleaned, self.speed_var.get()))
+                            core.speakable_text(cleaned), self.speed_var.get()))
                     except tk.TclError:
                         est = "?"
                     self.status_var.set(f"✅ 抽出できたよ：{n}行・読み上げめやす{est}"
@@ -2682,7 +2927,11 @@ class App(_Base):
                         if self._bookmark is not None:
                             self.resume_btn.config(state="normal")
                     else:
-                        self.engine_var.set("エンジン: 未接続（VOICEVOXを起動してください）")
+                        # 起動直後の自動リトライ中は「未接続」と脅かさず待ちを伝える
+                        if time.monotonic() < self._conn_retry_until:
+                            self.engine_var.set("エンジン: 起動を待っています…（自動で再接続）")
+                        else:
+                            self.engine_var.set("エンジン: 未接続（VOICEVOXを起動してください）")
                         self.engine_lbl.config(style="TLabel")
                         self._set_conn_compact(False)
                     self._set_busy(False)
@@ -2769,11 +3018,11 @@ class App(_Base):
                     _, info = msg
                     self.status_var.set(info)
                 elif kind == "synth_done":
-                    _, info = msg
+                    _, info, target, credit = msg
                     self._synth_restore_button()
                     self.status_var.set("🎉 音声ができたよ！")
                     self._set_busy(False)
-                    messagebox.showinfo("🎉 できあがり！", info)
+                    self._show_done_dialog(info, target, credit)
                 elif kind == "synth_saving":
                     # 合成が終わり保存フェーズへ。ここからはキャンセル不可にする
                     if self._synth_cancel is not None:

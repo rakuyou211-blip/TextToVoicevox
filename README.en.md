@@ -31,6 +31,9 @@ You give it a file. It pulls the text out, cleans it up, and reads it aloud in a
 - **Save audio** — export **WAV, M4A, or MP3**. Long texts are generated in parallel to save time.
 - **Subtitles** — produce a `.srt` subtitle file timed to the audio.
 - **Pronunciation dictionary** — teach it how to read names or words it gets wrong, once, and it remembers.
+- **Right-click menu** — preview the clicked line, register a selected word to the dictionary, insert an `@speaker:` tag, or comment out lines with `#`, right where you are.
+- **Open output folder & copy credit** — the completion dialog opens the save location and copies the required `VOICEVOX:speaker` credit line in one click.
+- **Autosave** — the text pane is saved every 60 seconds, so a crash won't eat your edits.
 - **OCR cleanup** — find-and-replace and batch rules to fix common OCR mistakes before reading.
 - **Smart line reflow** — for image OCR it uses each line's on-screen position (bounding box) to reliably rejoin sentences that were split across wrapped lines, while leaving headings, bullet lists and separate blocks intact — no false merges.
 - **Ruby / furigana removal** — strips ruby markup from Aozora Bunko texts, and `漢字(かんじ)`-style ruby from web novels, so they read cleanly.

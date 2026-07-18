@@ -274,3 +274,76 @@ def test_check_engine_guarded_while_previewing(app):
     assert app.engine_var.get() == before      # 「接続確認中...」に変わらない
     assert app.busy is False
     app._previewing = False
+
+
+def test_move_selected_reorders_files(app):
+    """ファイル並べ替え: 選択行が上下に動き、listboxとfilesの順序が同期する。"""
+    app.files = ["/tmp/a.txt", "/tmp/b.txt", "/tmp/c.txt"]
+    app.listbox.delete(0, "end")
+    for p in app.files:
+        app.listbox.insert("end", os.path.basename(p))
+    app.listbox.selection_set(1)
+    app._move_selected(-1)
+    assert app.files == ["/tmp/b.txt", "/tmp/a.txt", "/tmp/c.txt"]
+    assert app.listbox.get(0) == "b.txt"
+    assert app.listbox.curselection() == (0,)
+    app._move_selected(-1)   # 先頭ではそれ以上動かない
+    assert app.files == ["/tmp/b.txt", "/tmp/a.txt", "/tmp/c.txt"]
+    app.listbox.selection_clear(0, "end")
+    app.listbox.selection_set(2)
+    app._move_selected(+1)   # 末尾でも動かない
+    assert app.files == ["/tmp/b.txt", "/tmp/a.txt", "/tmp/c.txt"]
+
+
+def test_toggle_memo_lines(app):
+    """＃メモ行の切替: 付ける→外すの往復で本文が元に戻る。"""
+    app.text.delete("1.0", "end")
+    app.text.insert("1.0", "本文の行")
+    app.text.mark_set("insert", "1.0")
+    app._toggle_memo_lines()
+    assert app.text.get("1.0", "1.end") == "# 本文の行"
+    app._toggle_memo_lines()
+    assert app.text.get("1.0", "1.end") == "本文の行"
+
+
+def test_insert_and_remove_speaker_tag(app):
+    """@話者タグ: 挿入→別話者で置き換え→解除で本文が元に戻る。"""
+    app.text.delete("1.0", "end")
+    app.text.insert("1.0", "こんにちは")
+    app.text.mark_set("insert", "1.0")
+    app._insert_speaker_tag("ずんだもん")
+    assert app.text.get("1.0", "1.end") == "@ずんだもん: こんにちは"
+    app._insert_speaker_tag("四国めたん")
+    assert app.text.get("1.0", "1.end") == "@四国めたん: こんにちは"
+    app._remove_speaker_tag()
+    assert app.text.get("1.0", "1.end") == "こんにちは"
+
+
+def test_text_menu_exists(app):
+    """右クリックメニューが構築されている（実ポップアップはヘッドレスで不可）。"""
+    assert isinstance(app._text_menu, tk.Menu)
+
+
+def test_done_dialog_smoke(app, tmp_path):
+    """完了ダイアログ: 生成・破棄がクラッシュしない（ボタンは押さない）。"""
+    app._show_done_dialog("保存しました:\n/tmp/x.wav", str(tmp_path),
+                          "VOICEVOX:ずんだもん")
+    tops = [w for w in app.winfo_children() if isinstance(w, tk.Toplevel)]
+    assert tops
+    for t in tops:
+        t.destroy()
+
+
+def test_save_text_cache_skips_unchanged(app, tmp_path, monkeypatch):
+    """自動保存: 同じ内容なら再書き込みしない（_cache_saved による抑止）。"""
+    import main as main_mod
+    p = tmp_path / "last_text.txt"
+    monkeypatch.setattr(main_mod, "TEXT_CACHE_PATH", str(p))
+    app.text.delete("1.0", "end")
+    app.text.insert("1.0", "自動保存テスト")
+    app._cache_saved = None
+    app._save_text_cache()
+    assert p.read_text(encoding="utf-8") == "自動保存テスト"
+    mtime = p.stat().st_mtime_ns
+    app._save_text_cache()   # 無変化 → 書き込まない
+    assert p.stat().st_mtime_ns == mtime

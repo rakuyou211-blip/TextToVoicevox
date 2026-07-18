@@ -23,7 +23,7 @@ from xml.etree import ElementTree
 
 # アプリのバージョン（タイトルバー・CLI --version・不具合報告の目印に使う）。
 # リリースごとにここだけ更新する。
-APP_VERSION = "1.14.0"
+APP_VERSION = "1.15.0"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
@@ -1122,6 +1122,39 @@ def normalize_ascii(text: str) -> str:
     return text.translate(_Z2H)
 
 
+# ファイル名に使えない文字（Windowsの禁止文字。macは / のみだが持ち運びを考え共通で除く）
+_FILENAME_BAD = set('<>:"/\\|?*')
+
+
+def filename_snippet(text: str, max_chars: int = 12) -> str:
+    """行テキストから、分割出力のファイル名に添える短い断片を作る
+    （001_こんにちは.wav 形式用。連番の後ろに付けて中身を推測できるようにする）。
+    OS禁止文字・空白・制御文字を除いて max_chars で切り詰める。使える文字が
+    無ければ空文字（呼び出し側は連番だけのファイル名にフォールバックする）。"""
+    s = "".join(c for c in str(text)
+                if c not in _FILENAME_BAD and not c.isspace() and c.isprintable())
+    # 末尾の半角ピリオドはWindowsで不正なファイル名になるため落とす
+    return s[:max_chars].rstrip(".")
+
+
+def reveal_in_file_manager(path):
+    """保存先を Finder / エクスプローラーで開く（ファイルなら選択状態で表示）。"""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"見つかりません: {path}")
+    if IS_WIN:
+        if os.path.isdir(path):
+            os.startfile(path)
+        else:
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+    elif IS_MAC:
+        if os.path.isdir(path):
+            subprocess.Popen(["/usr/bin/open", path])
+        else:
+            subprocess.Popen(["/usr/bin/open", "-R", path])
+    else:
+        raise RuntimeError("この環境ではフォルダ表示を利用できません。")
+
+
 def fmt_duration(sec: float) -> str:
     """秒数を「約N秒」「約N分」の残り時間表示にする。"""
     sec = max(0, int(round(sec)))
@@ -1825,6 +1858,21 @@ def estimate_read_seconds(text: str, speed: float = 1.0) -> float:
     行間の無音は含まない“ざっくり値”（表示には「めやす」と添えること）。"""
     n = len([c for c in text if not c.isspace()])
     return n / (320.0 / 60.0) / max(float(speed), 0.1)
+
+
+def speakable_text(text: str) -> str:
+    """実際に読み上げ対象になる部分だけを返す（＃メモ行を除き、行頭の@話者タグを剥がす）。
+    読み上げ時間の概算（estimate_read_seconds）が台本のメモやタグで水増しされないための前処理。"""
+    out = []
+    for ln in str(text).split("\n"):
+        s = ln.strip()
+        if not s or s.startswith(("#", "＃")):
+            continue
+        name, rest = parse_speaker_tag(s)
+        s = rest.strip() if name is not None else s
+        if s:
+            out.append(s)
+    return "\n".join(out)
 
 
 def voicevox_credit(speaker_labels) -> str:
