@@ -9,6 +9,7 @@ import json
 import time
 import queue
 import random
+import shutil
 import threading
 import traceback
 import tempfile
@@ -206,6 +207,7 @@ class App(_Base):
         self.apply_theme()
         self._restore_text_cache()
         self._update_step_highlight()   # 本文の有無に応じて「次に押すボタン」を絞る
+        self._schedule_stats()          # 復元本文の行数・めやすを表示
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._poll_queue)
         self.after(600, self._auto_connect)  # 起動時にエンジンへ自動接続
@@ -345,6 +347,13 @@ class App(_Base):
         self.dpi_var = tk.IntVar(value=300)
         ttk.Spinbox(prow, from_=150, to=400, increment=50, width=5,
                     textvariable=self.dpi_var).pack(side="left")
+        ttk.Label(prow, text="ページ:").pack(side="left", padx=(GAPX, 2))
+        self.pages_var = tk.StringVar()
+        pe = ttk.Entry(prow, textvariable=self.pages_var, width=9)
+        pe.pack(side="left")
+        _Tooltip(pe, "読み取るPDFのページ範囲。例: 5-320 / 1-3,10-\n"
+                     "空欄=全ページ。表紙・目次・索引を飛ばすのに\n"
+                     "（複数PDFには同じ範囲が適用されます）。")
 
         ttk.Separator(opt, orient="horizontal").pack(fill="x", padx=GAPX, pady=(4, 2))
 
@@ -478,8 +487,12 @@ class App(_Base):
         if not getattr(self, "nlines_sb", None):
             return   # 構築順の都合でまだ無い場合は _build 後の呼び出しで反映される
         unit = self._unit()
-        self.nlines_sb.config(state="normal" if unit == "nlines" else "disabled")
-        gap_used = unit != "each" or self._out_format() == "m4b"
+        fmt = self._out_format()
+        # M4Bは常に全文結合＝「N行」は使われないので灰色に（gap_sbと同じ考慮）
+        self.nlines_sb.config(state="normal" if (unit == "nlines"
+                                                 and fmt != "m4b")
+                              else "disabled")
+        gap_used = unit != "each" or fmt == "m4b"
         self.gap_sb.config(state="normal" if gap_used else "disabled")
 
     def _set_conn_compact(self, compact):
@@ -554,6 +567,12 @@ class App(_Base):
         self.engine_var = tk.StringVar(value="エンジン: 未接続")
         self.engine_lbl = ttk.Label(c, textvariable=self.engine_var)
         self.engine_lbl.pack(side="left", padx=GAPX)
+        self.cache_btn = ttk.Button(c, text="キャッシュ…", width=10,
+                                    command=self.open_cache_dialog)
+        self.cache_btn.pack(side="right")
+        _Tooltip(self.cache_btn,
+                 "合成キャッシュ（2回目以降の生成・再生を速くする仕組み）の\n"
+                 "容量確認・上限変更・削除ができます。")
         _sep()
 
         # === 声・調整（話速/音高/抑揚/音量を grid の列で揃える。1行に収める） ===
@@ -777,6 +796,11 @@ class App(_Base):
         self.restore_btn = ttk.Button(rep, text="本文を全消去", width=13,
                                       command=self.clear_text)
         self.restore_btn.pack(side="right", padx=2)
+        # 行数・文字数・読み上げめやすの常時表示（台本編集中に常に見たい情報。
+        # 従来は抽出完了の一瞬だけ状態欄に出て他のメッセージで流れていた）
+        self.stats_var = tk.StringVar()
+        ttk.Label(rep, textvariable=self.stats_var).pack(side="right",
+                                                         padx=(0, 8))
         _Tooltip(self.restore_btn, lambda: (
             "全消去した本文を元に戻します。" if self._cleared_text is not None
             else "本文をすべて消します（直後に「復元」で戻せます）。"))
@@ -1523,8 +1547,16 @@ class App(_Base):
                 # （テキスト層・txt/docx/EPUBは対象外。小説の英文行の誤削除防止）
                 fix_confusables=self.fixconf_var.get(),
                 denoise=self.denoise_var.get(),
+                # PDFの読み取り範囲（空欄=全ページ）。settingsには保存しない
+                # （本ごとに違う値で、前回の指定が残ると本文欠落事故になるため）
+                pdf_pages=core.parse_page_ranges(self.pages_var.get()),
             )
             clean_opts = self._gather_clean_opts()
+        except ValueError:
+            messagebox.showwarning("入力エラー",
+                                   "ページ範囲の書き方が不正です"
+                                   "（例: 5-320 / 1-3,10- / -20）。")
+            return
         except tk.TclError:
             messagebox.showwarning("入力エラー",
                                    "数値の欄（OCR解像度など）が空か不正です。\n"
@@ -1656,6 +1688,20 @@ class App(_Base):
         if default_sp is None:
             messagebox.showinfo("情報", "話者を選択してください（先にエンジン接続確認）。")
             return
+        # @話者タグのタイプミスは合成前に指摘する（従来は行全体をタグごと既定話者が
+        # 読む仕様のため、長編では全編を聴き直すまで気づけなかった）
+        bad = core.unresolved_speaker_tags(text, self.speakers)
+        if bad:
+            ln0, name0 = bad[0]
+            if not messagebox.askyesno(
+                    "@話者タグの確認",
+                    f"解決できない@話者タグが{len(bad)}行あります"
+                    f"（例: {ln0}行目「@{name0}:」）。\n"
+                    "該当行はタグ文字列ごと既定話者が読み上げます。続けますか？\n"
+                    "（「いいえ」で最初の該当行へジャンプ）"):
+                self.text.mark_set("insert", f"{ln0}.0")
+                self.text.see(f"{ln0}.0")
+                return
         # 行別話者を解決して (テキスト, style_id, 段落番号) のジョブ一覧を作る
         default_id = default_sp[1]
         jobs = []
@@ -1665,7 +1711,7 @@ class App(_Base):
             if not ln.strip():
                 para += 1
                 continue
-            if ln.strip().startswith(("#", "＃")):
+            if core.is_memo_line(ln):
                 memo_skipped += 1   # 行頭#はメモ行（読み上げ対象外）
                 continue
             spoken, sp = self._resolve_line(ln)
@@ -1693,22 +1739,9 @@ class App(_Base):
             return
         if fmt == "m4b":
             unit = "combine"   # オーディオブックは常に全文結合（章はチャプターで分ける）
-        # 出力単位ごとにジョブをグループ化（グループ = 1出力ファイル）
-        if unit == "combine":
-            groups = [list(range(len(jobs)))]
-        elif unit == "nlines":
-            n = nlines
-            groups = [list(range(i, min(i + n, len(jobs))))
-                      for i in range(0, len(jobs), n)]
-        elif unit == "para":
-            groups = []
-            for i, j in enumerate(jobs):
-                if groups and jobs[groups[-1][-1]][2] == j[2]:
-                    groups[-1].append(i)
-                else:
-                    groups.append([i])
-        else:  # each
-            groups = [[i] for i in range(len(jobs))]
+        # 出力単位ごとのグループ化はGUI/CLI共有の core.group_output_indices で
+        groups = core.group_output_indices(unit, [j[2] for j in jobs],
+                                           nlines or 50)
         if unit == "combine":
             out = filedialog.asksaveasfilename(
                 title=f"結合{fmt.upper()}の保存先", defaultextension=f".{fmt}",
@@ -1732,8 +1765,9 @@ class App(_Base):
             # 前回の出力（001_○○.wav 等）が残っていれば上書き・新旧混在を予告する
             try:
                 old = [f for f in sorted(os.listdir(d))
-                       if re.match(r"\d{3}(_.*)?\.(wav|m4a|mp3|m4b|srt)$",
-                                   f, re.IGNORECASE)]
+                       if re.match(r"\d{3,}(_.*)?\.(wav|m4a|mp3|m4b|srt)$",
+                                   f, re.IGNORECASE)
+                       or f == "セリフ一覧.csv"]
             except OSError:
                 old = []
             if old and not messagebox.askyesno(
@@ -1768,6 +1802,12 @@ class App(_Base):
 
     def _synth_worker(self, jobs, groups, voice, target, unit, gap, fmt, srt):
         cancel = self._synth_cancel
+        # 行WAVはスプール（一時フォルダ）へ書き、メモリには (パス, 再生秒) だけ
+        # 保持する。従来は全行のWAVバイト列をリストに持ち、10時間級の本で
+        # メモリが数GBに達していた（結合時はさらに倍）。
+        spool = tempfile.mkdtemp(prefix="t2v_spool_")
+        # 生成中に自分の前半行のキャッシュを自分で追い出さないよう保護
+        core.synth_cache_protect(time.time())
         try:
             from concurrent.futures import ThreadPoolExecutor
             done_count = [0]
@@ -1777,13 +1817,30 @@ class App(_Base):
             # 誤読を辞書で直した行だけが再合成され、他の行は即座に再利用される
             dict_hash = self._dict_hash_tracker()
 
-            def synth(job):
+            def synth(idx_job):
+                i, job = idx_job
                 if cancel is not None and cancel.is_set():
                     return None   # キャンセル後の残りジョブはエンジンに投げない
                 text, spk, _para = job
-                wb = core.vv_synthesize_cached(
-                    self.base_url, text, spk, engine_ver=self._engine_ver,
-                    dict_hash=dict_hash(), **voice)
+                # エンジンの一時不調（500・timeout・接続断）で数時間の合成が
+                # 全損しないよう、2回までバックオフ付きリトライ
+                for attempt in range(3):
+                    try:
+                        wb = core.vv_synthesize_cached(
+                            self.base_url, text, spk,
+                            engine_ver=self._engine_ver,
+                            dict_hash=dict_hash(), **voice)
+                        break
+                    except Exception:
+                        if attempt == 2:
+                            raise
+                        if cancel is not None and cancel.is_set():
+                            return None
+                        time.sleep(2 * (attempt + 1))
+                p = os.path.join(spool, f"{i:06d}.wav")
+                with open(p, "wb") as f:
+                    f.write(wb)
+                dur = core.wav_duration(wb)
                 with lock:
                     done_count[0] += 1
                     n = done_count[0]
@@ -1794,21 +1851,44 @@ class App(_Base):
                             f"音声生成中 {n}/{len(jobs)}"
                             + (f"（残り{core.fmt_duration(eta)}{extra}）"
                                if n < len(jobs) else "")))
-                return wb
+                return (p, dur)
 
             # エンジンへ3並列で投げる（順序はexecutor.mapが保持する）
             with ThreadPoolExecutor(max_workers=3) as ex:
-                wavs = list(ex.map(synth, jobs))
+                wavs = list(ex.map(synth, enumerate(jobs)))
 
             if cancel is not None and cancel.is_set():
+                # 合成済みの連続した先頭部分は活かせる。全文結合なら
+                # 「ここまでを保存する？」を提案する（従来は成果ゼロだった）
+                done_prefix = 0
+                for r in wavs:
+                    if r is None:
+                        break
+                    done_prefix += 1
+                if unit == "combine" and done_prefix > 0:
+                    part = target + ".part.wav"
+                    core.concat_wavs_to_file(
+                        [wavs[i][0] for i in range(done_prefix)], part,
+                        gap_sec=gap)
+                    self.q.put(("synth_partial", {
+                        "part": part, "done": done_prefix, "total": len(jobs),
+                        "durs": [wavs[i][1] for i in range(done_prefix)],
+                        "lines": [jobs[i][0] for i in range(done_prefix)],
+                        "sids": [jobs[i][1] for i in range(done_prefix)],
+                        "target": target, "fmt": fmt, "srt": srt, "gap": gap,
+                    }))
+                    return
                 self.q.put(("synth_cancelled", done_count[0], len(jobs), 0))
                 return
             # ここから保存フェーズ。キャンセルボタンを畳む（保存は途中で止めると
             # 壊れたファイルが残るため受け付けない）。直前の押下は下のループ先頭で拾う
             self.q.put(("synth_saving",))
 
+            width = max(3, len(str(len(groups))))   # 999超でも名前順が崩れない
+            multi = len({j[1] for j in jobs}) > 1
             srt_count = 0
             chap_note = ""
+            csv_rows = []
             for gi, idxs in enumerate(groups):
                 if cancel is not None and cancel.is_set():
                     # 保存開始直前に押されたキャンセルの取りこぼし防止。
@@ -1818,25 +1898,64 @@ class App(_Base):
                 if unit == "combine":
                     out_path = target
                 else:
-                    # 連番だけだと中身が分からないので、本文の先頭を添える
-                    # （001_こんにちは.wav。掛け合い動画の素材整理などで探しやすく）
+                    # 連番だけだと中身が分からないので、本文の先頭を添える。
+                    # 掛け合い（複数話者）ならファイル名だけで誰の声か分かるよう
+                    # 話者名も挟む（001_ずんだもん_こんにちは.wav）
+                    stem = f"{gi+1:0{width}d}"
+                    if multi:
+                        char = self._char_name(
+                            self._speaker_label_for_id(jobs[idxs[0]][1]))
+                        cs = core.filename_snippet(char, 8)
+                        if cs:
+                            stem += f"_{cs}"
                     snippet = core.filename_snippet(jobs[idxs[0]][0])
-                    stem = f"{gi+1:03d}" + (f"_{snippet}" if snippet else "")
+                    if snippet:
+                        stem += f"_{snippet}"
                     out_path = os.path.join(target, f"{stem}.{fmt}")
-                group_wavs = [wavs[i] for i in idxs]
-                merged = (group_wavs[0] if len(group_wavs) == 1
-                          else core.concat_wavs(group_wavs, gap_sec=gap))
-                core.encode_audio(merged, out_path, fmt, self.encoders)
+                paths = [wavs[i][0] for i in idxs]
+                durs = [wavs[i][1] for i in idxs]
+                if len(paths) == 1:
+                    core.encode_audio_file(paths[0], out_path, fmt,
+                                           self.encoders, keep_input=True)
+                else:
+                    # 逐次結合（メモリに全体を持たない）→ 変換。中間WAVは出力先と
+                    # 同じフォルダに .part 名で作り、終わったら消す
+                    part = out_path + ".part.wav"
+                    try:
+                        core.concat_wavs_to_file(paths, part, gap_sec=gap)
+                        core.encode_audio_file(part, out_path, fmt,
+                                               self.encoders)
+                    finally:
+                        if os.path.exists(part):
+                            try:
+                                os.remove(part)
+                            except OSError:
+                                pass
                 if fmt == "m4b":
-                    chap_note = self._embed_chapters(out_path, jobs, wavs,
-                                                    idxs, gap)
+                    chap_note = self._embed_chapters(out_path, jobs, idxs,
+                                                    durs, gap)
                 if srt:
                     lines = [jobs[i][0] for i in idxs]
-                    durations = [core.wav_duration(wavs[i]) for i in idxs]
                     srt_path = os.path.splitext(out_path)[0] + ".srt"
                     with open(srt_path, "w", encoding="utf-8") as f:
-                        f.write(core.make_srt(lines, durations, gap_sec=gap))
+                        f.write(core.make_srt(lines, durs, gap_sec=gap))
                     srt_count += 1
+                if unit != "combine":
+                    # セリフ一覧CSV（動画編集ソフトでの素材整理用の対応表）
+                    for i in idxs:
+                        csv_rows.append((
+                            os.path.basename(out_path),
+                            self._char_name(
+                                self._speaker_label_for_id(jobs[i][1])),
+                            jobs[i][0], round(wavs[i][1], 2)))
+            if csv_rows:
+                import csv as _csv
+                csv_path = os.path.join(target, "セリフ一覧.csv")
+                # utf-8-sig: BOM無しだとWindowsのExcelが文字化けする
+                with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                    w = _csv.writer(f)
+                    w.writerow(["ファイル名", "話者", "テキスト", "長さ秒"])
+                    w.writerows(csv_rows)
 
             # 公開時に必要なクレジット表記（VOICEVOX利用規約）を完了ダイアログに渡す
             used = []
@@ -1854,34 +1973,64 @@ class App(_Base):
             self.q.put(("synth_done", msg, target, credit))
         except Exception:
             self.q.put(("error", traceback.format_exc()))
+        finally:
+            core.synth_cache_protect(0.0)   # 保護解除（ここで上限へ戻すevictも走る）
+            shutil.rmtree(spool, ignore_errors=True)
 
-    def _embed_chapters(self, out_path, jobs, wavs, idxs, gap):
-        """M4Bにチャプターを埋め込む。章見出し（第N章・プロローグ等）があればそこで、
-        無い本でも約10分ごとの自動チャプターで頭出しできるようにする。
+    def _partial_save_worker(self, info):
+        """キャンセル時の部分保存: 連結済みの .part.wav を目的の形式で書き出す。
+        ファイル名は「◯◯_途中まで.拡張子」（本来の出力と混ざらないように）。"""
+        try:
+            root, ext = os.path.splitext(info["target"])
+            out = f"{root}_途中まで{ext}"
+            core.encode_audio_file(info["part"], out, info["fmt"], self.encoders)
+            chap_note = ""
+            if info["fmt"] == "m4b" and mp4chapters is not None:
+                try:
+                    chapters, _kind = core.build_chapters(
+                        info["lines"], info["durs"], gap=info["gap"])
+                    if chapters:
+                        mp4chapters.add_chapters(out, chapters)
+                        chap_note = f"・チャプター{len(chapters)}個"
+                except Exception:
+                    chap_note = "・チャプター埋め込みに失敗"
+            if info["srt"]:
+                with open(os.path.splitext(out)[0] + ".srt", "w",
+                          encoding="utf-8") as f:
+                    f.write(core.make_srt(info["lines"], info["durs"],
+                                          gap_sec=info["gap"]))
+            used = []
+            for sid in info["sids"]:
+                lb = self._speaker_label_for_id(sid)
+                if lb and lb not in used:
+                    used.append(lb)
+            credit = core.voicevox_credit(used) or "VOICEVOX:（話者名）"
+            self.q.put(("synth_done",
+                        f"キャンセル位置まで（{info['done']}/{info['total']}行）を"
+                        f"保存しました{chap_note}:\n{out}", out, credit))
+        except Exception:
+            self.q.put(("error", traceback.format_exc()))
+        finally:
+            try:
+                os.remove(info["part"])
+            except OSError:
+                pass
+
+    def _embed_chapters(self, out_path, jobs, idxs, durs, gap):
+        """M4Bにチャプターを埋め込む（構築ロジックはGUI/CLI共有の core.build_chapters。
+        章見出しがあればそこで、無い本でも約10分ごとの自動チャプター）。
         モジュールが無い・失敗した場合も音声自体はそのまま使える。
         戻り値は完了メッセージに添える短い注記。"""
         if mp4chapters is None:
             return "・チャプター埋め込み機能が見つからずスキップ"
         lines = [jobs[i][0] for i in idxs]
-        starts = []
-        t = 0.0
-        for i in idxs:
-            starts.append(t)
-            t += core.wav_duration(wavs[i]) + gap
-        heads = core.detect_chapters(lines)
-        if heads:
-            chapters = [(title, starts[k]) for title, k in heads]
-            if chapters[0][1] > 0:
-                chapters.insert(0, ("冒頭", 0.0))   # 最初の見出しより前の本文ぶん
-            note = f"・チャプター{len(chapters)}個"
-        else:
-            chapters = core.fallback_chapters(starts, lines)
-            if len(chapters) <= 1:
-                return "・短い本のためチャプターなし"
-            note = f"・約10分ごとのチャプター{len(chapters)}個（章見出しなし）"
+        chapters, kind = core.build_chapters(lines, durs, gap=gap)
+        if kind == "none":
+            return "・短い本のためチャプターなし"
         try:
             mp4chapters.add_chapters(out_path, chapters)
-            return note
+            return (f"・チャプター{len(chapters)}個" if kind == "heads"
+                    else f"・約10分ごとのチャプター{len(chapters)}個（章見出しなし）")
         except Exception:
             return "・チャプター埋め込みに失敗（音声は保存済み）"
 
@@ -1918,6 +2067,18 @@ class App(_Base):
         if default is None:
             messagebox.showinfo("情報", "話者を選択してください（先にエンジン接続確認）。")
             return
+        # 合成前と同じく@タグのタイプミスを事前に指摘（プロジェクトに混入させない）
+        bad = core.unresolved_speaker_tags(text, self.speakers)
+        if bad:
+            ln0, name0 = bad[0]
+            if not messagebox.askyesno(
+                    "@話者タグの確認",
+                    f"解決できない@話者タグが{len(bad)}行あります"
+                    f"（例: {ln0}行目「@{name0}:」）。\n"
+                    "該当行はタグ文字列ごと既定話者のブロックになります。続けますか？"):
+                self.text.mark_set("insert", f"{ln0}.0")
+                self.text.see(f"{ln0}.0")
+                return
         out = filedialog.asksaveasfilename(
             title="VOICEVOXプロジェクトを保存", defaultextension=".vvproj",
             filetypes=[("VOICEVOXプロジェクト", "*.vvproj")],
@@ -1926,7 +2087,7 @@ class App(_Base):
             return
         entries = []
         for ln in text.split("\n"):
-            if not ln.strip() or ln.strip().startswith(("#", "＃")):
+            if not ln.strip() or core.is_memo_line(ln):
                 continue   # メモ行（行頭#）は音声生成と同様に含めない
             spoken, sp = self._resolve_line(ln.strip())
             if spoken.strip():
@@ -2134,6 +2295,7 @@ class App(_Base):
         self.preview_btn.config(state="disabled")
         self.playall_btn.config(state="disabled")
         self.sample_btn.config(state="disabled")
+        self.resume_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         threading.Thread(target=self._dict_preview_worker,
                          args=(surface, sp[1], voice), daemon=True).start()
@@ -2269,6 +2431,7 @@ class App(_Base):
         self.preview_btn.config(state="disabled")
         self.playall_btn.config(state="disabled")
         self.sample_btn.config(state="disabled")
+        self.resume_btn.config(state="disabled")   # 押すと画面だけ飛ぶため
         self.stop_btn.config(state="normal")   # 試聴も■停止/Escで止められる
         self.status_var.set("試聴を生成中...")
         threading.Thread(target=self._preview_worker,
@@ -2319,6 +2482,7 @@ class App(_Base):
         self.preview_btn.config(state="disabled")
         self.playall_btn.config(state="disabled")
         self.sample_btn.config(state="disabled")
+        self.resume_btn.config(state="disabled")
         self.stop_btn.config(state="normal")   # サンプルも■停止/Escで止められる
         self.status_var.set(f"サンプル取得中: {label}")
         threading.Thread(target=self._sample_worker,
@@ -2434,18 +2598,28 @@ class App(_Base):
         stop = self._playall_stop
         pause = self._playall_pause
         played = 0
+        skipped = 0
+        core.synth_cache_protect(time.time())   # 長い本の途中でキャッシュを守る
         try:
             from concurrent.futures import ThreadPoolExecutor
             # 合成キャッシュ（聴き終えた行は音声生成でも再合成不要になる）
             dict_hash = self._dict_hash_tracker()
+            last_tb = [None]
 
             def synth(t):
-                return core.vv_synthesize_cached(
-                    self.base_url, t[1], t[2], engine_ver=self._engine_ver,
-                    dict_hash=dict_hash(), **voice)
+                # 1行の失敗（極端に長い行のtimeout・特殊文字のエンジンエラー等）で
+                # 読書全体を止めない。失敗は None で返しスキップ判定に回す
+                try:
+                    return core.vv_synthesize_cached(
+                        self.base_url, t[1], t[2], engine_ver=self._engine_ver,
+                        dict_hash=dict_hash(), **voice)
+                except Exception:
+                    last_tb[0] = traceback.format_exc()
+                    return None
 
             # 停止・一時停止のどちらでも現在行の再生を打ち切る（afplay/winsoundの引数用）
             either = _EitherEvent(stop, pause)
+            consec = 0
             # 再生中に次の行を裏で合成しておく（行間の待ちをほぼゼロに）
             with ThreadPoolExecutor(max_workers=1) as ex:
                 nxt = ex.submit(synth, targets[0])
@@ -2457,6 +2631,16 @@ class App(_Base):
                     wb = nxt.result()
                     if k + 1 < len(targets):
                         nxt = ex.submit(synth, targets[k + 1])
+                    if wb is None:
+                        skipped += 1
+                        consec += 1
+                        if consec >= 3:
+                            # 連続3失敗＝エンジンが落ちている。全行を無言スキップ
+                            # して「読み終わったよ」と誤報しないため従来のエラーへ
+                            raise RuntimeError(last_tb[0] or "連続して合成に失敗")
+                        self.q.put(("playall_skip", lineno))
+                        continue
+                    consec = 0
                     while True:
                         if stop.is_set():
                             break
@@ -2471,9 +2655,12 @@ class App(_Base):
                     if stop.is_set():
                         break
                     played += 1
-            self.q.put(("playall_done", True, stop.is_set(), played))
+            self.q.put(("playall_done", True, stop.is_set(), played, skipped))
         except Exception:
-            self.q.put(("playall_done", False, traceback.format_exc(), played))
+            self.q.put(("playall_done", False, traceback.format_exc(),
+                        played, skipped))
+        finally:
+            core.synth_cache_protect(0.0)
 
     # ---------------- 一括置換 ----------------
     def replace_all_text(self):
@@ -2493,6 +2680,36 @@ class App(_Base):
         self.text.insert("1.0", content.replace(find, repl))
         self._restore_view(ins, y)   # 読み進めていた位置を見失わない
         self.status_var.set(f"{count}件置換しました：「{find}」→「{repl}」")
+
+    # ---------------- 行数・文字数・めやすの常時表示 ----------------
+    def _schedule_stats(self):
+        """統計表示の更新を400msデバウンスで予約する（キー連打のたびに
+        speakable_text の全文走査をしない）。"""
+        if getattr(self, "_stats_after", None):
+            try:
+                self.after_cancel(self._stats_after)
+            except tk.TclError:
+                pass
+        try:
+            self._stats_after = self.after(400, self._update_text_stats)
+        except tk.TclError:
+            self._stats_after = None
+
+    def _update_text_stats(self):
+        self._stats_after = None
+        try:
+            text = self.text.get("1.0", "end-1c")
+        except tk.TclError:
+            return   # 終了中
+        if not text.strip():
+            self.stats_var.set("")
+            return
+        lines = len([l for l in text.split("\n") if l.strip()])
+        speak = core.speakable_text(text)
+        chars = len(speak.replace("\n", ""))
+        est = core.fmt_duration(core.estimate_read_seconds(
+            speak, self._get_num(self.speed_var, 1.0)))
+        self.stats_var.set(f"{lines}行・{chars:,}字・めやす{est}")
 
     def _restore_view(self, ins, yfrac):
         """全文差し替え後にカーソル位置とスクロール位置を戻す（一括置換用）。
@@ -2522,6 +2739,7 @@ class App(_Base):
             self._cleared_text = None
             self.restore_btn.config(text="本文を全消去", command=self.clear_text)
         self._update_step_highlight()
+        self._schedule_stats()   # 行数・文字数・めやす表示を更新（デバウンス付き）
 
     def _edit_body(self, fn):
         """本文の全消去/復元まわりの自編集を、<<Modified>>フックに拾わせずに実行する。"""
@@ -2548,6 +2766,7 @@ class App(_Base):
         self._cleared_text = content
         self.restore_btn.config(text="復元", command=self.restore_text)
         self._update_step_highlight()
+        self._schedule_stats()
         self.status_var.set("本文を全消去しました（「復元」ボタン／Ctrl・Cmd+Zで戻せます）。")
 
     def restore_text(self):
@@ -2567,6 +2786,7 @@ class App(_Base):
         self._cleared_text = None
         self.restore_btn.config(text="本文を全消去", command=self.clear_text)
         self._update_step_highlight()
+        self._schedule_stats()
         self.status_var.set("本文を復元しました。")
 
     # ---------------- エラーの人間語化 ----------------
@@ -2636,6 +2856,72 @@ class App(_Base):
         ttk.Button(btns, text="詳細を表示",
                    command=_toggle_detail).pack(side="right", padx=6)
         win.bind("<Escape>", lambda e: (win.destroy(), "break")[1])
+
+    # ---------------- 音声キャッシュの管理ダイアログ ----------------
+    def open_cache_dialog(self):
+        """合成キャッシュの容量確認・上限変更・クリアの小窓（多重表示防止付き）。"""
+        if (getattr(self, "_cache_win", None) is not None
+                and self._cache_win.winfo_exists()):
+            self._cache_win.lift()
+            return
+        win = tk.Toplevel(self)
+        self._cache_win = win
+        win.title("音声キャッシュ")
+        win.transient(self)
+        win.resizable(False, False)
+        frm = ttk.Frame(win)
+        frm.pack(fill="both", expand=True, padx=12, pady=12)
+        ttk.Label(frm, justify="left", text=(
+            "同じ行・同じ声の合成結果を再利用して、再生成や連続再生を速くしています。\n"
+            "消しても安全です（必要になればまた作られます）。\n"
+            "長い本（3時間超）をよく作るなら上限を大きめにすると効きが良くなります。"
+        )).pack(anchor="w")
+        stat_var = tk.StringVar()
+        ttk.Label(frm, textvariable=stat_var).pack(anchor="w", pady=(8, 0))
+
+        def _refresh():
+            n, total = core.synth_cache_stats()
+            limit = core._SYNTH_CACHE_MAX_BYTES // (1024 * 1024)
+            stat_var.set(f"現在: {n}ファイル・{total / 1048576:.1f}MB"
+                         f"／上限 {limit}MB")
+
+        row = ttk.Frame(frm)
+        row.pack(anchor="w", pady=(6, 0))
+        ttk.Label(row, text="上限(MB):").pack(side="left")
+        mb_var = tk.IntVar(value=core._SYNTH_CACHE_MAX_BYTES // (1024 * 1024))
+        ttk.Spinbox(row, from_=50, to=100000, increment=250, width=7,
+                    textvariable=mb_var).pack(side="left", padx=4)
+
+        def _apply_limit():
+            core.set_synth_cache_limit(self._get_num(mb_var, 500))
+            _refresh()
+            self.status_var.set("キャッシュ上限を変更しました"
+                                "（次回起動にも引き継がれます）。")
+        ttk.Button(row, text="適用", command=_apply_limit).pack(side="left")
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(10, 0))
+
+        def _clear():
+            if self.busy or self._previewing:
+                self.status_var.set("処理・再生の実行中はクリアできません。")
+                return
+            n = core.synth_cache_clear()
+            self.status_var.set(f"音声キャッシュを{n}件削除しました。")
+            _refresh()
+
+        def _open_dir():
+            try:
+                os.makedirs(core.SYNTH_CACHE_DIR, exist_ok=True)
+            except OSError:
+                pass
+            self._open_output_location(core.SYNTH_CACHE_DIR)
+        ttk.Button(btns, text="キャッシュをクリア", command=_clear).pack(side="left")
+        ttk.Button(btns, text="フォルダを開く",
+                   command=_open_dir).pack(side="left", padx=6)
+        ttk.Button(btns, text="閉じる", command=win.destroy).pack(side="right")
+        win.bind("<Escape>", lambda e: (win.destroy(), "break")[1])
+        _refresh()
 
     # ---------------- 音声生成の完了ダイアログ ----------------
     def _show_done_dialog(self, info, target, credit):
@@ -3107,9 +3393,12 @@ class App(_Base):
         if not name:
             return
         name = name.strip()
+        # 数値欄が空でもTclErrorで無反応にならないよう既定値へフォールバック
         preset = {"name": name, "speaker": self._current_speaker_label(),
-                  "speed": self.speed_var.get(), "pitch": self.pitch_var.get(),
-                  "intonation": self.into_var.get(), "volume": self.vol_var.get()}
+                  "speed": self._get_num(self.speed_var, 1.0),
+                  "pitch": self._get_num(self.pitch_var, 0.0),
+                  "intonation": self._get_num(self.into_var, 1.0),
+                  "volume": self._get_num(self.vol_var, 1.0)}
         for i, p in enumerate(self.presets):
             if p["name"] == name:
                 self.presets[i] = preset  # 同名は上書き
@@ -3175,6 +3464,7 @@ class App(_Base):
             "geometry": self.geometry(),
             "adv_open": bool(self._adv_open),
             "voice_detail_open": bool(self._vdetail_open),
+            "synth_cache_mb": core._SYNTH_CACHE_MAX_BYTES // (1024 * 1024),
         }
 
     def _load_settings(self):
@@ -3251,6 +3541,7 @@ class App(_Base):
             bm = s.get("bookmark")
             self._bookmark = int(bm) if isinstance(bm, (int, float)) else None
             self._saved_speaker = s.get("speaker") or None
+            core.set_synth_cache_limit(s.get("synth_cache_mb", 500))
             if s.get("base_url"):
                 self.base_url = s["base_url"]
                 self.url_var.set(self.base_url)
@@ -3441,6 +3732,8 @@ class App(_Base):
                 self.preview_btn.config(state="normal")
                 self.playall_btn.config(state="normal")
                 self.sample_btn.config(state="normal")
+                if self._bookmark is not None:
+                    self.resume_btn.config(state="normal")
             if ok:
                 # “どう読んだか”を残す（誤読はここで気づいて辞書登録できる）
                 note = f"　読み「{info[:44]}…」" if len(info) > 44 else \
@@ -3459,8 +3752,12 @@ class App(_Base):
             self.text.mark_set("insert", f"{lineno}.0")
             self.text.see(f"{lineno}.0")
             self.status_var.set(f"連続再生中 {done+1}/{total}: {line[:30]}")
+        elif kind == "playall_skip":
+            _, lineno = msg
+            self.status_var.set(f"⚠ {lineno}行目は合成できなかったので"
+                                "スキップしたよ（続きは読むね）")
         elif kind == "playall_done":
-            _, ok, info, played = msg
+            _, ok, info, played, skipped = msg
             self._previewing = False
             self._playall_stop = None
             self._playall_pause = None
@@ -3476,9 +3773,11 @@ class App(_Base):
                 if self._bookmark is not None:
                     self.resume_btn.config(state="normal")
             if ok:
+                skip_note = f"・{skipped}行スキップ" if skipped else ""
                 self.status_var.set(
-                    f"連続再生を停止しました（{played}行読んだよ）" if info
-                    else f"📖 最後まで読み終わったよ（{played}行）おつかれさま！")
+                    f"連続再生を停止しました（{played}行読んだよ{skip_note}）" if info
+                    else f"📖 最後まで読み終わったよ（{played}行{skip_note}）"
+                         "おつかれさま！")
             else:
                 self.status_var.set("連続再生がうまくいきませんでした…")
                 self._show_friendly_error(info)
@@ -3504,6 +3803,27 @@ class App(_Base):
             if self._synth_cancel is not None:
                 self.synth_btn.config(state="disabled")
                 self.status_var.set("ファイルに保存中…（もう少しで完成！）")
+        elif kind == "synth_partial":
+            # キャンセルされたが合成済みの先頭部分がある（全文結合のみ）。
+            # 「ここまでを保存する？」を確認し、Yesなら別ワーカーで書き出す
+            _, info = msg
+            self._synth_restore_button()
+            if messagebox.askyesno(
+                    "ここまでを保存",
+                    f"キャンセルしました（{info['done']}/{info['total']}行まで"
+                    "合成済み）。\nここまでの音声を保存しますか？"):
+                self.status_var.set("ここまでの音声を保存中…")
+                threading.Thread(target=self._partial_save_worker,
+                                 args=(info,), daemon=True).start()
+            else:
+                try:
+                    os.remove(info["part"])
+                except OSError:
+                    pass
+                self._set_busy(False)
+                self.status_var.set(
+                    f"音声生成をキャンセルしたよ（{info['done']}/{info['total']}行"
+                    "まで合成・ファイルは保存していません）。またいつでもどうぞ🍂")
         elif kind == "synth_cancelled":
             _, done, total, saved = msg
             self._synth_restore_button()

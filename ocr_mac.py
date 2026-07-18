@@ -10,14 +10,17 @@ import os
 _LANG_MAP = {"ja": ["ja-JP", "en-US"], "en": ["en-US"]}
 
 
-def recognize_files(image_paths, lang="ja", strip_labels=True, errors=None):
+def recognize_files(image_paths, lang="ja", strip_labels=True, errors=None,
+                    progress_cb=None, cancel_event=None):
     """画像パスのリストをOCRし {path: text} を返す。読めなかったファイルは ""。
     Visionが返す行の外接矩形（座標）を使って“折り返しで割れた1文”を確実に連結する
     （見出し・箇条書き・別段落は連結しない。core.reflow_ocr_lines）。
     strip_labels=True のとき、連結の前に“映像内オーバーレイ・ラベル行”（局ロゴ・番組名・
     日時・カテゴリ）を座標で除去する（core.strip_overlay_labels）。
     errors: list を渡すと一部ファイルの失敗理由（"ファイル名: 理由"）を追記する
-    （呼び出し元が警告として表示できる。全滅時は従来どおり例外）。"""
+    （呼び出し元が警告として表示できる。全滅時は従来どおり例外）。
+    progress_cb(done, total): 1枚ごとの進捗通知。cancel_event: 1枚単位で中断でき、
+    そこまでの部分結果を返す（数百ページのスキャンPDFで抽出キャンセルを即応させる）。"""
     try:
         import Vision  # noqa: F401  先にimport可否だけ確認して分かりやすいエラーにする
     except ImportError:
@@ -29,13 +32,17 @@ def recognize_files(image_paths, lang="ja", strip_labels=True, errors=None):
     if errors is None:
         errors = []
     n_before = len(errors)
-    for path in image_paths:
+    for i, path in enumerate(image_paths):
+        if cancel_event is not None and cancel_event.is_set():
+            break   # 部分結果を返す（呼び出し元が「そこまでの結果」を表示する）
         try:
             result[path] = _recognize_one(path, languages,
                                           strip_labels=strip_labels)
         except Exception as e:
             result[path] = ""
             errors.append(f"{os.path.basename(path)}: {e}")
+        if progress_cb:
+            progress_cb(i + 1, len(image_paths))
     if len(errors) > n_before and not any(result.values()):
         # 全滅した場合のみ致命的エラーとして通知（一部失敗は空文字で続行）
         raise RuntimeError("OCR失敗: " + " / ".join(errors[n_before:][:3]))

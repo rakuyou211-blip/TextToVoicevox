@@ -13,7 +13,11 @@ cli.py - GUIなしの一括変換（自動化・上級者向け）
 """
 import os
 import sys
+import time
+import shutil
+import tempfile
 import argparse
+import threading
 
 import core
 
@@ -52,7 +56,16 @@ def build_parser():
                         "（要エンジン。1行=1ブロック・@話者名タグ対応）")
     p.add_argument("--name-snippet", action="store_true",
                    help="分割出力のファイル名に本文の先頭を付与（001_こんにちは.wav。"
-                        "既定は従来どおり連番のみ）")
+                        "複数話者なら話者名も。既定は従来どおり連番のみ）")
+    p.add_argument("--list-csv", action="store_true",
+                   help="分割出力にセリフ一覧CSV（ファイル名・話者・テキスト・長さ）"
+                        "も保存（動画編集ソフトでの素材整理用）")
+    p.add_argument("--cache", action=argparse.BooleanOptionalAction, default=True,
+                   help="行単位の合成キャッシュを使う（既定ON。同じ行・同じ声は"
+                        "再合成せず再利用。--no-cache で無効）")
+    p.add_argument("--pages", default=None,
+                   help="PDFの読み取りページ範囲（例: 5-320 / 1-3,10- / -20。"
+                        "全PDFに同じ範囲を適用。既定: 全ページ）")
     p.add_argument("--mode", choices=["sentence", "keep"], default="sentence",
                    help="整形: sentence=文ごとに改行（既定）/ keep=元の改行維持")
     p.add_argument("--join-wrapped", action="store_true",
@@ -97,30 +110,20 @@ def pick_speaker(name, speakers):
     return sp
 
 
-def _embed_m4b_chapters(out_audio, speak_lines, wavs, gap):
-    """M4Bにチャプターを埋め込む。章見出しが無い本は約10分ごとの自動チャプター。"""
+def _embed_m4b_chapters(out_audio, speak_lines, durations, gap):
+    """M4Bにチャプターを埋め込む（構築ロジックは core.build_chapters をGUIと共有）。"""
     try:
         import mp4chapters
-        starts, t = [], 0.0
-        for w in wavs:
-            starts.append(t)
-            t += core.wav_duration(w) + gap
-        heads = core.detect_chapters(speak_lines)
-        if heads:
-            chs = [(title, starts[i]) for title, i in heads]
-            if chs[0][1] > 0:
-                chs.insert(0, ("冒頭", 0.0))
-            # 見出し検出時は1個でも埋め込む（GUIと同じ挙動）
-            mp4chapters.add_chapters(out_audio, chs)
-            print(f"チャプター{len(chs)}個を埋め込みました")
+        chapters, kind = core.build_chapters(speak_lines, durations, gap=gap)
+        if kind == "heads":
+            mp4chapters.add_chapters(out_audio, chapters)
+            print(f"チャプター{len(chapters)}個を埋め込みました")
+        elif kind == "auto":
+            mp4chapters.add_chapters(out_audio, chapters)
+            print(f"章見出しが無いため約10分ごとのチャプター{len(chapters)}個を"
+                  "埋め込みました")
         else:
-            chs = core.fallback_chapters(starts, speak_lines)
-            if len(chs) > 1:
-                mp4chapters.add_chapters(out_audio, chs)
-                print(f"章見出しが無いため約10分ごとのチャプター{len(chs)}個を"
-                      "埋め込みました")
-            else:
-                print("短い本のためチャプターなしで保存しました")
+            print("短い本のためチャプターなしで保存しました")
     except Exception as e:
         print(f"警告: チャプター埋め込みに失敗（音声は保存済み）: {e}",
               file=sys.stderr)
@@ -143,10 +146,15 @@ def main(argv=None):
         print("メモ: --unit para は空行を段落区切りに使います"
               "（--keep-blank なしでは全体が1段落になることがあります）。")
 
+    try:
+        pdf_pages = core.parse_page_ranges(args.pages)
+    except ValueError as e:
+        raise SystemExit(f"--pages の書き方が不正です: {e}（例: 5-320 / 1-3,10-）")
+
     print(f"[1/3] テキスト抽出中... ({len(args.inputs)}ファイル)")
     raw, warnings = core.extract_files(
         args.inputs, pdf_mode=("ocr" if args.pdf_ocr else "auto"), dpi=args.dpi,
-        preprocess=args.preprocess,
+        preprocess=args.preprocess, pdf_pages=pdf_pages,
         strip_labels=args.denoise, fix_confusables=args.fix_confusables,
         denoise=args.denoise,   # 映像内オーバーレイの除去はOCR由来テキスト限定
         progress_cb=lambda d, t, m: print(f"  {m}"))
@@ -203,6 +211,12 @@ def main(argv=None):
     if not jobs:
         raise SystemExit("読み上げ対象の行がありません"
                          "（すべて空行・#メモ行・未解決タグでした）。")
+    bad = core.unresolved_speaker_tags(text, speakers)
+    if bad:
+        ln, name = bad[0]
+        print(f"警告: 解決できない@話者タグが{len(bad)}行あります"
+              f"（例: {ln}行目「@{name}:」）。タグごと既定話者で読みます。",
+              file=sys.stderr)
 
     if args.vvproj:
         vv_path = os.path.join(args.out, "voicevox_project.vvproj")
@@ -224,62 +238,109 @@ def main(argv=None):
         raise SystemExit(f"{args.format.upper()}への変換ツールがありません"
                          "（Mac: afconvert / それ以外: ffmpeg が必要）。")
 
-    # GUIと同じ3並列合成（エンジンで実績のある並列数。順序はmapが保持する）
-    import threading
+    # GUIと同じ3並列合成＋行単位キャッシュ＋スプール方式（全行のWAVをメモリに
+    # 持たず、行WAVを一時フォルダに書いて (パス, 再生秒) だけ保持する。
+    # 10時間級の本でもメモリは1行分＝数MBで済む）
     from concurrent.futures import ThreadPoolExecutor
     done = [0]
     lock = threading.Lock()
+    dict_hash = core.vv_dict_hash(args.url) if args.cache else ""
+    spool = tempfile.mkdtemp(prefix="t2v_spool_")
+    core.synth_cache_protect(time.time())   # 生成中の自己追い出し防止
+    try:
+        def synth(idx_job):
+            i, job = idx_job
+            # エンジンの一時不調（500・timeout・接続断）で全巻が全損しないよう
+            # 2回までバックオフ付きリトライ（キャッシュヒット行はここに来ない）
+            for attempt in range(3):
+                try:
+                    wb = core.vv_synthesize_cached(
+                        args.url, job[0], job[1], engine_ver=ver,
+                        dict_hash=dict_hash, **voice)
+                    break
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    time.sleep(2 * (attempt + 1))
+            p = os.path.join(spool, f"{i:06d}.wav")
+            with open(p, "wb") as f:
+                f.write(wb)
+            dur = core.wav_duration(wb)
+            with lock:
+                done[0] += 1
+                print(f"  {done[0]}/{len(jobs)}")
+            return (p, dur)
 
-    def synth(job):
-        wb = core.vv_synthesize_one(args.url, job[0], job[1], **voice)
-        with lock:
-            done[0] += 1
-            print(f"  {done[0]}/{len(jobs)}")
-        return wb
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            results = list(ex.map(synth, enumerate(jobs)))
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        wavs = list(ex.map(synth, jobs))
-
-    speak_lines = [j[0] for j in jobs]
-    # まとめ方ごとにグループ化（グループ = 1出力ファイル。GUIと同じ規則）
-    if unit == "combine":
-        groups = [list(range(len(jobs)))]
-    elif unit == "nlines":
-        n = max(2, args.split_lines)
-        groups = [list(range(i, min(i + n, len(jobs))))
-                  for i in range(0, len(jobs), n)]
-    elif unit == "para":
-        groups = []
-        for i, j in enumerate(jobs):
-            if groups and jobs[groups[-1][-1]][3] == j[3]:
-                groups[-1].append(i)
+        speak_lines = [j[0] for j in jobs]
+        label_of = {s[1]: s[0] for s in speakers}
+        multi = len({j[1] for j in jobs}) > 1
+        # まとめ方ごとのグループ化はGUIと共有の core.group_output_indices で
+        groups = core.group_output_indices(unit, [j[3] for j in jobs],
+                                           args.split_lines)
+        width = max(3, len(str(len(groups))))   # 999超でも名前順ソートが崩れない
+        csv_rows = []
+        for gi, idxs in enumerate(groups):
+            if unit == "combine":
+                out_audio = os.path.join(args.out,
+                                         f"voicevox_output.{args.format}")
             else:
-                groups.append([i])
-    else:  # each
-        groups = [[i] for i in range(len(jobs))]
-
-    for gi, idxs in enumerate(groups):
-        if unit == "combine":
-            out_audio = os.path.join(args.out, f"voicevox_output.{args.format}")
-        else:
-            stem = f"{gi+1:03d}"
-            if args.name_snippet:
-                snippet = core.filename_snippet(speak_lines[idxs[0]])
-                if snippet:
-                    stem += f"_{snippet}"
-            out_audio = os.path.join(args.out, f"{stem}.{args.format}")
-        group_wavs = [wavs[i] for i in idxs]
-        merged = (group_wavs[0] if len(group_wavs) == 1
-                  else core.concat_wavs(group_wavs, gap_sec=args.gap))
-        core.encode_audio(merged, out_audio, args.format, encoders)
-        if args.format == "m4b":
-            _embed_m4b_chapters(out_audio, speak_lines, wavs, args.gap)
-        if args.srt:
-            durations = [core.wav_duration(wavs[i]) for i in idxs]
-            srt_path = os.path.splitext(out_audio)[0] + ".srt"
-            with open(srt_path, "w", encoding="utf-8") as f:
-                f.write(core.make_srt([speak_lines[i] for i in idxs],
-                                      durations, gap_sec=args.gap))
+                stem = f"{gi+1:0{width}d}"
+                if args.name_snippet:
+                    if multi:   # 掛け合いはファイル名だけで話者が分かるように
+                        char = label_of.get(jobs[idxs[0]][1], "").split("（")[0]
+                        cs = core.filename_snippet(char, 8)
+                        if cs:
+                            stem += f"_{cs}"
+                    snippet = core.filename_snippet(speak_lines[idxs[0]])
+                    if snippet:
+                        stem += f"_{snippet}"
+                out_audio = os.path.join(args.out, f"{stem}.{args.format}")
+            paths = [results[i][0] for i in idxs]
+            durs = [results[i][1] for i in idxs]
+            if len(paths) == 1:
+                core.encode_audio_file(paths[0], out_audio, args.format,
+                                       encoders, keep_input=True)
+            else:
+                # 逐次結合（メモリに全体を持たない）→ 変換。中間WAVは出力先と
+                # 同じフォルダに .part 名で作り、終わったら消す
+                part = out_audio + ".part.wav"
+                try:
+                    core.concat_wavs_to_file(paths, part, gap_sec=args.gap)
+                    core.encode_audio_file(part, out_audio, args.format, encoders)
+                finally:
+                    if os.path.exists(part):
+                        try:
+                            os.remove(part)
+                        except OSError:
+                            pass
+            if args.format == "m4b":
+                _embed_m4b_chapters(out_audio, [speak_lines[i] for i in idxs],
+                                    durs, args.gap)
+            if args.srt:
+                srt_path = os.path.splitext(out_audio)[0] + ".srt"
+                with open(srt_path, "w", encoding="utf-8") as f:
+                    f.write(core.make_srt([speak_lines[i] for i in idxs],
+                                          durs, gap_sec=args.gap))
+            if args.list_csv and unit != "combine":
+                for i in idxs:
+                    csv_rows.append((os.path.basename(out_audio),
+                                     label_of.get(jobs[i][1], "").split("（")[0],
+                                     speak_lines[i], round(results[i][1], 2)))
+        if csv_rows:
+            import csv as _csv
+            csv_path = os.path.join(args.out, "セリフ一覧.csv")
+            # utf-8-sig: BOM無しだとWindowsのExcelが文字化けする
+            with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                w = _csv.writer(f)
+                w.writerow(["ファイル名", "話者", "テキスト", "長さ秒"])
+                w.writerows(csv_rows)
+            print(f"保存: {csv_path}")
+    finally:
+        core.synth_cache_protect(0.0)
+        shutil.rmtree(spool, ignore_errors=True)
     if unit == "combine":
         print(f"保存: {os.path.join(args.out, 'voicevox_output.' + args.format)}"
               + ("（字幕も保存）" if args.srt else ""))
@@ -287,7 +348,6 @@ def main(argv=None):
         print(f"保存: {args.out} に {len(groups)}ファイル"
               + ("（字幕も保存）" if args.srt else ""))
     # 公開時に必要なクレジット表記（VOICEVOX利用規約）
-    label_of = {s[1]: s[0] for s in speakers}
     used = []
     for _t, sid, _u, _p in jobs:
         lb = label_of.get(sid, "")

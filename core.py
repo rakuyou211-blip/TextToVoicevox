@@ -23,7 +23,7 @@ from xml.etree import ElementTree
 
 # アプリのバージョン（タイトルバー・CLI --version・不具合報告の目印に使う）。
 # リリースごとにここだけ更新する。
-APP_VERSION = "1.16.0"
+APP_VERSION = "1.17.0"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
@@ -1506,7 +1506,8 @@ def ocr_retry_if_poor(text, img, tmpdir, lang="ja", strip_labels=True):
     return best
 
 
-def run_ocr(image_paths, lang="ja", strip_labels=True, errors=None):
+def run_ocr(image_paths, lang="ja", strip_labels=True, errors=None,
+            progress_cb=None, cancel_event=None):
     """
     画像パスのリストをOS標準のオフラインOCRに渡し、{path: text} を返す。
     Windows: Windows.Media.Ocr（PowerShellヘルパー） / macOS: Apple Vision（pyobjc）
@@ -1515,18 +1516,23 @@ def run_ocr(image_paths, lang="ja", strip_labels=True, errors=None):
     日時・カテゴリ）を座標で除去する。denoise と同じON/OFFで効かせる想定。
     errors: list を渡すと、一部ファイルのOCR失敗理由（"ファイル名: 理由"）を
     追記する（全滅時は従来どおり例外）。
+    progress_cb(done, total): 進捗通知（macは1枚ごと・Winはチャンクごと）。
+    cancel_event: 途中中断（それまでの部分結果を返す）。
     """
     if not image_paths:
         return {}
     if IS_WIN:
         return run_windows_ocr(image_paths, lang=lang, strip_labels=strip_labels,
-                               errors=errors)
+                               errors=errors, progress_cb=progress_cb,
+                               cancel_event=cancel_event)
     if IS_MAC:
         if APP_DIR not in sys.path:
             sys.path.insert(0, APP_DIR)  # 他ディレクトリからのimportでも ocr_mac を見つける
         import ocr_mac
         return ocr_mac.recognize_files(image_paths, lang=lang,
-                                       strip_labels=strip_labels, errors=errors)
+                                       strip_labels=strip_labels, errors=errors,
+                                       progress_cb=progress_cb,
+                                       cancel_event=cancel_event)
     raise RuntimeError("この環境ではオフラインOCRを利用できません（Windows / macOS のみ対応）。")
 
 
@@ -1571,15 +1577,42 @@ def _parse_windows_ocr_result(data, strip_labels=True, errors=None):
     return result
 
 
-def run_windows_ocr(image_paths, lang="ja", strip_labels=True, errors=None):
+def run_windows_ocr(image_paths, lang="ja", strip_labels=True, errors=None,
+                    progress_cb=None, cancel_event=None, chunk_size=20):
     """
     画像パスのリストをWindows標準OCRに渡し、{path: text} を返す。
-    PowerShellヘルパー(ocr_win.ps1)を1回だけ起動して全件処理する。
-    ヘルパーが返す行の外接矩形はmacと同じ折り返し連結・ラベル除去に使う
-    （_parse_windows_ocr_result）。errors: 一部失敗の理由を追記するlist（省略可）。
+    chunk_size 枚ずつPowerShellヘルパー(ocr_win.ps1)を起動して処理する
+    （チャンク間でキャンセル判定・進捗通知ができる。起動オーバーヘッド
+    1〜2秒/回と中断粒度のバランスで20枚）。errors: 一部失敗の理由を追記。
     """
     if not image_paths:
         return {}
+    result = {}
+    fatal = []
+    n = len(image_paths)
+    for start in range(0, n, chunk_size):
+        if cancel_event is not None and cancel_event.is_set():
+            break   # 部分結果を返す
+        chunk = image_paths[start:start + chunk_size]
+        try:
+            result.update(_run_windows_ocr_chunk(chunk, lang=lang,
+                                                 strip_labels=strip_labels,
+                                                 errors=errors))
+        except Exception as e:
+            fatal.append(str(e))
+        if progress_cb:
+            progress_cb(min(start + chunk_size, n), n)
+    if fatal and not any(result.values()):
+        # 全チャンク失敗＝従来の「全滅時は例外」と同じ扱い
+        raise RuntimeError(fatal[0])
+    if errors is not None:
+        errors.extend(fatal)   # 一部チャンクの失敗は警告として通知
+    return result
+
+
+def _run_windows_ocr_chunk(image_paths, lang="ja", strip_labels=True,
+                           errors=None):
+    """PowerShellヘルパーを1回起動して image_paths を処理する（チャンク実体）。"""
     tmpdir = tempfile.mkdtemp(prefix="t2v_ocr_")
     try:
         manifest = os.path.join(tmpdir, "manifest.txt")
@@ -1592,9 +1625,17 @@ def run_windows_ocr(image_paths, lang="ja", strip_labels=True, errors=None):
                "-File", OCR_PS1, "-Manifest", manifest, "-Out", out_json, "-Lang", lang]
         # encoding/errors 指定なしだと日本語Windows(cp932)でOCR側の出力に
         # 非cp932バイトが混ざったとき decode で例外→エラーメッセージが潰れる。
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace",
-                              creationflags=CREATE_NO_WINDOW)
+        # timeout: WinRT OCRは1〜3秒/枚。固まったPowerShellでUIが永久busyに
+        # ならないよう十分な余裕をもって打ち切る（子プロセスはkillされる）
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
+                                  timeout=max(120, 30 * len(image_paths)),
+                                  creationflags=CREATE_NO_WINDOW)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"OCRが応答しませんでした（{len(image_paths)}枚待機）。"
+                "枚数を減らすか、PCを再起動してお試しください。")
         if not os.path.exists(out_json):
             raise RuntimeError("OCR失敗: " + (proc.stderr or proc.stdout or "出力なし"))
 
@@ -1639,11 +1680,81 @@ def _render_pdf_page(path, page_index, dpi):
 # 濃いのでOCRも実行し、明確に良い方を採用する（スキャンPDF+透かし層の本文欠落対策）
 _PDF_LAYER_MIN_CHARS = 20
 
+# ページ範囲指定の正規化テーブル（全角数字・全角区切り・波ダッシュを半角へ。
+# 日本語入力のまま「５−１０、２０」のように書いても通す）
+_PAGES_NORM = str.maketrans("０１２３４５６７８９", "0123456789",
+                            " \t　")
+_PAGES_SEP = str.maketrans({"、": ",", "，": ",", "〜": "-", "～": "-",
+                            "−": "-", "ー": "-"})
+
+
+def parse_page_ranges(spec):
+    """「5-320」「1-3,7,10-」「-20」形式のページ範囲を [(start, end|None), ...] に
+    パースする（1始まり・両端含む）。空・None は None（=全ページ）。
+    不正な字句は ValueError（呼び出し側が入力エラーとして案内する）。"""
+    if spec is None:
+        return None
+    s = str(spec).translate(_PAGES_NORM).translate(_PAGES_SEP)
+    if not s:
+        return None
+    ranges = []
+    for part in s.split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, _sep, b = part.partition("-")
+            try:
+                start = int(a) if a else 1
+                end = int(b) if b else None
+            except ValueError:
+                raise ValueError(part)
+            if start < 1 or (end is not None and end < 1):
+                raise ValueError(part)
+            if end is not None and end < start:
+                start, end = end, start   # 逆順（20-5）は入れ替えて許容
+        else:
+            try:
+                start = end = int(part)
+            except ValueError:
+                raise ValueError(part)
+            if start < 1:
+                raise ValueError(part)
+        ranges.append((start, end))
+    return ranges or None
+
+
+def page_in_ranges(page_no, ranges):
+    """1始まりのページ番号が範囲リストに含まれるか（ranges=None は常にTrue）。"""
+    if ranges is None:
+        return True
+    return any(a <= page_no and (b is None or page_no <= b)
+               for a, b in ranges)
+
+
+def apply_ocr_corrections(text, fix_confusables=False, denoise=False):
+    """OCR由来テキストへの後処理（誤字補正→ノイズ除去）を1箇所に集約して
+    (補正後テキスト, confusablesペア, 除去行) を返す。extract_files と
+    クリップボードOCRの両経路で共有し、適用順のドリフトを防ぐ。"""
+    conf_pairs = []
+    if fix_confusables and text:
+        t2 = fix_ocr_confusables(text)
+        if t2 != text:
+            # 補正は文字の1:1置換のみで行の対応が崩れないため、
+            # 行単位の before/after を整形レポートに記録できる
+            conf_pairs = [(b, a) for b, a
+                          in zip(text.split("\n"), t2.split("\n")) if b != a]
+        text = t2
+    removed = []
+    if denoise and text:
+        removed = denoise_removed_lines(text)
+        text = denoise_capture(text)
+    return text, conf_pairs, removed
+
 
 def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                   lang="ja", progress_cb=None, strip_labels=True,
                   fix_confusables=False, report=None, denoise=False,
-                  cancel_event=None):
+                  cancel_event=None, pdf_pages=None):
     """
     複数ファイル（PDF/画像/テキスト/Word/EPUB）からテキストを抽出して結合文字列を返す。
     pdf_mode: "auto"（テキスト層→無ければOCR） / "ocr"（常にOCR）
@@ -1657,8 +1768,11 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
     report: dict を渡すと整形レポート用の情報を追記する。
             "confusables": [(補正前の行, 補正後の行), ...]（fix_confusables の変更箇所）
             "removed": [行, ...]（denoise が除去した行）
-    cancel_event: threading.Event を渡すと、ファイル/ページ境界とOCRバッチ前に
-                  確認して中断できる。中断時はそれまでの部分結果と警告を返す。
+    cancel_event: threading.Event を渡すと、ファイル/ページ境界・OCRの途中
+                  （macは1枚ごと・Winはチャンクごと）で中断できる。
+                  中断時はそれまでの部分結果と警告を返す。
+    pdf_pages: parse_page_ranges() の結果（None=全ページ）。PDFの読み取り範囲を
+               1始まりで制限する（表紙・目次・索引の読み飛ばし用。全PDFに同適用）。
     戻り値: (text, warnings:list)
     """
     from PIL import Image
@@ -1682,9 +1796,13 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                 if ext in PDF_EXT:
                     doc = pdfium.PdfDocument(path)
                     npages = len(doc)
+                    matched = 0
                     for pi in range(npages):
                         if cancel_event is not None and cancel_event.is_set():
                             break
+                        if not page_in_ranges(pi + 1, pdf_pages):
+                            continue   # 範囲外ページは出力順・OCRとも対象外
+                        matched += 1
                         key = f"{path}#p{pi+1}"
                         order.append(key)
                         page = doc[pi]
@@ -1722,6 +1840,9 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                             progress_cb(idx, total,
                                         f"解析中: {os.path.basename(path)} ({pi+1}/{npages}p)")
                     doc.close()
+                    if pdf_pages is not None and matched == 0:
+                        warnings.append(f"{os.path.basename(path)}: 指定ページ範囲に"
+                                        f"該当なし（全{npages}ページ）")
                 elif ext in IMG_EXT:
                     key = path
                     order.append(key)
@@ -1751,9 +1872,17 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
             png_paths = [p for _, p, _o, _lb in ocr_jobs]
             ocr_errors = []
             ocr_failed = False
+            # ページ単位の進捗と、OCR実行中のキャンセル即応（従来はOCRバッチ全体が
+            # 1呼び出しで、キャンセルを押してもバッチ完了まで効かなかった）
+            ocr_progress = None
+            if progress_cb:
+                def ocr_progress(i, n):
+                    progress_cb(total - 1, total, f"OCR実行中... ({i}/{n}枚)")
             try:
                 ocr_result = run_ocr(png_paths, lang=lang,
-                                     strip_labels=strip_labels, errors=ocr_errors)
+                                     strip_labels=strip_labels, errors=ocr_errors,
+                                     progress_cb=ocr_progress,
+                                     cancel_event=cancel_event)
             except Exception as e:
                 # 全滅時の例外メッセージに理由は集約済み。個別エラーと空ページ警告を
                 # 重ねると同じ障害が三重に表示されるため、ここで抑止する
@@ -1786,22 +1915,10 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                                               lang=lang, strip_labels=strip_labels)
                     except Exception:
                         pass
-                conf_pairs = []
-                if fix_confusables and t:
-                    t2 = fix_ocr_confusables(t)
-                    if t2 != t:
-                        # 補正は文字の1:1置換のみで行の対応が崩れないため、
-                        # 行単位の before/after を整形レポートに記録できる
-                        conf_pairs = [(b, a) for b, a
-                                      in zip(t.split("\n"), t2.split("\n"))
-                                      if b != a]
-                    t = t2
-                removed = []
-                if denoise and t:
-                    # 映像内オーバーレイの除去はOCR由来テキスト限定（v1.16.0〜）。
-                    # 除去行は整形レポートに記録し、誤削除に気づけるようにする
-                    removed = denoise_removed_lines(t)
-                    t = denoise_capture(t)
+                # 誤字補正・ノイズ除去はOCR由来テキスト限定。処理はクリップボード
+                # OCRと共有の apply_ocr_corrections に集約（適用順のドリフト防止）
+                t, conf_pairs, removed = apply_ocr_corrections(
+                    t, fix_confusables=fix_confusables, denoise=denoise)
                 if layer_backed:
                     # 短いテキスト層（透かし・ページ番号疑い）とOCRを比較し、
                     # OCRが明確に良い（1.2倍超）ときだけ差し替える。同等なら層を信じる。
@@ -1817,7 +1934,10 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                 text_parts[key] = t
                 if not t.strip():
                     empty += 1
-            if empty and not ocr_failed:
+            if (empty and not ocr_failed
+                    and not (cancel_event is not None
+                             and cancel_event.is_set())):
+                # キャンセル時は未OCRページが「空」に見えるため重ねて警告しない
                 warnings.append(
                     f"{empty}枚/ページで文字を検出できませんでした"
                     "（白紙、または画質不足の可能性）")
@@ -2044,11 +2164,14 @@ def voicevox_credit(speaker_labels) -> str:
 
 
 def vv_synthesize_with_kana(base_url, text, speaker_id, speed=1.0,
-                            pitch=0.0, intonation=1.0, volume=1.0, timeout=60):
+                            pitch=0.0, intonation=1.0, volume=1.0, timeout=None):
     """1文を合成し (WAVバイト列, 読みカナ) を返す。audio_query は1回だけ実行し、
     その kana を読み確認（vv_reading 相当）に再利用する（試聴の往復削減）。
+    timeout 省略時は文長に比例（整形で生まれた数千字の1行が60秒固定で全滅しない保険）。
     speed=話速(0.5〜2) / pitch=音高(-0.15〜0.15) / intonation=抑揚(0〜2) / volume=音量(0〜2)"""
     import requests
+    if timeout is None:
+        timeout = max(60, 30 + len(text) // 10)
     q = requests.post(base_url + "/audio_query",
                       params={"text": text, "speaker": speaker_id}, timeout=timeout)
     q.raise_for_status()
@@ -2072,7 +2195,7 @@ def vv_synthesize_with_kana(base_url, text, speaker_id, speed=1.0,
 
 
 def vv_synthesize_one(base_url, text, speaker_id, speed=1.0,
-                      pitch=0.0, intonation=1.0, volume=1.0, timeout=60):
+                      pitch=0.0, intonation=1.0, volume=1.0, timeout=None):
     """1文を合成してWAVバイト列を返す（vv_synthesize_with_kana の音声のみ版）。"""
     return vv_synthesize_with_kana(base_url, text, speaker_id, speed=speed,
                                    pitch=pitch, intonation=intonation,
@@ -2086,7 +2209,66 @@ def vv_synthesize_one(base_url, text, speaker_id, speed=1.0,
 # voice_cache/ にWAVで保存し、再生成・試聴・連続再生で再利用する。辞書やエンジンを
 # 変えるとキーが変わるため明示的な無効化は不要（古いファイルはLRUで消える）。
 SYNTH_CACHE_DIR = os.path.join(APP_DIR, "voice_cache")
-_SYNTH_CACHE_MAX_BYTES = 500 * 1024 * 1024   # 上限500MB（超えたら古い順に削除）
+_SYNTH_CACHE_MAX_BYTES = 500 * 1024 * 1024   # 上限（既定500MB。settingsで変更可）
+# この時刻以降に触れた（読んだ/書いた）エントリはLRU削除から保護する。
+# 生成実行中に「自分の前半行を自分で追い出す」自己破壊を防ぐ（音声は約173MB/時
+# なので、3時間超の本は上限より大きくなり得る）。実行終了時に 0 に戻す
+_synth_cache_protect_since = 0.0
+_synth_cache_put_count = 0   # evict間引き用（putごとの全stat走査はO(N^2)になる）
+
+
+def set_synth_cache_limit(mb):
+    """キャッシュ上限をMB単位で設定する（settings.json の synth_cache_mb から）。
+    10時間級の本を常用するなら2000MB程度にすると再生成が本当に即完了になる。"""
+    global _SYNTH_CACHE_MAX_BYTES
+    try:
+        mb = int(mb)
+    except (TypeError, ValueError):
+        return
+    if 50 <= mb <= 100000:
+        _SYNTH_CACHE_MAX_BYTES = mb * 1024 * 1024
+
+
+def synth_cache_protect(since_ts):
+    """since_ts 以降に触れたエントリをLRU削除から保護する（0.0で解除）。
+    合成ジョブの開始時に time.time() を渡し、終了時に 0.0 で解除する。"""
+    global _synth_cache_protect_since
+    _synth_cache_protect_since = float(since_ts)
+    if not since_ts:
+        _synth_cache_evict()   # 解除時に一度だけ上限へ戻す
+
+
+def synth_cache_stats():
+    """(ファイル数, 合計バイト数) を返す（キャッシュ管理UI用）。"""
+    n = total = 0
+    try:
+        for name in os.listdir(SYNTH_CACHE_DIR):
+            if name.endswith(".wav"):
+                try:
+                    total += os.stat(os.path.join(SYNTH_CACHE_DIR, name)).st_size
+                    n += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return n, total
+
+
+def synth_cache_clear():
+    """キャッシュを全削除して削除件数を返す。高速化専用の層なのでいつ消しても安全
+    （必要になれば合成し直されるだけ）。"""
+    n = 0
+    try:
+        for name in os.listdir(SYNTH_CACHE_DIR):
+            if name.endswith((".wav", ".tmp")):
+                try:
+                    os.remove(os.path.join(SYNTH_CACHE_DIR, name))
+                    n += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return n
 
 
 def synth_cache_key(text, style_id, speed, pitch, intonation, volume,
@@ -2104,7 +2286,9 @@ def vv_dict_hash(base_url, timeout=10):
     """ユーザー辞書全体の内容ハッシュ（合成キャッシュのキー用）。
     読みに影響し得る全フィールド（表記・読み・アクセント・品詞・優先度）を含める
     （VOICEVOXエディタ側で「優先度」だけ変えた場合もキャッシュが正しく切り替わる）。
-    取得に失敗したら毎回変わる一意値を返し「キャッシュ全ミス」の安全側に倒す。"""
+    取得に失敗したら ""（＝vv_synthesize_cached がキャッシュを素通し）を返す。
+    以前は毎回変わる一意値を返していたが、それだと「絶対にヒットしないキーで
+    putし続ける」＝キャッシュ汚染＋有効エントリのLRU押し出しになっていた。"""
     import hashlib
     import requests
     try:
@@ -2118,7 +2302,7 @@ def vv_dict_hash(base_url, timeout=10):
                                             "priority")))
         return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()
     except Exception:
-        return uuid.uuid4().hex
+        return ""
 
 
 def synth_cache_get(key):
@@ -2152,7 +2336,12 @@ def synth_cache_put(key, wav_bytes):
             f.write(wav_bytes)
         os.replace(tmp, path)
         tmp = None
-        _synth_cache_evict()
+        # evictはput 50回に1回に間引く（毎回のlistdir+全statは数千行の本で
+        # O(N^2)になる）。ジョブ終了時の synth_cache_protect(0.0) でも走る
+        global _synth_cache_put_count
+        _synth_cache_put_count += 1
+        if _synth_cache_put_count % 50 == 0:
+            _synth_cache_evict()
     except OSError:
         if tmp:
             try:
@@ -2189,7 +2378,12 @@ def _synth_cache_evict(max_bytes=None):
             total += st.st_size
         if total <= max_bytes:
             return
-        for _mtime, size, p in sorted(entries):
+        for mtime, size, p in sorted(entries):
+            # 実行中ジョブが触れたエントリは削除しない（getがutimeで更新するため
+            # 「今回読んだ/書いた行」が自然に保護される。上限は実行中だけ一時的に
+            # 本のサイズまで膨らみ、解除後のevictで古い実行分から削られる）
+            if _synth_cache_protect_since and mtime >= _synth_cache_protect_since:
+                continue
             try:
                 os.remove(p)
                 total -= size
@@ -2202,7 +2396,7 @@ def _synth_cache_evict(max_bytes=None):
 
 
 def vv_synthesize_cached(base_url, text, speaker_id, speed=1.0, pitch=0.0,
-                         intonation=1.0, volume=1.0, timeout=60,
+                         intonation=1.0, volume=1.0, timeout=None,
                          engine_ver="", dict_hash=""):
     """vv_synthesize_one のキャッシュ付き版。engine_ver / dict_hash が空のときは
     キーの精度が担保できないためキャッシュせず素通しする。"""
@@ -2220,6 +2414,53 @@ def vv_synthesize_cached(base_url, text, speaker_id, speed=1.0, pitch=0.0,
                             volume=volume, timeout=timeout)
     synth_cache_put(key, wav)
     return wav
+
+
+# RIFF/WAVの32bitサイズ上限。超えるとwaveモジュールのヘッダ確定がstruct.errorになり
+# 全行合成後の保存フェーズで全損するため、書き込み前に見積もって明示エラーにする
+_WAV_MAX_DATA = 0xFFFFFFFF - 44
+
+
+def concat_wavs_to_file(sources, out_path, gap_sec=0.4, chunk_frames=1 << 18):
+    """WAV（bytes または ファイルパス）の列を無音を挟んで out_path へ逐次連結し、
+    各ソースの再生秒のリストを返す（SRT・チャプター計算にそのまま使える）。
+    全体をメモリに持たないため、10時間級の本でもメモリは1チャンク分で済む。
+    合計が4GB（RIFF上限）を超える場合は書く前に RuntimeError（保存フェーズ全損防止）。"""
+    durations = []
+    out = wave.open(out_path, "wb")
+    params, silence, written = None, b"", 0
+    try:
+        for i, src in enumerate(sources):
+            f = (io.BytesIO(src) if isinstance(src, (bytes, bytearray))
+                 else open(src, "rb"))
+            with f, wave.open(f, "rb") as w:
+                if params is None:
+                    params = w.getparams()
+                    out.setparams(params)
+                    fw = params.sampwidth * params.nchannels
+                    silence = b"\x00" * (int(params.framerate * gap_sec) * fw)
+                n = w.getnframes()
+                durations.append(n / float(params.framerate))
+                need = (n * params.sampwidth * params.nchannels
+                        + (len(silence) if i else 0))
+                if written + need > _WAV_MAX_DATA:
+                    raise RuntimeError(
+                        "結合WAVが4GB（WAV形式の上限）を超えます。"
+                        "M4A/M4B/MP3にするか、まとめ方を分割にしてください。")
+                if i and silence:
+                    # 無音は「各ソースの前（先頭以外）」＝従来の「各ソースの後
+                    # （末尾以外）」とバイト同一
+                    out.writeframesraw(silence)
+                    written += len(silence)
+                while True:
+                    chunk = w.readframes(chunk_frames)
+                    if not chunk:
+                        break
+                    out.writeframesraw(chunk)
+                    written += len(chunk)
+    finally:
+        out.close()   # closeでRIFFヘッダのサイズが確定する（waveがseekしてパッチ）
+    return durations
 
 
 def concat_wavs(wav_bytes_list, gap_sec=0.4):
@@ -2265,6 +2506,22 @@ def is_dialogue_line(line: str) -> bool:
     return s.startswith("「") or s.startswith("『")
 
 
+def unresolved_speaker_tags(text, speakers):
+    """本文中の @話者タグのうち、話者一覧に解決できないものを
+    [(行番号(1始まり), 話者名), ...] で返す（タイプミスの事前検知用）。
+    現状の仕様では未解決タグは行全体（タグ文字列ごと）を既定話者が読むため、
+    長編の掛け合い台本では全編を聴き直すまで気づけない。合成前に指摘する。"""
+    out = []
+    for i, ln in enumerate(str(text).split("\n"), start=1):
+        s = ln.strip()
+        if not s or is_memo_line(s):
+            continue
+        name, _rest = parse_speaker_tag(s)
+        if name is not None and resolve_speaker(name, speakers) is None:
+            out.append((i, name))
+    return out
+
+
 def resolve_speaker(name: str, speakers):
     """話者名からvv_speakers()の要素を探す。
     完全一致 → 前方一致（スタイル省略時は最初のスタイル） → 部分一致 の順。"""
@@ -2299,13 +2556,17 @@ def audio_encoders():
     return enc
 
 
-def encode_audio(wav_bytes, out_path, fmt, encoders=None):
-    """WAVバイト列を M4A/MP3 に変換して out_path に保存する。fmt="wav"はそのまま保存。
-    fmt="m4b"（オーディオブック）は中身がM4Aと同一のAAC/MP4なのでm4aとして変換する
-    （拡張子だけ .m4b。チャプターは呼び出し側が mp4chapters で後付けする）。"""
+def encode_audio_file(wav_path, out_path, fmt, encoders=None, keep_input=False):
+    """WAVファイルを M4A/MP3 に変換して out_path に保存する。fmt="wav" は移動/コピー
+    （同一ボリュームなら一瞬・原子的）。fmt="m4b" は中身がM4Aと同一のAAC/MP4なので
+    m4aとして変換する（拡張子だけ .m4b。チャプターは呼び出し側が後付けする）。
+    ファイル入力なので巨大WAVでもメモリを消費しない（encode_audio のファイル版）。"""
     if fmt == "wav":
-        with open(out_path, "wb") as f:
-            f.write(wav_bytes)
+        if os.path.abspath(wav_path) != os.path.abspath(out_path):
+            if keep_input:
+                shutil.copyfile(wav_path, out_path)
+            else:
+                shutil.move(wav_path, out_path)
         return
     if fmt == "m4b":
         fmt = "m4a"
@@ -2314,25 +2575,45 @@ def encode_audio(wav_bytes, out_path, fmt, encoders=None):
     cmd_or_path = encoders.get(fmt)
     if not cmd_or_path:
         raise RuntimeError(f"{fmt.upper()}への変換ツールが見つかりません。")
+    if cmd_or_path == "afconvert":
+        cmd = ["/usr/bin/afconvert", wav_path, "-f", "m4af", "-d", "aac", out_path]
+    elif fmt == "mp3":
+        cmd = [cmd_or_path, "-y", "-loglevel", "error", "-i", wav_path,
+               "-codec:a", "libmp3lame", "-q:a", "2", out_path]
+    else:  # ffmpegでm4a
+        cmd = [cmd_or_path, "-y", "-loglevel", "error", "-i", wav_path,
+               "-codec:a", "aac", out_path]
+    # timeout: WAV長（24kHz/16bit/mono≈48KB/s）に比例＋余裕。変換ツールが固まった
+    # ままUIが永久busyになるのを防ぐ（timeout時は子プロセスもkillされる）
+    try:
+        secs = os.path.getsize(wav_path) / 48000
+    except OSError:
+        secs = 600
+    # encoding/errors 指定なしだと、失敗時に ffmpeg が日本語パスをUTF-8で
+    # 吐き返したとき cp932 厳格デコードが例外を投げ、下の RuntimeError に届かない。
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              timeout=120 + int(secs),
+                              creationflags=CREATE_NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{fmt.upper()}への変換がタイムアウトしました"
+                           "（変換ツールが応答しません）")
+    if proc.returncode != 0 or not os.path.exists(out_path):
+        raise RuntimeError(f"変換失敗: {proc.stderr or proc.stdout or 'unknown'}")
+
+
+def encode_audio(wav_bytes, out_path, fmt, encoders=None):
+    """WAVバイト列を保存/変換する（encode_audio_file の互換ラッパ）。"""
+    if fmt == "wav":
+        with open(out_path, "wb") as f:
+            f.write(wav_bytes)
+        return
     fd, tmp = tempfile.mkstemp(prefix="t2v_enc_", suffix=".wav")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(wav_bytes)
-        if cmd_or_path == "afconvert":
-            cmd = ["/usr/bin/afconvert", tmp, "-f", "m4af", "-d", "aac", out_path]
-        elif fmt == "mp3":
-            cmd = [cmd_or_path, "-y", "-loglevel", "error", "-i", tmp,
-                   "-codec:a", "libmp3lame", "-q:a", "2", out_path]
-        else:  # ffmpegでm4a
-            cmd = [cmd_or_path, "-y", "-loglevel", "error", "-i", tmp,
-                   "-codec:a", "aac", out_path]
-        # encoding/errors 指定なしだと、失敗時に ffmpeg が日本語パスをUTF-8で
-        # 吐き返したとき cp932 厳格デコードが例外を投げ、下の RuntimeError に届かない。
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace",
-                              creationflags=CREATE_NO_WINDOW)
-        if proc.returncode != 0 or not os.path.exists(out_path):
-            raise RuntimeError(f"変換失敗: {proc.stderr or proc.stdout or 'unknown'}")
+        encode_audio_file(tmp, out_path, fmt, encoders)
     finally:
         try:
             os.remove(tmp)
@@ -2436,6 +2717,49 @@ def fallback_chapters(starts, lines, interval_sec=600):
             chapters.append((s[:12] + ("…" if len(s) > 12 else ""), t))
             next_mark = t + interval_sec
     return chapters
+
+
+def build_chapters(lines, durations, gap=0.0):
+    """M4Bチャプター列を構築して (chapters, kind) を返す（GUI/CLIで共有）。
+    kind: "heads"=章見出し検出（1個でも埋め込む・冒頭補完あり） /
+          "auto"=約10分ごとの自動チャプター（2個以上のときだけ） / "none"=なし。
+    durations: 各行の再生秒。開始時刻は durations[i]+gap の累積で刻む。"""
+    starts = []
+    t = 0.0
+    for d in durations:
+        starts.append(t)
+        t += d + gap
+    heads = detect_chapters(lines)
+    if heads:
+        chapters = [(title, starts[k]) for title, k in heads]
+        if chapters and chapters[0][1] > 0:
+            chapters.insert(0, ("冒頭", 0.0))   # 最初の見出しより前の本文ぶん
+        return chapters, "heads"
+    chapters = fallback_chapters(starts, lines)
+    if len(chapters) > 1:
+        return chapters, "auto"
+    return [], "none"
+
+
+def group_output_indices(unit, para_ids, nlines=50):
+    """まとめ方 unit に応じて行indexをグループ化する（グループ=1出力ファイル）。
+    para_ids: 各行の段落番号（unit="para" のときだけ使う）。GUI/CLIで共有し、
+    まとめ方を増やすとき片方だけ実装される事故を防ぐ。"""
+    n = len(para_ids)
+    if unit == "combine":
+        return [list(range(n))]
+    if unit == "nlines":
+        k = max(2, int(nlines))
+        return [list(range(i, min(i + k, n))) for i in range(0, n, k)]
+    if unit == "para":
+        groups = []
+        for i, pid in enumerate(para_ids):
+            if groups and para_ids[groups[-1][-1]] == pid:
+                groups[-1].append(i)
+            else:
+                groups.append([i])
+        return groups
+    return [[i] for i in range(n)]   # each
 
 
 def _srt_ts(sec: float) -> str:

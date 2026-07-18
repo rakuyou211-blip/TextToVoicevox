@@ -516,3 +516,85 @@ def test_restore_view_clamps(app):
     app.text.delete("1.0", "end")
     app.text.insert("1.0", "短い")
     app._restore_view("99.0", 0.5)   # 存在しない行 → クランプされ例外なし
+
+
+def test_m4b_disables_nlines_spinbox(app):
+    """B8修正: M4B選択時は「N行」も灰色（値を変えても無視されるため）。"""
+    keys = list(app._UNITS.keys())
+    app.unit_cb.current(keys.index("nlines"))
+    app._on_unit_selected()
+    assert str(app.nlines_sb["state"]) == "normal"
+    if "M4B" in app._format_choices():
+        app.fmt_cb.set("M4B")
+        app._on_format_selected()
+        assert str(app.nlines_sb["state"]) == "disabled"
+        app.fmt_cb.set("WAV")
+        app._on_format_selected()
+
+
+def test_save_preset_with_empty_numeric_field(app, monkeypatch):
+    """B7修正: 話速欄が空でもプリセット保存が無反応にならず既定値で保存される。"""
+    from tkinter import simpledialog
+    monkeypatch.setattr(simpledialog, "askstring",
+                        lambda *a, **k: "空欄テスト")
+    app.tk.globalsetvar(str(app.speed_var), "")
+    app.save_preset()
+    assert any(p["name"] == "空欄テスト" and p["speed"] == 1.0
+               for p in app.presets)
+    app.presets = [p for p in app.presets if p["name"] != "空欄テスト"]
+
+
+def test_text_stats_display(app):
+    """行数・文字数・めやすの常時表示: 本文ありで表示され、空で消える。"""
+    app.text.delete("1.0", "end")
+    app.text.insert("1.0", "# メモ行\n本文の一行目です。\n二行目。")
+    app._update_text_stats()
+    s = app.stats_var.get()
+    assert "3行" in s and "字" in s and "めやす" in s
+    app.text.delete("1.0", "end")
+    app._update_text_stats()
+    assert app.stats_var.get() == ""
+
+
+def test_cache_dialog_smoke(app):
+    """キャッシュ管理ダイアログ: 開閉と多重表示防止。"""
+    app.open_cache_dialog()
+    assert app._cache_win.winfo_exists()
+    first = app._cache_win
+    app.open_cache_dialog()   # 2回目は既存を前面に出すだけ
+    assert app._cache_win is first
+    app._cache_win.destroy()
+
+
+def test_playall_done_5tuple_dispatch(app):
+    """playall_doneの5要素化: skipped込みの完走メッセージが出る。"""
+    app._previewing = True
+    app.q.put(("playall_done", True, False, 12, 2))
+    app._poll_queue()
+    assert "12行・2行スキップ" in app.status_var.get()
+    assert app._previewing is False
+
+
+def test_playall_skip_dispatch(app):
+    app.q.put(("playall_skip", 7))
+    app._poll_queue()
+    assert "7行目" in app.status_var.get()
+
+
+def test_synth_partial_decline_cleans_up(app, tmp_path, monkeypatch):
+    """部分保存の辞退: partファイルが消え、busyが解除される。"""
+    part = tmp_path / "out.wav.part.wav"
+    part.write_bytes(b"RIFF0000")
+    monkeypatch.setattr(messagebox := __import__("tkinter.messagebox",
+                                                 fromlist=["askyesno"]),
+                        "askyesno", lambda *a, **k: False)
+    app._set_busy(True)
+    app.q.put(("synth_partial", {
+        "part": str(part), "done": 3, "total": 10, "durs": [0.1] * 3,
+        "lines": ["a", "b", "c"], "sids": [1, 1, 1],
+        "target": str(tmp_path / "out.wav"), "fmt": "wav", "srt": False,
+        "gap": 0.4}))
+    app._poll_queue()
+    assert not part.exists()
+    assert app.busy is False
+    assert "キャンセル" in app.status_var.get()

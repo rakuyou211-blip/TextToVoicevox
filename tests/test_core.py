@@ -1751,7 +1751,7 @@ class TestExtractFilesFixConfusables:
     def _fake_ocr(self, monkeypatch, result_text):
         monkeypatch.setattr(
             core, "run_ocr",
-            lambda paths, lang="ja", strip_labels=True, errors=None:
+            lambda paths, lang="ja", strip_labels=True, errors=None, **kw:
                 {p: result_text for p in paths})
 
     def _png(self, tmp_path):
@@ -2427,3 +2427,266 @@ class TestReviewFixesV116:
         base["u1"]["priority"] = 9
         h2 = core.vv_dict_hash("http://x")
         assert h1 != h2
+
+
+# ============================================================
+#  v1.17.0: ストリーミング結合・ページ範囲・チャプター/グループ統合ほか
+# ============================================================
+class TestConcatWavsToFile:
+    def test_matches_bytes_version_and_durations(self, tmp_path):
+        wavs = [_make_wav(0.10), _make_wav(0.05), _make_wav(0.20)]
+        out = tmp_path / "j.wav"
+        durs = core.concat_wavs_to_file(wavs, str(out), gap_sec=0.3)
+        assert out.read_bytes() == core.concat_wavs(wavs, gap_sec=0.3)
+        for d, w in zip(durs, wavs):
+            assert abs(d - core.wav_duration(w)) < 1e-6
+
+    def test_accepts_file_paths(self, tmp_path):
+        wavs = [_make_wav(0.05), _make_wav(0.05)]
+        srcs = []
+        for i, w in enumerate(wavs):
+            p = tmp_path / f"{i}.wav"
+            p.write_bytes(w)
+            srcs.append(str(p))
+        out = tmp_path / "j.wav"
+        core.concat_wavs_to_file(srcs, str(out), gap_sec=0.1)
+        assert out.read_bytes() == core.concat_wavs(wavs, gap_sec=0.1)
+
+    def test_4gb_guard(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(core, "_WAV_MAX_DATA", 1000)   # 上限を極小にして発火確認
+        with pytest.raises(RuntimeError, match="4GB"):
+            core.concat_wavs_to_file([_make_wav(0.5)], str(tmp_path / "x.wav"))
+
+
+class TestEncodeAudioFile:
+    def test_wav_move_and_copy(self, tmp_path):
+        src = tmp_path / "in.wav"
+        src.write_bytes(_make_wav(0.05))
+        out1 = tmp_path / "copy.wav"
+        core.encode_audio_file(str(src), str(out1), "wav", keep_input=True)
+        assert src.exists() and out1.exists()
+        out2 = tmp_path / "moved.wav"
+        core.encode_audio_file(str(src), str(out2), "wav")
+        assert not src.exists() and out2.exists()
+
+
+class TestParsePageRanges:
+    def test_basic_forms(self):
+        assert core.parse_page_ranges("5-320") == [(5, 320)]
+        assert core.parse_page_ranges("1-3,7,10-") == [(1, 3), (7, 7), (10, None)]
+        assert core.parse_page_ranges("-20") == [(1, 20)]
+        assert core.parse_page_ranges("") is None
+        assert core.parse_page_ranges(None) is None
+
+    def test_fullwidth_and_reversed(self):
+        assert core.parse_page_ranges("５〜１０、２０") == [(5, 10), (20, 20)]
+        assert core.parse_page_ranges("20-5") == [(5, 20)]   # 逆順は入れ替え
+
+    def test_invalid_raises(self):
+        for bad in ("abc", "1-2-3", "0-5", "3,x"):
+            with pytest.raises(ValueError):
+                core.parse_page_ranges(bad)
+
+    def test_page_in_ranges(self):
+        r = core.parse_page_ranges("2-4,10-")
+        assert not core.page_in_ranges(1, r)
+        assert core.page_in_ranges(3, r)
+        assert not core.page_in_ranges(5, r)
+        assert core.page_in_ranges(99, r)
+        assert core.page_in_ranges(1, None)
+
+
+class TestUnresolvedSpeakerTags:
+    _SP = [("ずんだもん（ノーマル）", 3, "u")]
+
+    def test_detects_typo_and_skips_memo(self):
+        # 「ずんだも」は前方一致で解決される（既存仕様）ので、真に解決不能な
+        # タイプミス（すんだもん）だけが検出される
+        text = ("@ずんだもん: こんにちは\n@ずんだも: 前方一致で解決\n"
+                "@すんだもん: タイプミス\n# @めも: メモ\n地の文")
+        assert core.unresolved_speaker_tags(text, self._SP) == [(3, "すんだもん")]
+
+    def test_clean_text_ok(self):
+        assert core.unresolved_speaker_tags("地の文だけ。", self._SP) == []
+
+
+class TestBuildChapters:
+    def test_heads_with_intro(self):
+        lines = ["まえせつ", "第一章 出発", "本文"]
+        chs, kind = core.build_chapters(lines, [10.0, 5.0, 5.0])
+        assert kind == "heads"
+        assert chs[0] == ("冒頭", 0.0)
+        assert chs[1][0].startswith("第一章")
+
+    def test_heads_single_at_start(self):
+        chs, kind = core.build_chapters(["第一章", "本文"], [3.0, 5.0])
+        assert kind == "heads" and len(chs) == 1   # 冒頭補完なし・1個でも埋め込む
+
+    def test_auto_fallback(self):
+        lines = ["a"] * 3
+        chs, kind = core.build_chapters(lines, [400.0, 400.0, 400.0])
+        assert kind == "auto" and len(chs) >= 2
+
+    def test_none_for_short(self):
+        chs, kind = core.build_chapters(["短い"], [10.0])
+        assert kind == "none" and chs == []
+
+
+class TestGroupOutputIndices:
+    def test_all_units(self):
+        para = [0, 0, 1, 1, 2]
+        assert core.group_output_indices("combine", para) == [[0, 1, 2, 3, 4]]
+        assert core.group_output_indices("each", para) == [[0], [1], [2], [3], [4]]
+        assert core.group_output_indices("nlines", para, 2) == [[0, 1], [2, 3], [4]]
+        assert core.group_output_indices("para", para) == [[0, 1], [2, 3], [4]]
+
+    def test_nlines_min_two(self):
+        assert core.group_output_indices("nlines", [0, 0, 0], 1) == [[0, 1], [2]]
+
+
+class TestApplyOcrCorrections:
+    def test_confusables_and_denoise(self):
+        text = "卜ヨタの発表\nNEWS\nトヨタが発表した。"
+        out, conf, removed = core.apply_ocr_corrections(text,
+                                                        fix_confusables=True,
+                                                        denoise=True)
+        assert "トヨタの発表" in out and "NEWS" not in out
+        assert conf and conf[0][0] == "卜ヨタの発表"
+        assert "NEWS" in removed
+
+    def test_noop_when_disabled(self):
+        out, conf, removed = core.apply_ocr_corrections("卜ヨタ\nNEWS")
+        assert out == "卜ヨタ\nNEWS" and not conf and not removed
+
+
+class TestCacheProtectAndLimit:
+    def test_protect_skips_recent(self, tmp_path, monkeypatch):
+        import os as _os
+        import time as _time
+        monkeypatch.setattr(core, "SYNTH_CACHE_DIR", str(tmp_path / "vc"))
+        monkeypatch.setattr(core, "_synth_cache_protect_since", 0.0)
+        old_wav = b"RIFF" + b"o" * 100
+        new_wav = b"RIFF" + b"n" * 100
+        core.synth_cache_put("old", old_wav)
+        p = _os.path.join(core.SYNTH_CACHE_DIR, "old.wav")
+        _os.utime(p, (_time.time() - 1000, _time.time() - 1000))
+        core.synth_cache_put("new", new_wav)
+        # 保護あり: 直近に触れた new は消えず、保護外の old だけ消える
+        core.synth_cache_protect(_time.time() - 500)
+        try:
+            core._synth_cache_evict(max_bytes=1)
+            assert core.synth_cache_get("old") is None
+            assert core.synth_cache_get("new") == new_wav
+        finally:
+            core.synth_cache_protect(0.0)
+
+    def test_set_limit_bounds(self, monkeypatch):
+        monkeypatch.setattr(core, "_SYNTH_CACHE_MAX_BYTES", 500 * 1024 * 1024)
+        core.set_synth_cache_limit(2000)
+        assert core._SYNTH_CACHE_MAX_BYTES == 2000 * 1024 * 1024
+        core.set_synth_cache_limit(1)        # 範囲外は無視
+        assert core._SYNTH_CACHE_MAX_BYTES == 2000 * 1024 * 1024
+        core.set_synth_cache_limit("abc")    # 不正も無視
+        assert core._SYNTH_CACHE_MAX_BYTES == 2000 * 1024 * 1024
+        core.set_synth_cache_limit(500)
+
+    def test_stats_and_clear(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(core, "SYNTH_CACHE_DIR", str(tmp_path / "vc"))
+        core.synth_cache_put("a", b"RIFF" + b"1" * 60)
+        core.synth_cache_put("b", b"RIFF" + b"2" * 60)
+        n, total = core.synth_cache_stats()
+        assert n == 2 and total == 128
+        assert core.synth_cache_clear() == 2
+        assert core.synth_cache_stats() == (0, 0)
+
+    def test_dict_hash_failure_returns_empty(self, monkeypatch):
+        import requests
+        def _boom(url, timeout=10):
+            raise OSError("down")
+        monkeypatch.setattr(requests, "get", _boom)
+        assert core.vv_dict_hash("http://x") == ""
+
+
+class TestWindowsOcrChunking:
+    def test_chunks_and_cancel(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(core, "_run_windows_ocr_chunk",
+                            lambda paths, **kw: calls.append(list(paths))
+                            or {p: f"t{p}" for p in paths})
+        paths = [f"p{i}" for i in range(45)]
+        progress = []
+        out = core.run_windows_ocr(paths, chunk_size=20,
+                                   progress_cb=lambda i, n: progress.append(i))
+        assert len(out) == 45 and len(calls) == 3
+        assert progress == [20, 40, 45]
+        # キャンセル: 最初から中断済みなら1チャンクも実行しない
+        import threading
+        ev = threading.Event()
+        ev.set()
+        calls.clear()
+        out = core.run_windows_ocr(paths, chunk_size=20, cancel_event=ev)
+        assert out == {} and calls == []
+
+    def test_partial_fatal_reported(self, monkeypatch):
+        state = {"n": 0}
+        def chunk(paths, **kw):
+            state["n"] += 1
+            if state["n"] == 2:
+                raise RuntimeError("boom")
+            return {p: "ok" for p in paths}
+        monkeypatch.setattr(core, "_run_windows_ocr_chunk", chunk)
+        errors = []
+        out = core.run_windows_ocr([f"p{i}" for i in range(30)],
+                                   chunk_size=10, errors=errors)
+        assert len(out) == 20
+        assert any("boom" in e for e in errors)
+
+
+class TestCliV117:
+    def _setup(self, tmp_path, monkeypatch, body="@ずんだもん: こん\n@四国めたん: ばん"):
+        speakers = [("ずんだもん（ノーマル）", 3, "uz"),
+                    ("四国めたん（ノーマル）", 2, "um")]
+        monkeypatch.setattr(core, "vv_check", lambda url, timeout=3: "0.0.0")
+        monkeypatch.setattr(core, "vv_speakers", lambda url, timeout=10: speakers)
+        monkeypatch.setattr(core, "vv_synthesize_one",
+                            lambda url, text, sid, **kw: _make_wav(0.05))
+        src = tmp_path / "s.txt"
+        src.write_text(body, encoding="utf-8")
+        return src
+
+    def test_csv_sidecar_and_speaker_names(self, tmp_path, monkeypatch):
+        import cli
+        src = self._setup(tmp_path, monkeypatch)
+        out = tmp_path / "o"
+        rc = cli.main([str(src), "-o", str(out), "--wav", "--no-cache",
+                       "--name-snippet", "--list-csv"])
+        assert rc == 0
+        names = sorted(p.name for p in out.glob("*.wav"))
+        assert names[0].startswith("001_ずんだもん_")   # 複数話者は話者名入り
+        csv_text = (out / "セリフ一覧.csv").read_text(encoding="utf-8-sig")
+        assert "ずんだもん" in csv_text and "四国めたん" in csv_text
+
+    def test_invalid_pages_exits(self, tmp_path, monkeypatch):
+        import cli
+        src = self._setup(tmp_path, monkeypatch)
+        with pytest.raises(SystemExit, match="--pages"):
+            cli.main([str(src), "-o", str(tmp_path / "o"), "--pages", "abc"])
+
+    def test_cache_hits_on_second_run(self, tmp_path, monkeypatch):
+        import cli
+        monkeypatch.setattr(core, "SYNTH_CACHE_DIR", str(tmp_path / "vc"))
+        monkeypatch.setattr(core, "vv_dict_hash", lambda url, timeout=10: "d1")
+        calls = []
+        speakers = [("ずんだもん（ノーマル）", 3, "uz")]
+        monkeypatch.setattr(core, "vv_check", lambda url, timeout=3: "0.0.0")
+        monkeypatch.setattr(core, "vv_speakers", lambda url, timeout=10: speakers)
+        monkeypatch.setattr(core, "vv_synthesize_one",
+                            lambda url, text, sid, **kw:
+                            calls.append(text) or _make_wav(0.05))
+        src = tmp_path / "s.txt"
+        src.write_text("一文目。二文目。", encoding="utf-8")
+        assert cli.main([str(src), "-o", str(tmp_path / "o1"), "--wav"]) == 0
+        n_first = len(calls)
+        assert n_first == 2
+        assert cli.main([str(src), "-o", str(tmp_path / "o2"), "--wav"]) == 0
+        assert len(calls) == n_first   # 2回目は全行キャッシュヒット＝合成0回
