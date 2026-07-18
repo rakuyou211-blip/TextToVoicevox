@@ -45,6 +45,21 @@ TEXT_CACHE_PATH = os.path.join(APP_DIR, "last_text.txt")
 PORTRAIT_DIR = os.path.join(APP_DIR, "assets", "立ち絵")
 APP_ICON_PATH = os.path.join(APP_DIR, "assets", "app-icon.png")
 
+# 立ち絵ファイルのフレーム差分サフィックス（口閉じ/口開き/まばたき）
+_PORTRAIT_FRAMES = (("closed", "_closed"), ("open", "_open"), ("blink", "_blink"))
+# 旧バージョンのローマ字ファイル名 → 実キャラ名（後方互換。既存ユーザーの
+# zundamon.png / metan.png をそのまま活かす）
+_PORTRAIT_ALIASES = {"zundamon": "ずんだもん", "metan": "四国めたん"}
+# 照合キーから除くファイル名禁止文字（小夜/SAYO の「/」等）＋空白
+_PORTRAIT_BAD = set('<>:"/\\|?*')
+
+
+def _portrait_key(name):
+    """キャラ名/ファイル名を照合用キーに正規化する（ファイル名に使えない文字・空白を
+    除く）。話者名「小夜/SAYO」やファイル名の表記ゆれを吸収して同じキャラに寄せる。"""
+    s = _PORTRAIT_ALIASES.get(str(name), str(name))
+    return "".join(c for c in s if c not in _PORTRAIT_BAD and not c.isspace())
+
 # ドラッグ＆ドロップ対応（tkinterdnd2 が無くてもアプリは動く）
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -1104,17 +1119,36 @@ class App(_Base):
             pass
 
     def _load_portraits(self):
-        """assets/立ち絵/ の透過PNGを読み込む。無ければ空dict（パネルを出さない）。
+        """assets/立ち絵/ の透過PNGを走査し、どの話者の立ち絵も読み込む。
+        ファイル名（拡張子とフレーム差分を除いた部分）を _portrait_key で正規化し、
+        話者名（キャラ名）と同じキーに寄せる。これで `春日部つむぎ.png` のように
+        キャラ名で置くだけで全43キャラのどれでも立ち絵が出る（旧 zundamon/metan も互換）。
         追加フレーム（_closed/_open/_blink）があれば まばたき・口パクに使う。
-        フレームは公式立ち絵の口パク差分（同ポーズ・同寸法）を想定。"""
+        無ければ空dict（パネルを出さない）。"""
+        try:
+            files = sorted(os.listdir(PORTRAIT_DIR))
+        except OSError:
+            return {}
+        # 1) ファイルを キャラキー → {フレーム種別: パス} にまとめる
+        groups = {}
+        for fn in files:
+            if not fn.lower().endswith(".png"):
+                continue
+            stem = fn[:-4]
+            frame = "base"
+            for fr, suf in _PORTRAIT_FRAMES:
+                if stem.endswith(suf):
+                    frame, stem = fr, stem[:-len(suf)]
+                    break
+            key = _portrait_key(stem)
+            if key:
+                groups.setdefault(key, {})[frame] = os.path.join(PORTRAIT_DIR, fn)
+        # 2) 各キャラの画像を読み込む
         out = {}
-        for key in ("zundamon", "metan"):
+        for key, framefiles in groups.items():
             frames = {}
-            for frame, suffix in (("base", ""), ("closed", "_closed"),
-                                  ("open", "_open"), ("blink", "_blink")):
-                img = self._load_scaled_image(
-                    os.path.join(PORTRAIT_DIR, f"{key}{suffix}.png"),
-                    max_w=230, max_h=640)
+            for frame, path in framefiles.items():
+                img = self._load_scaled_image(path, max_w=230, max_h=640)
                 if img is not None:
                     frames[frame] = img
             # 口閉じがあれば基準ポーズに（open/blink と同ポーズなので差し替えが滑らか）
@@ -1145,7 +1179,9 @@ class App(_Base):
         self._bubble.pack(side="top", fill="x", pady=(0, 6))
         self._portrait_label = tk.Label(parent, bd=0, anchor="s")
         self._portrait_label.pack(side="top", fill="both", expand=True)
-        ttk.Label(parent, text="VOICEVOX / 立ち絵:坂本アヒル",
+        # 立ち絵は全43キャラ対応（キャラごとに権利者が異なるため個別名は出さず、
+        # 各キャラのガイドラインに従う旨を示す。音声のクレジットは生成時に別途案内）
+        ttk.Label(parent, text="VOICEVOX ／ 立ち絵：各キャラのガイドライン準拠",
                   style="Credit.TLabel").pack(side="bottom", pady=(4, 2))
         self._portrait_key = None
         self._mouth_after = None
@@ -1155,12 +1191,12 @@ class App(_Base):
         self._blink_after = self.after(3800, self._blink_tick)
 
     def _portrait_key_for(self, label):
-        s = label or ""
-        if "四国めたん" in s or "めたん" in s:
-            return "metan"
-        if "ずんだもん" in s:
-            return "zundamon"
-        return None
+        """話者ラベル→立ち絵キー。そのキャラの立ち絵が置かれていればキー、無ければ None。
+        全43キャラ対応：キャラ名を正規化して該当PNGがあれば表示する。"""
+        if not label:
+            return None
+        key = _portrait_key(self._char_name(label))
+        return key if key in getattr(self, "_portraits", {}) else None
 
     def _speaker_label_for_id(self, speaker_id):
         for s in self.speakers:
@@ -1237,15 +1273,16 @@ class App(_Base):
             self._portrait_label.image = img  # GC防止の参照保持
 
     def _update_portrait(self, event=None):
-        """選択中の話者に応じて立ち絵を切り替える（対応が無ければ既定=ずんだもん）。"""
+        """選択中の話者に応じて立ち絵を切り替える。そのキャラの立ち絵が無ければ
+        別キャラを誤表示せず、枠だけ残して画像を消す（全キャラ対応の素直な挙動）。"""
         if not getattr(self, "_portrait_label", None):
             return
-        label = self._current_speaker_label()
-        key = self._portrait_key_for(label)
-        if key not in self._portraits:
-            key = "zundamon" if "zundamon" in self._portraits else \
-                next(iter(self._portraits), None)
+        key = self._portrait_key_for(self._current_speaker_label())
         self._portrait_key = key
+        if key is None:
+            self._portrait_label.config(image="")
+            self._portrait_label.image = None
+            return
         self._show_frame("open" if self._mouth_open else "base")
 
     # --- まばたき（アイドル時の小さな生命感。blinkフレームが無ければ何もしない） ---
@@ -1265,9 +1302,14 @@ class App(_Base):
         if not self._portraits or not getattr(self, "_portrait_label", None):
             return
         if speaker_id is not None:
+            # 喋る行のキャラに立ち絵を合わせる。立ち絵が無いキャラなら別キャラの口を
+            # 動かさず枠だけにする（全キャラ対応：連続再生で話者が変わっても誤表示なし）
             key = self._portrait_key_for(self._speaker_label_for_id(speaker_id))
-            if key in self._portraits:
-                self._portrait_key = key
+            self._portrait_key = key
+            if key is None:
+                self._portrait_label.config(image="")
+                self._portrait_label.image = None
+                return
         self._stop_mouth(restore=False)
         self._mouth_after = self.after(90, self._mouth_tick)
 

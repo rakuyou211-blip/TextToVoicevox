@@ -224,11 +224,25 @@ def test_synth_button_restore(app):
     assert str(app.synth_btn["text"]) == "🔊 音声を生成"
 
 
+def test_portrait_key_normalization():
+    """キャラ名/ファイル名の正規化（純ロジック・立ち絵の有無に依存しない）。
+    ローマ字別名の吸収と、ファイル名禁止文字・空白の除去。"""
+    import main as main_mod
+    assert main_mod._portrait_key("zundamon") == "ずんだもん"
+    assert main_mod._portrait_key("metan") == "四国めたん"
+    assert main_mod._portrait_key("春日部つむぎ") == "春日部つむぎ"
+    assert main_mod._portrait_key("小夜/SAYO") == "小夜SAYO"     # 「/」を除く
+    assert main_mod._portrait_key("†聖騎士 紅桜†") == "†聖騎士紅桜†"  # 空白を除く
+
+
 def test_portrait_key_mapping(app):
-    """話者ラベル→立ち絵キーの対応（立ち絵の有無に依存しない純ロジック）。"""
-    assert app._portrait_key_for("四国めたん（ノーマル）") == "metan"
-    assert app._portrait_key_for("ずんだもん（あまあま）") == "zundamon"
-    assert app._portrait_key_for("春日部つむぎ（ノーマル）") is None
+    """話者ラベル→立ち絵キー: 立ち絵が置かれているキャラだけキーを返す。
+    _portraits を差し替えて、有無に依存しない対応を確認する（全43キャラ対応）。"""
+    app._portraits = {"ずんだもん": {"base": None}, "春日部つむぎ": {"base": None}}
+    assert app._portrait_key_for("ずんだもん（あまあま）") == "ずんだもん"
+    assert app._portrait_key_for("春日部つむぎ（ノーマル）") == "春日部つむぎ"
+    # 立ち絵を置いていないキャラは None（別キャラを誤表示しない）
+    assert app._portrait_key_for("四国めたん（ノーマル）") is None
     assert app._portrait_key_for("") is None
 
 
