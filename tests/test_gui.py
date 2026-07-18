@@ -692,3 +692,24 @@ def test_preview_no_engine_shows_dialog(app, monkeypatch):
     app.busy = False
     app.preview_selected()
     assert shown   # ダイアログが出た
+
+
+def test_import_portraits_no_engine(app, monkeypatch):
+    """未接続で立ち絵取込を押すと案内（クラッシュしない）。"""
+    from tkinter import messagebox
+    shown = []
+    monkeypatch.setattr(messagebox, "showinfo", lambda *a, **k: shown.append(a))
+    app.speakers = []
+    app.import_all_portraits()
+    assert shown
+
+
+def test_import_portraits_skips_existing(app, monkeypatch):
+    """全キャラ取り込み済みなら「済み」案内で終わる（再取得しない）。"""
+    from tkinter import messagebox
+    shown = []
+    monkeypatch.setattr(messagebox, "showinfo", lambda *a, **k: shown.append(a))
+    app.speakers = [("ずんだもん（ノーマル）", 3, "u1")]
+    app._portraits = {"ずんだもん": {"base": None}}   # 既に有り
+    app.import_all_portraits()
+    assert shown and "済み" in shown[0][1]

@@ -95,6 +95,24 @@ def _write_atomic(path, data):
         raise
 
 
+def _write_bytes_atomic(path, data):
+    """バイト列を一時ファイル経由で原子的に書き込む（立ち絵PNGの保存用）。"""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix=".t2v_tmp_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 APP_TITLE = f"テキスト抽出 → VOICEVOX  v{core.APP_VERSION}（オフライン）"
 VOICEVOX_DEFAULT = "http://127.0.0.1:50021"
 ALL_EXT = sorted(core.IMG_EXT | core.PDF_EXT | core.DOC_EXT)
@@ -618,6 +636,15 @@ class App(_Base):
         self.sample_btn.pack(side="left", padx=(0, GAPX))
         _Tooltip(self.sample_btn, self._tip_engine_gate(
             "選択中の話者の公式ボイスサンプルを再生します。"))
+        # 全キャラの立ち絵をエンジンから一括取り込み（声サンプルと同じ /speaker_info 経由）
+        self.portrait_btn = ttk.Button(va, text="🎨 立ち絵取込", width=11,
+                                       command=self.import_all_portraits,
+                                       state="disabled")
+        self.portrait_btn.pack(side="left", padx=(0, GAPX))
+        _Tooltip(self.portrait_btn, self._tip_engine_gate(
+            "起動中のVOICEVOXから全キャラの公式立ち絵を取り込み、\n"
+            "assets/立ち絵/ に保存します（各自のローカルのみ・再配布はしません）。",
+            busy_gated=False))
         # プリセット/セリフ別話者の行（vb）は使わない人も多いので折りたたみ式にする。
         # トグルは独立行を作らず右端に置き、行数削減の効果を保つ
         self._vdetail_btn = ttk.Button(va, text="プリセット/セリフ ▸", width=17,
@@ -2553,6 +2580,70 @@ class App(_Base):
         except Exception:
             self.q.put(("preview_done", False, traceback.format_exc()))
 
+    # ---------------- 全キャラの立ち絵をエンジンから取り込む ----------------
+    def import_all_portraits(self):
+        """起動中のVOICEVOXから全キャラの公式立ち絵（/speaker_info の portrait）を
+        取り込み、assets/立ち絵/ に「キャラ名.png」で保存する。声サンプルと同じ
+        エンジン同梱の公式画像で、各自のローカル表示にのみ使う（再配布はしない）。"""
+        if not self.speakers:
+            messagebox.showinfo("情報", "先にVOICEVOXエンジンに接続してください。")
+            return
+        if getattr(self, "_portrait_import_busy", False):
+            return
+        # キャラ名→speaker_uuid（先頭スタイルのuuid）。既に画像があるキャラは飛ばす
+        chars = {}
+        for lb, _sid, uuid in self.speakers:
+            chars.setdefault(self._char_name(lb), uuid)
+        todo = [(name, uuid) for name, uuid in chars.items()
+                if _portrait_key(name) not in self._portraits]
+        if not todo:
+            messagebox.showinfo("立ち絵", "全キャラの立ち絵はすでに取り込み済みです🍂")
+            return
+        if not messagebox.askyesno(
+                "立ち絵を取り込む",
+                f"VOICEVOXから {len(todo)}キャラの公式立ち絵を取り込み、\n"
+                "assets/立ち絵/ に保存します。\n"
+                "（各自のローカルに保存するだけで、再配布はしません。"
+                "公開時は各キャラのガイドラインに従ってください）\n\n続けますか？"):
+            return
+        self._portrait_import_busy = True
+        self.portrait_btn.config(state="disabled")
+        self.status_var.set(f"立ち絵を取り込み中… (0/{len(todo)})")
+        threading.Thread(target=self._portrait_import_worker,
+                         args=(todo,), daemon=True).start()
+
+    def _portrait_import_worker(self, todo):
+        try:
+            os.makedirs(PORTRAIT_DIR, exist_ok=True)
+            done = fail = 0
+            for i, (name, uuid) in enumerate(todo, start=1):
+                try:
+                    png = core.vv_speaker_portrait(self.base_url, uuid)
+                    fname = _portrait_key(name) + ".png"
+                    _write_bytes_atomic(os.path.join(PORTRAIT_DIR, fname), png)
+                    done += 1
+                except Exception:
+                    fail += 1
+                self.q.put(("portrait_progress", i, len(todo)))
+            self.q.put(("portrait_done", done, fail))
+        except Exception:
+            self.q.put(("portrait_done", 0, len(todo)))
+
+    def _reload_portraits(self):
+        """取り込み後に立ち絵を読み直し、パネルへ反映する（無ければパネルを作る）。"""
+        self._portraits = self._load_portraits()
+        if self._side is None and self._portraits:
+            # これまで画像ゼロでパネルが無かった場合は今から作る
+            self._side = ttk.Frame(self)
+            self._side.pack(side="right", fill="y", padx=(0, PAD_X), pady=PAD_Y,
+                            before=self._main)
+            self._side_shown = True
+            self._build_portrait_panel(self._side)
+            self._register_drop_tree(self._side)
+            self.apply_theme()
+            self.bind("<Configure>", self._on_configure, add="+")
+        self._update_portrait()
+
     # ---------------- 話者の声サンプル試聴 ----------------
     def play_speaker_sample(self):
         """選択中の話者スタイルの公式ボイスサンプルを1つ再生する（声選び用）。"""
@@ -3811,6 +3902,8 @@ class App(_Base):
                 self.dict_btn.config(state="normal")
                 self.vvproj_btn.config(state="normal")
                 self.sample_btn.config(state="normal")
+                if not getattr(self, "_portrait_import_busy", False):
+                    self.portrait_btn.config(state="normal")
                 if self._bookmark is not None:
                     self.resume_btn.config(state="normal")
             else:
@@ -3919,6 +4012,26 @@ class App(_Base):
         elif kind == "dict_status":
             _, info = msg
             self.status_var.set(info)
+        elif kind == "portrait_progress":
+            _, i, total = msg
+            self.status_var.set(f"立ち絵を取り込み中… ({i}/{total})")
+        elif kind == "portrait_done":
+            _, done, fail = msg
+            self._portrait_import_busy = False
+            if self.speakers:
+                self.portrait_btn.config(state="normal")
+            self._reload_portraits()
+            note = f"（{fail}キャラは取得できませんでした）" if fail else ""
+            self.status_var.set(
+                f"🎨 立ち絵を{done}キャラ取り込んだよ{note}"
+                "（話者を切り替えると出ます）" if done
+                else f"立ち絵を取り込めませんでした{note}")
+            if done:
+                messagebox.showinfo(
+                    "立ち絵",
+                    f"{done}キャラの立ち絵を取り込みました🍂{note}\n\n"
+                    "話者を切り替えると、その子の立ち絵が右に出ます。\n"
+                    "公開時は各キャラのガイドラインに従ってください。")
         elif kind == "cache_limit_applied":
             # キャッシュ上限のevict完了。ダイアログが開いていれば統計を更新
             r = getattr(self, "_cache_refresh", None)
