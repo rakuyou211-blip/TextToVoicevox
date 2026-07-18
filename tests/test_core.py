@@ -1200,42 +1200,38 @@ class TestCleanTextDenoise:
         assert "2026年7月14日（火）06:02" not in out.split("\n")
 
 
-class TestCliDenoise:
+class TestCliDenoiseOcrOnly:
+    """v1.16.0: denoise はOCR由来テキスト限定。テキストファイルは本文100%なので
+    英文行・時刻らしき行も本文として残す（小説の英文引用・年号マーカー保護）。"""
     _RAW = ("トランプ大統領がホルムズ海峡封鎖を警告\nNEWS\n06:02\n"
             "アメリカのトランプ大統領は表明した。")
 
-    def test_denoise_flag_removes_overlay(self, tmp_path):
+    def test_txt_input_keeps_overlay_like_lines(self, tmp_path):
         import cli
-        src = tmp_path / "cap.txt"
+        src = tmp_path / "novel.txt"
         src.write_text(self._RAW, encoding="utf-8")
         out = tmp_path / "o"
-        rc = cli.main([str(src), "-o", str(out), "--denoise"])
+        rc = cli.main([str(src), "-o", str(out)])   # denoise 既定ONのまま
         assert rc == 0
         text = (out / "voicevox_text.txt").read_text(encoding="utf-8")
-        assert "NEWS" not in text
-        assert "06:02" not in text
+        assert "NEWS" in text and "06:02" in text
         assert "アメリカのトランプ大統領は表明した。" in text
 
-    def test_default_removes_overlay(self, tmp_path):
-        # denoise は既定ON。フラグ無しでもノイズが消える
+    def test_no_denoise_flag_also_keeps(self, tmp_path):
         import cli
-        src = tmp_path / "cap.txt"
-        src.write_text(self._RAW, encoding="utf-8")
-        out = tmp_path / "o"
-        rc = cli.main([str(src), "-o", str(out)])
-        assert rc == 0
-        text = (out / "voicevox_text.txt").read_text(encoding="utf-8")
-        assert "NEWS" not in text and "06:02" not in text
-
-    def test_no_denoise_flag_keeps_overlay(self, tmp_path):
-        # --no-denoise で従来どおりノイズを残せる
-        import cli
-        src = tmp_path / "cap.txt"
+        src = tmp_path / "novel.txt"
         src.write_text(self._RAW, encoding="utf-8")
         out = tmp_path / "o"
         rc = cli.main([str(src), "-o", str(out), "--no-denoise"])
         assert rc == 0
         text = (out / "voicevox_text.txt").read_text(encoding="utf-8")
+        assert "NEWS" in text and "06:02" in text
+
+    def test_extract_files_txt_not_denoised(self, tmp_path):
+        # コア関数レベルでも: denoise=True はテキスト系入力に触れない
+        src = tmp_path / "novel.txt"
+        src.write_text(self._RAW, encoding="utf-8")
+        text, warnings = core.extract_files([str(src)], denoise=True)
         assert "NEWS" in text and "06:02" in text
 
 
@@ -1321,17 +1317,24 @@ def test_extract_files_cleans_temp_dir(tmp_path):
 
 
 # ============================================================
-#  cli.py: --srt 単独指定の警告 / @話者タグの解釈
+#  cli.py: 分割出力のSRT / @話者タグの解釈
 # ============================================================
-class TestCliSrtWarning:
-    def test_srt_without_combine_warns(self, tmp_path, capsys):
+class TestCliSrtPerFile:
+    def test_srt_saved_for_each_unit(self, tmp_path, monkeypatch):
+        """v1.16.0: --srt は結合時だけでなく分割出力でもファイルごとに保存される。"""
         import cli
         src = tmp_path / "n.txt"
         src.write_text("一文目。二文目。", encoding="utf-8")
-        rc = cli.main([str(src), "-o", str(tmp_path / "o"), "--srt"])
+        speakers = [("ずんだもん（ノーマル）", 3, "uz")]
+        monkeypatch.setattr(core, "vv_check", lambda url, timeout=3: "0.0.0")
+        monkeypatch.setattr(core, "vv_speakers", lambda url, timeout=10: speakers)
+        monkeypatch.setattr(core, "vv_synthesize_one",
+                            lambda url, text, sid, **kw: _make_wav(0.05))
+        out = tmp_path / "o"
+        rc = cli.main([str(src), "-o", str(out), "--wav", "--srt"])
         assert rc == 0
-        err = capsys.readouterr().err
-        assert "--srt" in err and "--combine" in err
+        assert (out / "001.wav").exists() and (out / "001.srt").exists()
+        assert (out / "002.wav").exists() and (out / "002.srt").exists()
 
 
 class TestCliSpeakerTags:
@@ -2073,3 +2076,354 @@ class TestFilenameSnippet:
     def test_no_trailing_ascii_dot(self):
         # 末尾の半角ピリオドはWindowsで不正なファイル名になるため落とす
         assert not core.filename_snippet("End of file.").endswith(".")
+
+
+# ============================================================
+#  v1.16.0: 《》記法・自動チャプター・キャンセル・キャッシュほか
+# ============================================================
+class TestRubyContextGuard:
+    def test_kanji_ruby_removed(self):
+        assert core.strip_aozora("北海道《ほっかいどう》へ") == "北海道へ"
+
+    def test_bar_ruby_removed(self):
+        assert core.strip_aozora("｜北海道《ほっかいどう》へ") == "北海道へ"
+
+    def test_web_novel_skill_name_kept(self):
+        # 漢字直後でない《…》はWeb小説のスキル名・強調＝本文として残す
+        assert core.strip_aozora("彼は《ファイアボール》を放った。") == \
+            "彼は《ファイアボール》を放った。"
+
+    def test_kakuyomu_emphasis_expanded(self):
+        # カクヨム傍点《《…》》は中身を展開（従来は「》」だけ残る破損だった）
+        assert core.strip_aozora("これは《《本当に大事》》なことだ。") == \
+            "これは本当に大事なことだ。"
+
+
+class TestHalfwidthKana:
+    def test_normalized_and_dakuten_composed(self):
+        assert core.normalize_halfwidth_kana("ｶﾞｲﾄﾞ") == "ガイド"
+        assert core.normalize_halfwidth_kana("ﾃﾞｰﾀ｡") == "データ。"
+
+    def test_clean_text_normalize_splits_halfwidth_kuten(self):
+        # 半角句点｡も全角化され、文分割が効くようになる
+        out = core.clean_text("ﾃｽﾄです｡続きです｡", normalize=True)
+        assert out.split("\n") == ["テストです。", "続きです。"]
+
+
+class TestNumericRange:
+    def test_range_to_kara(self):
+        assert core.normalize_readings("10〜20人") == "10から20人"
+        assert core.normalize_readings("10~20人") == "10から20人"
+
+    def test_non_numeric_tilde_kept(self):
+        assert core.normalize_readings("よろしく〜") == "よろしく〜"
+
+
+class TestKumimojiUnits:
+    def test_units_expanded(self):
+        out = core.expand_readable_chars("時速40㌔で3㌧・50㌫")
+        assert out == "時速40キロで3トン・50パーセント"
+
+
+class TestReadTxtEncoding:
+    def test_euc_jp_detected(self, tmp_path):
+        p = tmp_path / "euc.txt"
+        p.write_bytes("吾輩は猫である。名前はまだ無い。".encode("euc_jp"))
+        assert "吾輩は猫である" in core.read_txt(str(p))
+
+    def test_cp932_still_works(self, tmp_path):
+        p = tmp_path / "sjis.txt"
+        p.write_bytes("こんにちは世界".encode("cp932"))
+        assert core.read_txt(str(p)) == "こんにちは世界"
+
+    def test_utf8_fast_path(self, tmp_path):
+        p = tmp_path / "u8.txt"
+        p.write_text("普通のUTF-8です。", encoding="utf-8")
+        assert core.read_txt(str(p)) == "普通のUTF-8です。"
+
+
+class TestFallbackChapters:
+    def test_marks_every_interval(self):
+        starts = [0.0, 300.0, 650.0, 900.0, 1300.0]
+        lines = ["a", "b", "c行のテキストがとても長い場合は切られる", "d", "e"]
+        chs = core.fallback_chapters(starts, lines, interval_sec=600)
+        assert chs[0] == ("冒頭", 0.0)
+        assert chs[1][1] == 650.0
+        assert chs[1][0].startswith("c行のテキストがとても長")
+        assert chs[2][1] == 1300.0
+
+    def test_short_book_only_head(self):
+        chs = core.fallback_chapters([0.0, 10.0], ["a", "b"], interval_sec=600)
+        assert chs == [("冒頭", 0.0)]
+
+    def test_empty(self):
+        assert core.fallback_chapters([], []) == []
+
+
+class TestExtractCancel:
+    def test_preset_cancel_returns_partial_with_warning(self, tmp_path):
+        import threading
+        ev = threading.Event()
+        ev.set()   # 最初から中断済み → ファイルを1つも処理せず戻る
+        files = []
+        for i in range(2):
+            p = tmp_path / f"t{i}.txt"
+            p.write_text(f"本文{i}です。", encoding="utf-8")
+            files.append(str(p))
+        text, warnings = core.extract_files(files, cancel_event=ev)
+        assert text == ""
+        assert any("キャンセル" in w for w in warnings)
+
+
+class TestSynthCache:
+    def test_key_changes_with_inputs(self):
+        k = core.synth_cache_key("こんにちは", 3, 1.0, 0.0, 1.0, 1.0, "0.24", "d1")
+        assert k == core.synth_cache_key("こんにちは", 3, 1.0, 0.0, 1.0, 1.0,
+                                         "0.24", "d1")
+        assert k != core.synth_cache_key("こんばんは", 3, 1.0, 0.0, 1.0, 1.0,
+                                         "0.24", "d1")
+        assert k != core.synth_cache_key("こんにちは", 4, 1.0, 0.0, 1.0, 1.0,
+                                         "0.24", "d1")
+        assert k != core.synth_cache_key("こんにちは", 3, 1.2, 0.0, 1.0, 1.0,
+                                         "0.24", "d1")
+        assert k != core.synth_cache_key("こんにちは", 3, 1.0, 0.0, 1.0, 1.0,
+                                         "0.25", "d1")
+        assert k != core.synth_cache_key("こんにちは", 3, 1.0, 0.0, 1.0, 1.0,
+                                         "0.24", "d2")
+
+    def test_put_get_roundtrip_and_evict(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(core, "SYNTH_CACHE_DIR", str(tmp_path / "vc"))
+        wav1 = b"RIFF" + b"1" * 60      # 64B（RIFFヘッダ風・検証を通る最小形）
+        wav2 = b"RIFF" + b"2" * 100     # 104B
+        core.synth_cache_put("k1", wav1)
+        assert core.synth_cache_get("k1") == wav1
+        assert core.synth_cache_get("nokey") is None
+        # 上限を極小にして追加すると古い方から消える
+        import os as _os
+        import time as _time
+        p1 = _os.path.join(core.SYNTH_CACHE_DIR, "k1.wav")
+        _os.utime(p1, (_time.time() - 100, _time.time() - 100))
+        core.synth_cache_put("k2", wav2)
+        core._synth_cache_evict(max_bytes=110)   # 合計168B > 110B → 古いk1だけ削除
+        assert core.synth_cache_get("k1") is None
+        assert core.synth_cache_get("k2") == wav2
+
+    def test_put_rejects_non_wav_and_get_heals_corruption(self, tmp_path,
+                                                          monkeypatch):
+        monkeypatch.setattr(core, "SYNTH_CACHE_DIR", str(tmp_path / "vc"))
+        core.synth_cache_put("bad", b"not-a-wav")   # WAVでない → 保存しない
+        assert core.synth_cache_get("bad") is None
+        # 電源断などで残った壊れたエントリは get が削除してミス扱い（自己回復）
+        import os as _os
+        _os.makedirs(core.SYNTH_CACHE_DIR, exist_ok=True)
+        p = _os.path.join(core.SYNTH_CACHE_DIR, "corrupt.wav")
+        with open(p, "wb") as f:
+            f.write(b"RIFF")   # 44バイト以下＝不完全
+        assert core.synth_cache_get("corrupt") is None
+        assert not _os.path.exists(p)
+
+    def test_cached_passthrough_without_keys(self, monkeypatch):
+        # engine_ver / dict_hash が無いときはキャッシュせず素通し
+        calls = []
+        monkeypatch.setattr(core, "vv_synthesize_one",
+                            lambda *a, **k: calls.append(1) or b"w")
+        assert core.vv_synthesize_cached("u", "t", 1) == b"w"
+        assert core.vv_synthesize_cached("u", "t", 1) == b"w"
+        assert len(calls) == 2
+
+
+class TestDocxNoDuplicates:
+    def _make_docx(self, tmp_path, body_xml):
+        import zipfile as zf
+        p = tmp_path / "t.docx"
+        doc = ('<?xml version="1.0"?>'
+               '<w:document xmlns:w="http://schemas.openxmlformats.org/'
+               'wordprocessingml/2006/main" xmlns:mc="http://schemas.'
+               'openxmlformats.org/markup-compatibility/2006">'
+               f'<w:body>{body_xml}</w:body></w:document>')
+        with zf.ZipFile(p, "w") as z:
+            z.writestr("word/document.xml", doc)
+        return str(p)
+
+    def test_textbox_extracted_once(self, tmp_path):
+        # mc:Choice/mc:Fallback の両分岐＋入れ子w:p で同文が4重になっていた
+        inner = '<w:p><w:r><w:t>箱の文言</w:t></w:r></w:p>'
+        body = ('<w:p><w:r><w:t>本文。</w:t></w:r></w:p>'
+                f'<w:p><w:r><mc:AlternateContent><mc:Choice>{inner}</mc:Choice>'
+                f'<mc:Fallback>{inner}</mc:Fallback>'
+                '</mc:AlternateContent></w:r></w:p>')
+        out = core.extract_docx(self._make_docx(tmp_path, body))
+        assert out.count("箱の文言") == 1
+        assert "本文。" in out
+
+    def test_plain_paragraphs_unchanged(self, tmp_path):
+        body = ('<w:p><w:r><w:t>一段落。</w:t></w:r></w:p>'
+                '<w:p><w:r><w:t>二段落。</w:t></w:r></w:p>')
+        out = core.extract_docx(self._make_docx(tmp_path, body))
+        assert out == "一段落。\n二段落。"
+
+
+class TestEpubNavSkip:
+    def _make_epub(self, tmp_path, extra_item="", extra_ref=""):
+        import zipfile as zf
+        p = tmp_path / "t.epub"
+        container = ('<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:'
+                     'opendocument:xmlns:container"><rootfiles><rootfile '
+                     'full-path="OEBPS/content.opf"/></rootfiles></container>')
+        opf = ('<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf">'
+               '<manifest>'
+               '<item id="c1" href="c1.xhtml"/>' + extra_item +
+               '</manifest><spine>'
+               '<itemref idref="c1"/>' + extra_ref +
+               '</spine></package>')
+        with zf.ZipFile(p, "w") as z:
+            z.writestr("META-INF/container.xml", container)
+            z.writestr("OEBPS/content.opf", opf)
+            z.writestr("OEBPS/c1.xhtml", "<html><body><p>本文です。</p></body></html>")
+            z.writestr("OEBPS/nav.xhtml", "<html><body><p>目次リンク</p></body></html>")
+        return str(p)
+
+    def test_nav_and_nonlinear_skipped(self, tmp_path):
+        p = self._make_epub(
+            tmp_path,
+            extra_item='<item id="nav" href="nav.xhtml" properties="nav"/>',
+            extra_ref='<itemref idref="nav" linear="no"/>')
+        out = core.extract_epub(p)
+        assert "本文です。" in out
+        assert "目次リンク" not in out
+
+    def test_all_aux_falls_back(self, tmp_path):
+        # 全章が linear=no でも本文が空にならない（誤ラベルEPUB対策）
+        import zipfile as zf
+        p = tmp_path / "t2.epub"
+        container = ('<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:'
+                     'opendocument:xmlns:container"><rootfiles><rootfile '
+                     'full-path="content.opf"/></rootfiles></container>')
+        opf = ('<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf">'
+               '<manifest><item id="c1" href="c1.xhtml"/></manifest>'
+               '<spine><itemref idref="c1" linear="no"/></spine></package>')
+        with zf.ZipFile(p, "w") as z:
+            z.writestr("META-INF/container.xml", container)
+            z.writestr("content.opf", opf)
+            z.writestr("c1.xhtml", "<html><body><p>唯一の本文</p></body></html>")
+        assert "唯一の本文" in core.extract_epub(str(p))
+
+
+class TestIsMemoLine:
+    def test_memo_detection(self):
+        assert core.is_memo_line("# メモ")
+        assert core.is_memo_line("　＃全角も")
+        assert not core.is_memo_line("本文 # 中の井桁")
+        assert not core.is_memo_line("")
+
+
+class TestCliUnitAndVvproj:
+    def _setup(self, tmp_path, monkeypatch):
+        speakers = [("ずんだもん（ノーマル）", 3, "uz")]
+        monkeypatch.setattr(core, "vv_check", lambda url, timeout=3: "0.0.0")
+        monkeypatch.setattr(core, "vv_speakers", lambda url, timeout=10: speakers)
+        monkeypatch.setattr(core, "vv_synthesize_one",
+                            lambda url, text, sid, **kw: _make_wav(0.05))
+        src = tmp_path / "s.txt"
+        src.write_text("一文目。二文目。三文目。", encoding="utf-8")
+        return src
+
+    def test_unit_nlines_groups(self, tmp_path, monkeypatch):
+        import cli
+        src = self._setup(tmp_path, monkeypatch)
+        out = tmp_path / "o"
+        rc = cli.main([str(src), "-o", str(out), "--wav",
+                       "--unit", "nlines", "--split-lines", "2"])
+        assert rc == 0
+        assert (out / "001.wav").exists() and (out / "002.wav").exists()
+        assert not (out / "003.wav").exists()   # 3行→2+1で2ファイル
+
+    def test_vvproj_written_without_wav(self, tmp_path, monkeypatch):
+        import cli
+        import json as _json
+        src = self._setup(tmp_path, monkeypatch)
+        out = tmp_path / "o"
+        rc = cli.main([str(src), "-o", str(out), "--vvproj"])
+        assert rc == 0
+        proj = _json.loads((out / "voicevox_project.vvproj"
+                            ).read_text(encoding="utf-8"))
+        assert len(proj["talk"]["audioKeys"]) == 3
+        assert not (out / "001.wav").exists()
+
+    def test_name_snippet_optin(self, tmp_path, monkeypatch):
+        import cli
+        src = self._setup(tmp_path, monkeypatch)
+        out = tmp_path / "o"
+        rc = cli.main([str(src), "-o", str(out), "--wav", "--name-snippet"])
+        assert rc == 0
+        assert (out / "001_一文目。.wav").exists()
+
+    def test_url_trailing_slash_normalized(self, tmp_path, monkeypatch):
+        import cli
+        seen = []
+        monkeypatch.setattr(core, "vv_check",
+                            lambda url, timeout=3: seen.append(url) or "0.0.0")
+        monkeypatch.setattr(core, "vv_speakers", lambda url, timeout=10:
+                            [("ずんだもん（ノーマル）", 3, "uz")])
+        monkeypatch.setattr(core, "vv_synthesize_one",
+                            lambda url, text, sid, **kw: _make_wav(0.05))
+        src = tmp_path / "s.txt"
+        src.write_text("一文。", encoding="utf-8")
+        rc = cli.main([str(src), "-o", str(tmp_path / "o"), "--wav",
+                       "--url", "http://127.0.0.1:50021/"])
+        assert rc == 0
+        assert seen[0] == "http://127.0.0.1:50021"
+
+
+class TestReviewFixesV116:
+    """v1.16.0レビューで確定した指摘の回帰テスト。"""
+
+    def test_ruby_after_compat_kanji(self):
+        # 互換漢字（﨑=U+FA11）・拡張B（𠮟=U+20B9F）直後のルビも削除される
+        assert core.strip_aozora("山﨑《やまざき》さん") == "山﨑さん"
+        assert core.strip_aozora("𠮟《しか》る") == "𠮟る"
+
+    def test_sentence_mode_keeps_paragraphs_when_blank_kept(self):
+        # remove_blank=False の文ごとモードで空行（段落境界）が保持される
+        out = core.clean_text("一文目。二文目。\n\n三文目。", remove_blank=False)
+        assert out == "一文目。\n二文目。\n\n三文目。"
+
+    def test_sentence_mode_default_unchanged(self):
+        out = core.clean_text("一文目。二文目。\n\n三文目。")
+        assert out == "一文目。\n二文目。\n三文目。"
+
+    def test_cli_unit_para_splits(self, tmp_path, monkeypatch):
+        # --unit para + --keep-blank が既定の文ごとモードでも段落分割できる
+        import cli
+        speakers = [("ずんだもん（ノーマル）", 3, "uz")]
+        monkeypatch.setattr(core, "vv_check", lambda url, timeout=3: "0.0.0")
+        monkeypatch.setattr(core, "vv_speakers", lambda url, timeout=10: speakers)
+        monkeypatch.setattr(core, "vv_synthesize_one",
+                            lambda url, text, sid, **kw: _make_wav(0.05))
+        src = tmp_path / "s.txt"
+        src.write_text("一段落の一文。一段落の二文。\n\n二段落。", encoding="utf-8")
+        out = tmp_path / "o"
+        rc = cli.main([str(src), "-o", str(out), "--wav",
+                       "--unit", "para", "--keep-blank"])
+        assert rc == 0
+        assert (out / "001.wav").exists() and (out / "002.wav").exists()
+        assert not (out / "003.wav").exists()
+
+    def test_dict_hash_includes_priority(self, monkeypatch):
+        # 優先度だけ変えてもハッシュが変わる（キャッシュが正しく無効化される）
+        class _R:
+            def __init__(self, data):
+                self._d = data
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return self._d
+        base = {"u1": {"surface": "泉", "pronunciation": "イズミ",
+                       "accent_type": 0, "word_type": "PROPER_NOUN",
+                       "priority": 5}}
+        import requests
+        monkeypatch.setattr(requests, "get", lambda url, timeout=10: _R(base))
+        h1 = core.vv_dict_hash("http://x")
+        base["u1"]["priority"] = 9
+        h2 = core.vv_dict_hash("http://x")
+        assert h1 != h2

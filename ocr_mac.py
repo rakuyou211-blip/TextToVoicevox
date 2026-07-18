@@ -10,11 +10,10 @@ import os
 _LANG_MAP = {"ja": ["ja-JP", "en-US"], "en": ["en-US"]}
 
 
-def recognize_files(image_paths, lang="ja", reflow=True, strip_labels=True,
-                    errors=None):
+def recognize_files(image_paths, lang="ja", strip_labels=True, errors=None):
     """画像パスのリストをOCRし {path: text} を返す。読めなかったファイルは ""。
-    reflow=True のとき、Visionが返す行の外接矩形（座標）を使って“折り返しで割れた1文”を
-    確実に連結する（見出し・箇条書き・別段落は連結しない）。
+    Visionが返す行の外接矩形（座標）を使って“折り返しで割れた1文”を確実に連結する
+    （見出し・箇条書き・別段落は連結しない。core.reflow_ocr_lines）。
     strip_labels=True のとき、連結の前に“映像内オーバーレイ・ラベル行”（局ロゴ・番組名・
     日時・カテゴリ）を座標で除去する（core.strip_overlay_labels）。
     errors: list を渡すと一部ファイルの失敗理由（"ファイル名: 理由"）を追記する
@@ -32,7 +31,7 @@ def recognize_files(image_paths, lang="ja", reflow=True, strip_labels=True,
     n_before = len(errors)
     for path in image_paths:
         try:
-            result[path] = _recognize_one(path, languages, reflow=reflow,
+            result[path] = _recognize_one(path, languages,
                                           strip_labels=strip_labels)
         except Exception as e:
             result[path] = ""
@@ -43,10 +42,10 @@ def recognize_files(image_paths, lang="ja", reflow=True, strip_labels=True,
     return result
 
 
-def _recognize_one(path, languages, reflow=True, strip_labels=True):
+def _recognize_one(path, languages, strip_labels=True):
     """1枚の画像をVision OCRにかけ、行テキストを返す。
     strip_labels=True なら折り返し連結の前に“オーバーレイ・ラベル行”を座標で除去
-    （core.strip_overlay_labels）。reflow=True なら各行の外接矩形を使って折り返しを連結
+    （core.strip_overlay_labels）。各行の外接矩形を使って折り返しを連結する
     （core.reflow_ocr_lines）。"""
     import Vision
     from Foundation import NSURL
@@ -101,10 +100,9 @@ def _recognize_one(path, languages, reflow=True, strip_labels=True):
             pass  # ラベル除去に失敗しても素の行で続行（本文は保持される）
         if not lines:
             return ""
-    if reflow:
-        try:
-            import core
-            return core.reflow_ocr_lines(lines)
-        except Exception:
-            pass  # 座標連結に失敗しても素の行結合で続行
+    try:
+        import core
+        return core.reflow_ocr_lines(lines)
+    except Exception:
+        pass  # 座標連結に失敗しても素の行結合で続行
     return "\n".join(l["text"] for l in lines)

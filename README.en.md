@@ -30,7 +30,8 @@ You give it a file. It pulls the text out, cleans it up, and reads it aloud in a
 - **Per-line speaker switching** — write a line like `@ずんだもん:` to change who is speaking, so you can give different voices to different characters or sections.
 - **Save audio** — export **WAV, M4A, or MP3**. Long texts are generated in parallel to save time.
 - **Subtitles** — produce a `.srt` subtitle file timed to the audio.
-- **Pronunciation dictionary** — teach it how to read names or words it gets wrong, once, and it remembers.
+- **Pronunciation dictionary** — teach it how to read names or words it gets wrong, once, and it remembers. Edit entries in place and preview the registered reading.
+- **Per-line synthesis cache** — fix one misread line and regenerate: every unchanged line is reused instantly instead of re-synthesized.
 - **Right-click menu** — preview the clicked line, register a selected word to the dictionary, insert an `@speaker:` tag, or comment out lines with `#`, right where you are.
 - **Open output folder & copy credit** — the completion dialog opens the save location and copies the required `VOICEVOX:speaker` credit line in one click.
 - **Autosave** — the text pane is saved every 60 seconds, so a crash won't eat your edits.

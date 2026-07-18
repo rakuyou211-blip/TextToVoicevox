@@ -25,6 +25,7 @@ REQUIRED_WIDGETS = [
     "unit_cb", "preview_btn", "playall_btn", "resume_btn", "stop_btn",
     "synth_btn", "dict_btn", "rule_cb", "restore_btn", "theme_cb",
     "rule_menu_btn", "sample_btn", "pause_btn", "report_btn", "engine_lbl",
+    "char_cb", "nlines_sb", "gap_sb",
 ]
 
 # 保持必須の tk.*Var / StringVar 群
@@ -347,3 +348,171 @@ def test_save_text_cache_skips_unchanged(app, tmp_path, monkeypatch):
     mtime = p.stat().st_mtime_ns
     app._save_text_cache()   # 無変化 → 書き込まない
     assert p.stat().st_mtime_ns == mtime
+
+
+def _fake_speakers():
+    return [("ずんだもん（ノーマル）", 3, "uz"),
+            ("ずんだもん（あまあま）", 1, "uz"),
+            ("四国めたん（ノーマル）", 2, "um")]
+
+
+def test_two_stage_speaker_selection(app):
+    """話者2段選択: キャラ→スタイルの対応・フルラベル復元・現在話者の取得。"""
+    app.speakers = _fake_speakers()
+    app._build_char_map()
+    assert list(app._char_map) == ["ずんだもん", "四国めたん"]
+    assert app._select_speaker_label("ずんだもん（あまあま）") is True
+    assert app.char_cb.get() == "ずんだもん"
+    assert app.speaker_cb.get() == "あまあま"
+    sp = app._current_speaker()
+    assert sp == ("ずんだもん（あまあま）", 1, "uz")
+    assert app._current_speaker_label() == "ずんだもん（あまあま）"
+    assert app._select_speaker_label("存在しない（ラベル）") is False
+
+
+def test_char_selected_defaults_first_style(app):
+    app.speakers = _fake_speakers()
+    app._build_char_map()
+    app.char_cb.set("四国めたん")
+    app._char_selected()
+    assert app._current_speaker() == ("四国めたん（ノーマル）", 2, "um")
+
+
+def test_settings_dict_survives_empty_numeric_fields(app):
+    """数値欄が空でも設定辞書は既定値へフォールバックして完成する
+    （従来は TclError で保存全体が失敗し、その回の設定変更が全て消えた）。"""
+    # Spinboxを空にした状態＝Tcl変数が空文字 → .get() が TclError を投げる
+    app.tk.globalsetvar(str(app.dpi_var), "")
+    app.tk.globalsetvar(str(app.speed_var), "")
+    d = app._settings_dict()
+    assert d["dpi"] == 300 and d["speed"] == 1.0
+    assert "replace_rules" in d           # 他のキーは普通に保存される
+
+
+def test_settings_dict_preserves_saved_speaker_when_disconnected(app):
+    """エンジン未接続（コンボ空）でも保存済みの話者ラベルを空文字で潰さない。"""
+    app._saved_speaker = "四国めたん（ノーマル）"
+    d = app._settings_dict()
+    assert d["speaker"] == "四国めたん（ノーマル）"
+
+
+def test_save_settings_atomic_and_robust(app, tmp_path, monkeypatch):
+    """設定保存: 数値欄が空でも既存ファイルが0バイトに壊れない。"""
+    import json
+    import main as main_mod
+    p = tmp_path / "settings.json"
+    p.write_text('{"theme": "dark"}', encoding="utf-8")
+    monkeypatch.setattr(main_mod, "SETTINGS_PATH", str(p))
+    app.tk.globalsetvar(str(app.dpi_var), "")   # 空欄相当
+    app._save_settings()
+    data = json.loads(p.read_text(encoding="utf-8"))   # 壊れていない
+    assert data["dpi"] == 300
+
+
+def test_corrupt_settings_backed_up(app, tmp_path, monkeypatch):
+    """壊れた settings.json は .bak に退避される（無言で捨てない）。"""
+    import main as main_mod
+    p = tmp_path / "settings.json"
+    p.write_text("{broken json", encoding="utf-8")
+    monkeypatch.setattr(main_mod, "SETTINGS_PATH", str(p))
+    app._load_settings()
+    assert not p.exists()
+    assert (tmp_path / "settings.json.bak").exists()
+
+
+def test_toggle_memo_excludes_col0_boundary(app):
+    """選択終端が行頭（列0）の行は1文字も選択されていない＝メモ化しない。"""
+    app.text.delete("1.0", "end")
+    app.text.insert("1.0", "一行目\n二行目\n三行目")
+    app.text.tag_add("sel", "1.0", "3.0")   # 3行目は0文字選択
+    app._toggle_memo_lines()
+    assert app.text.get("1.0", "1.end") == "# 一行目"
+    assert app.text.get("2.0", "2.end") == "# 二行目"
+    assert app.text.get("3.0", "3.end") == "三行目"   # 巻き込まれない
+
+
+def test_search_prev_from_start_goes_last(app):
+    """検索で最初に「↑前」を押すと末尾ヒットへ（従来は末尾から2番目に飛んだ）。"""
+    app.text.delete("1.0", "end")
+    app.text.insert("1.0", "犬と犬と犬")
+    app.open_search()
+    app._search_var.set("犬")
+    app._search_refresh()
+    assert len(app._search_hits) == 3
+    app._search_jump(-1)
+    assert app._search_idx == 2           # 3/3件（末尾）
+    app._close_search()
+
+
+def test_unit_dependent_spinbox_state(app):
+    """まとめ方に応じてN行・無音スピンボックスが有効/無効になる。"""
+    keys = list(app._UNITS.keys())
+    app.unit_cb.current(keys.index("each"))
+    app._on_unit_selected()
+    assert str(app.nlines_sb["state"]) == "disabled"
+    assert str(app.gap_sb["state"]) == "disabled"
+    app.unit_cb.current(keys.index("nlines"))
+    app._on_unit_selected()
+    assert str(app.nlines_sb["state"]) == "normal"
+    assert str(app.gap_sb["state"]) == "normal"
+    app.unit_cb.current(keys.index("combine"))
+    app._on_unit_selected()
+    assert str(app.nlines_sb["state"]) == "disabled"
+    assert str(app.gap_sb["state"]) == "normal"
+
+
+def test_kb_synth_guard_during_generation(app):
+    """生成中の Ctrl/Cmd+G は誤キャンセルにならない（何もしない）。"""
+    import threading
+    app._synth_cancel = threading.Event()
+    assert app._kb_synth() == "break"
+    assert not app._synth_cancel.is_set()
+    app._synth_cancel = None
+
+
+def test_extract_restore_button(app):
+    """抽出キャンセル系のボタン復帰（テキスト・コマンドが元に戻る）。"""
+    import threading
+    app._extract_cancel = threading.Event()
+    app.extract_btn.config(text="⛔ キャンセル", command=app.cancel_extract)
+    app._extract_restore_button()
+    assert app._extract_cancel is None
+    assert str(app.extract_btn["text"]) == "▶ テキスト抽出 実行"
+
+
+def test_dispatch_msg_error_does_not_kill_pump(app):
+    """不正メッセージが1つ来てもポンプは死なず、後続メッセージが処理される。"""
+    app.q.put(("progress",))              # 要素不足 → _dispatch_msg内で例外
+    app.q.put(("progress", 1, 2, "続行できてるよ"))
+    app._poll_queue()
+    assert app.status_var.get() == "続行できてるよ"
+
+
+def test_undo_redo_helpers_safe_when_empty(app):
+    """履歴が無い状態のUndo/Redoは落ちずに状態欄で知らせる。"""
+    app.text.delete("1.0", "end")
+    app.text.edit_reset()
+    app._edit_undo()
+    assert "戻せる操作" in app.status_var.get()
+    app._edit_redo()
+    assert "やり直せる操作" in app.status_var.get()
+
+
+def test_mark_bookmark_tags_line(app):
+    """しおりマーカー: 該当行にbookmarkタグが付き、None時は消える。"""
+    app.text.delete("1.0", "end")
+    app.text.insert("1.0", "一行目\n二行目\n三行目")
+    app._bookmark = 2
+    app._mark_bookmark()
+    assert app.text.tag_ranges("bookmark")
+    assert str(app.text.tag_ranges("bookmark")[0]).startswith("2.")
+    app._bookmark = None
+    app._mark_bookmark()
+    assert not app.text.tag_ranges("bookmark")
+
+
+def test_restore_view_clamps(app):
+    """置換後のカーソル復元: 行が消えて無効になった位置でも例外を出さない。"""
+    app.text.delete("1.0", "end")
+    app.text.insert("1.0", "短い")
+    app._restore_view("99.0", 0.5)   # 存在しない行 → クランプされ例外なし

@@ -23,7 +23,7 @@ from xml.etree import ElementTree
 
 # アプリのバージョン（タイトルバー・CLI --version・不具合報告の目印に使う）。
 # リリースごとにここだけ更新する。
-APP_VERSION = "1.15.0"
+APP_VERSION = "1.16.0"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
@@ -725,11 +725,6 @@ def _denoise_has_hiragana(s: str) -> bool:
     return any(0x3041 <= ord(c) <= 0x3096 for c in s)
 
 
-def _denoise_has_jp_script(s: str) -> bool:
-    """『日本語の中身の文字』＝ひらがな・カタカナ・漢字（半角カナ含む）を含むか。"""
-    return any(is_jp_script_char(c) for c in s)
-
-
 def _denoise_jp_ratio(s: str) -> float:
     """行の非空白文字に占める『日本語の中身の文字』（かな・漢字）の割合（0〜1）。
     英字だけの断片や英文ブロックは0付近、日本語ラベル・見出しは高い。
@@ -888,6 +883,7 @@ def clean_text(raw: str, mode: str = "sentence",
         text = strip_paren_ruby(text)
     if normalize:
         text = normalize_ascii(text)
+        text = normalize_halfwidth_kana(text)
         text = expand_readable_chars(text)
         text = normalize_readings(text)
     if remove_urls:
@@ -911,8 +907,14 @@ def clean_text(raw: str, mode: str = "sentence",
             text = smart_join_wrapped(text)          # 既定推奨：折り返しだけ賢く連結
         # split_sentences は改行も区切りとして扱うため、
         # join_wrapped/smart_join がFalseなら元の改行は保たれる
-        sents = split_sentences(text)
-        text = "\n".join(sents)
+        if remove_blank:
+            text = "\n".join(split_sentences(text))
+        else:
+            # 空行を残す指定では、段落（空行区切り）を保ったまま文分割する。
+            # 従来は文分割が空行を全て潰し、「段落ごと」のまとめ方（GUI/CLIの
+            # unit=para）が文ごとモードでは絶対に効かなかった
+            paras = ["\n".join(split_sentences(p)) for p in text.split("\n\n")]
+            text = "\n\n".join(p for p in paras if p)
     else:  # keep
         lines = [ln.rstrip() for ln in text.split("\n")]
         if remove_blank:
@@ -929,7 +931,19 @@ def clean_text(raw: str, mode: str = "sentence",
 # ============================================================
 #  テキスト系ファイル（.txt / .docx / .epub）の読み込み
 # ============================================================
-_AOZORA_RUBY = re.compile(r"《[^》]*》")          # ルビ本体
+# カクヨムの傍点（強調）記法《《…》》。中身は本文なので展開して残す（無条件の《…》
+# 削除より先に処理しないと「《《大事》》」→「》」と本文が消えて閉じ括弧が残る）
+_KAKUYOMU_EMPH = re.compile(r"《《([^《》]*)》》")
+# ｜指定ルビ「｜北海道《ほっかいどう》」: ルビ範囲が明示されるので確実に読みだけ捨てる
+_AOZORA_BAR_RUBY = re.compile(r"｜([^《》｜\n]*)《[^《》]*》")
+# 「漢字」の文字クラス。基本面（一-鿿・拡張A）に加え、互換漢字（﨑=U+FA11等の人名）と
+# 拡張B以降の非BMP漢字（𠮟=U+20B9F等）・繰り返し記号・〇 を含める。
+# 取りこぼすと直後のルビが削除されず、VOICEVOXが読みを重ねて読んでしまう
+_KANJI_CLS = "一-鿿㐀-䶿々〆ヶ〇豈-﫿\U00020000-\U0003134F"
+# 漢字直後の《…》のみルビとして削除。青空文庫仕様ではルビは直前の漢字列か｜指定に
+# 付くため、これで正規のルビは全て拾える。文頭・かな直後の《…》はWeb小説の
+# スキル名・強調（「彼は《ファイアボール》を放った」）なので本文として温存する
+_AOZORA_RUBY = re.compile(f"(?<=[{_KANJI_CLS}])《[^《》]*》")
 _AOZORA_NOTE = re.compile(r"［＃[^］]*］")        # 入力者注（傍点・字下げ指定等）
 _AOZORA_BAR = "｜"                                # ルビ範囲の開始記号
 # 一の字点（ゝゞヽヾ）: 直前のかな1文字の繰り返し。ゞヾは繰り返しを濁音化。
@@ -1003,10 +1017,14 @@ def _strip_aozora_footer(text: str) -> str:
 
 
 def strip_aozora(text: str) -> str:
-    """青空文庫形式の注記類を除去・展開する:
-    ルビ《…》・｜・入力者注［＃…］の除去、踊り字（こゝろ→こころ・つゞく→つづく）と
+    """青空文庫・Web小説の注記類を除去・展開する:
+    カクヨム傍点《《…》》の展開、ルビ（｜指定・漢字直後の《…》のみ）と
+    入力者注［＃…］の除去、踊り字（こゝろ→こころ・つゞく→つづく）と
     くの字点（どき／＼→どきどき・しみ／″＼→しみじみ）の展開、冒頭の記号説明ブロックと
-    末尾の底本情報の除去。通常のテキストにはまず現れない記法のため、常に適用して安全。"""
+    末尾の底本情報の除去。ルビは文脈で限定するため、なろう/カクヨム系の
+    「彼は《ファイアボール》を放った」型の本文《…》は消えない。"""
+    text = _KAKUYOMU_EMPH.sub(r"\1", text)
+    text = _AOZORA_BAR_RUBY.sub(r"\1", text)
     text = _AOZORA_RUBY.sub("", text)
     text = _AOZORA_NOTE.sub("", text)
     text = text.replace(_AOZORA_BAR, "")
@@ -1017,8 +1035,9 @@ def strip_aozora(text: str) -> str:
 
 
 # 「漢字(かんじ)」型ルビ: 漢字の直後の丸括弧内が すべて かな のときだけ除去する
+# （漢字クラスは《》ルビと共通。互換漢字・拡張B以降も対象）
 _PAREN_RUBY = re.compile(
-    r"([一-鿿㐀-䶿々〆ヶ]+)[（(]([ぁ-ゖァ-ヶーゝゞヽヾ]+)[)）]")
+    f"([{_KANJI_CLS}]+)[（(]([ぁ-ゖァ-ヶーゝゞヽヾ]+)[)）]")
 
 
 def strip_paren_ruby(text: str) -> str:
@@ -1059,6 +1078,11 @@ _READABLE_SYM_MAP = {ord(ch): yomi for ch, yomi in {
     "㎖": "ミリリットル", "㍑": "リットル",
     "㎠": "平方センチメートル", "㎡": "平方メートル", "㎢": "平方キロメートル",
     "㎥": "立方メートル", "℃": "度", "№": "ナンバー", "〒": "郵便番号",
+    # 組文字の単位・元号（OCR結果・古い文書に現れ、VOICEVOXは読み飛ばす）
+    "㌔": "キロ", "㌢": "センチ", "㍉": "ミリ", "㌘": "グラム",
+    "㌧": "トン", "㌫": "パーセント", "㌍": "カロリー", "㌦": "ドル",
+    "㍗": "ワット", "㍾": "明治", "㍽": "大正", "㍼": "昭和", "㍻": "平成",
+    "㋿": "令和",
 }.items()}
 
 
@@ -1083,13 +1107,31 @@ def expand_readable_chars(text: str) -> str:
 _THOUSANDS_RE = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
 # 中黒の連続（・・・）。三点リーダの代用表記として使われるが個別に読まれ得るため統一
 _NAKAGURO_RUN_RE = re.compile(r"・{3,}")
+# 数値レンジの波ダッシュ「10〜20」。VOICEVOXは〜を読まないため「10 20」と意味不明になる。
+# 数字両挟みに限定するので「よろしく〜」等の語尾の装飾には触れない。
+# 半角~も対象（全角～は normalize_ascii で ~ に変換された後にここへ来るため）
+_RANGE_RE = re.compile(r"(?<=\d)\s*[〜~](?=\d)")
 
 
 def normalize_readings(text: str) -> str:
     """読み上げで誤読になりやすい表記を整える
-    （例: 1,234円→1234円・待って・・・→待って…）。normalize=True の経路で適用。"""
+    （例: 1,234円→1234円・待って・・・→待って…・10〜20人→10から20人）。
+    normalize=True の経路で適用。"""
     text = _THOUSANDS_RE.sub("", text)
+    text = _RANGE_RE.sub("から", text)
     return _NAKAGURO_RUN_RE.sub("…", text)
+
+
+# 半角カナ（｡｢｣､･ｦ-ﾟ）。NFKCで全角へ正規化する（ｶ+ﾞ→ガ の濁点合成も一括）。
+# 半角のままだと (1)濁点分離の誤読 (2)読み方辞書の全角surfaceと不一致
+# (3)半角句点｡が文分割に効かない、の3つの実害がある。
+_HALFKANA_RE = re.compile(r"[｡-ﾟ]+")
+
+
+def normalize_halfwidth_kana(text: str) -> str:
+    """半角カナ・半角句読点を全角に正規化する（normalize=True の経路で適用）。"""
+    return _HALFKANA_RE.sub(lambda m: unicodedata.normalize("NFKC", m.group(0)),
+                            text)
 
 
 # URL・メールアドレス。読み上げると1文字ずつ読まれて聞くに堪えないため、
@@ -1168,27 +1210,62 @@ def fmt_duration(sec: float) -> str:
 
 
 def read_txt(path: str) -> str:
-    """テキストファイルを読む。UTF-8 → CP932(Shift_JIS) → UTF-16 の順で試す。"""
+    """テキストファイルを読む。UTF-8で読めればそのまま（誤判定が実質ないため高速パス）。
+    ダメなら CP932 / EUC-JP / UTF-16 を試し、成功した候補を「日本語らしさ」
+    （かな・漢字の比率）でスコアリングして最良を採用する。従来の早い者勝ちだと
+    EUC-JP のファイル（古い青空文庫系配布等）が CP932 で“デコード成功”してしまい、
+    文字化けのまま読み上げられていた。同点は従来の優先順（cp932が先）で後方互換。"""
     with open(path, "rb") as f:
         data = f.read()
-    for enc in ("utf-8-sig", "cp932", "utf-16"):
+    try:
+        return data.decode("utf-8-sig")
+    except (UnicodeDecodeError, UnicodeError):
+        pass
+    best = None
+    best_score = -1.0
+    for enc in ("cp932", "euc_jp", "utf-16"):
         try:
-            return data.decode(enc)
+            t = enc, data.decode(enc)
         except (UnicodeDecodeError, UnicodeError):
             continue
+        score = sum(1 for c in t[1] if is_jp_script_char(c)) / max(len(t[1]), 1)
+        if score > best_score:
+            best, best_score = t[1], score
+    if best is not None:
+        return best
     return data.decode("utf-8", errors="replace")
 
 
 _DOCX_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_DOCX_MC_FALLBACK = ("{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+                     "Fallback")
 
 
 def extract_docx(path: str) -> str:
-    """Word文書(.docx)から段落テキストを抽出する（追加ライブラリ不要）。"""
+    """Word文書(.docx)から段落テキストを抽出する（追加ライブラリ不要）。
+    テキストボックス（mc:AlternateContent）は Choice/Fallback の両分岐に同一内容が
+    入り、さらに内側の w:p が独立段落としても列挙されるため、対策しないと同じ文言が
+    最大4回読み上げられる。Fallback 分岐を捨て、他の w:p の子孫である w:p は
+    スキップする（内側の文言は外側段落の p.iter() が1回だけ拾う）。"""
     with zipfile.ZipFile(path) as z:
         xml = z.read("word/document.xml")
     root = ElementTree.fromstring(xml)
+    # mc:Fallback（mc:Choice と同一内容の互換用コピー）をツリーから除去
+    parent_of = {c: p for p in root.iter() for c in p}
+    for fb in list(root.iter(_DOCX_MC_FALLBACK)):
+        parent = parent_of.get(fb)
+        if parent is not None:
+            parent.remove(fb)
+    # 入れ子の w:p（テキストボックス内の段落）を特定する
+    nested = set()
+    for p in root.iter(_DOCX_NS + "p"):
+        for child in p.iter(_DOCX_NS + "p"):
+            if child is not p:
+                nested.add(id(child))
     paras = []
     for p in root.iter(_DOCX_NS + "p"):
+        if id(p) in nested:
+            continue
         parts = []
         for node in p.iter():
             if node.tag == _DOCX_NS + "t" and node.text:
@@ -1266,24 +1343,41 @@ def extract_epub(path: str) -> str:
         opf_dir = os.path.dirname(opf_path)
         opf = ElementTree.fromstring(z.read(opf_path))
         items = {}
+        nav_ids = set()   # 目次（HTMLナビゲーション）文書。本文として読まない
         for it in opf.iter(ns_o + "item"):
             items[it.get("id")] = it.get("href")
-        chapters = []
-        missing = 0
-        for ref in opf.iter(ns_o + "itemref"):
-            href = items.get(ref.get("idref"))
-            if not href:
-                continue
-            entry = name_map.get(_epub_norm((opf_dir + "/" + href) if opf_dir else href))
-            if entry is None:
-                missing += 1  # 見つからない章は数える（無言で捨てない）
-                continue
-            html = z.read(entry).decode("utf-8", errors="replace")
-            p = _HTMLTextExtractor()
-            p.feed(html)
-            t = p.text()
-            if t:
-                chapters.append(t)
+            if "nav" in (it.get("properties") or "").split():
+                nav_ids.add(it.get("id"))
+
+        def _read_chapters(skip_aux):
+            """spine順に本文を集める。skip_aux=True で目次・linear=no の付録を除く。"""
+            chapters = []
+            missing = 0
+            for ref in opf.iter(ns_o + "itemref"):
+                idref = ref.get("idref")
+                if skip_aux and (idref in nav_ids
+                                 or (ref.get("linear") or "yes").lower() == "no"):
+                    continue
+                href = items.get(idref)
+                if not href:
+                    continue
+                entry = name_map.get(
+                    _epub_norm((opf_dir + "/" + href) if opf_dir else href))
+                if entry is None:
+                    missing += 1  # 見つからない章は数える（無言で捨てない）
+                    continue
+                html = z.read(entry).decode("utf-8", errors="replace")
+                p = _HTMLTextExtractor()
+                p.feed(html)
+                t = p.text()
+                if t:
+                    chapters.append(t)
+            return chapters, missing
+
+        chapters, missing = _read_chapters(skip_aux=True)
+        if not chapters:
+            # 全章が nav/linear=no 扱いになった＝ラベル誤りのEPUB。除外なしで読み直す
+            chapters, missing = _read_chapters(skip_aux=False)
     if missing and not chapters:
         # 全章取りこぼした＝ほぼ確実に構造の読み違い。呼び出し側が気づけるよう例外に。
         raise RuntimeError(f"EPUBの本文を取り出せませんでした（{missing}章が見つからず）。")
@@ -1317,7 +1411,11 @@ def preprocess_image(img, enable: bool = True, max_side: int = None):
         rgba = img.convert("RGBA")
         bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
         img = Image.alpha_composite(bg, rgba).convert("RGB")
-    elif img.mode not in ("RGB", "L", "P", "1"):
+    elif img.mode in ("P", "1"):
+        # パレット/2値のままだと Pillow の resize が resample 指定を無視して
+        # NEAREST になり、拡大縮小がブロック状に劣化してOCR精度を下げる
+        img = img.convert("RGB")
+    elif img.mode not in ("RGB", "L"):
         img = img.convert("RGB")   # CMYK/YCbCr等をPNG保存可能なモードへ
     if enable and not IS_MAC and img.mode != "L":
         img = img.convert("L")
@@ -1537,9 +1635,15 @@ def _render_pdf_page(path, page_index, dpi):
 # ============================================================
 #  ファイルからの抽出（progress_cb(done, total, msg) で進捗通知）
 # ============================================================
+# PDFテキスト層がこれ未満（空白除く文字数）なら「透かし・ページ番号だけ」の疑いが
+# 濃いのでOCRも実行し、明確に良い方を採用する（スキャンPDF+透かし層の本文欠落対策）
+_PDF_LAYER_MIN_CHARS = 20
+
+
 def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                   lang="ja", progress_cb=None, strip_labels=True,
-                  fix_confusables=False, report=None):
+                  fix_confusables=False, report=None, denoise=False,
+                  cancel_event=None):
     """
     複数ファイル（PDF/画像/テキスト/Word/EPUB）からテキストを抽出して結合文字列を返す。
     pdf_mode: "auto"（テキスト層→無ければOCR） / "ocr"（常にOCR）
@@ -1547,8 +1651,14 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                   denoise と同じ値を渡す想定（--no-denoise / GUIチェックOFFでラベル除去もしない）。
     fix_confusables: True で OCR由来のテキストにだけ fix_ocr_confusables（同形文字の
                      文脈補正）を適用する。txt/docx/EPUB・PDFテキスト層には適用しない。
+    denoise: True で OCR由来のテキストにだけ denoise_capture（映像内オーバーレイ文字の
+             除去）を適用する。txt/docx/EPUB・PDFテキスト層には適用しない（小説txt中の
+             英文行・年号だけの行が誤って消える事故の防止。v1.16.0でOCR限定に変更）。
     report: dict を渡すと整形レポート用の情報を追記する。
-            "confusables": [(補正前の行, 補正後の行), ...]（fix_confusables の変更箇所）。
+            "confusables": [(補正前の行, 補正後の行), ...]（fix_confusables の変更箇所）
+            "removed": [行, ...]（denoise が除去した行）
+    cancel_event: threading.Event を渡すと、ファイル/ページ境界とOCRバッチ前に
+                  確認して中断できる。中断時はそれまでの部分結果と警告を返す。
     戻り値: (text, warnings:list)
     """
     from PIL import Image
@@ -1563,6 +1673,8 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
     try:
         total = len(paths)
         for idx, path in enumerate(paths):
+            if cancel_event is not None and cancel_event.is_set():
+                break
             if progress_cb:
                 progress_cb(idx, total, f"解析中: {os.path.basename(path)}")
             ext = os.path.splitext(path)[1].lower()
@@ -1571,15 +1683,26 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                     doc = pdfium.PdfDocument(path)
                     npages = len(doc)
                     for pi in range(npages):
+                        if cancel_event is not None and cancel_event.is_set():
+                            break
                         key = f"{path}#p{pi+1}"
                         order.append(key)
                         page = doc[pi]
                         use_ocr = (pdf_mode == "ocr")
+                        layer_backed = False  # 短い層あり＝OCRと比較して良い方を採用
                         if not use_ocr:
                             tp = page.get_textpage()
                             layer = tp.get_text_range()
-                            if len(layer.strip()) >= 1:
+                            n_chars = len("".join(layer.split()))
+                            if n_chars >= _PDF_LAYER_MIN_CHARS:
                                 text_parts[key] = layer
+                            elif n_chars >= 1:
+                                # 透かし（Scanned by …）やページ番号だけの層に
+                                # スキャン本文が隠れる典型ケース。層を仮置きしつつ
+                                # OCRも実行し、明確に良い方だけ採用する
+                                text_parts[key] = layer
+                                use_ocr = True
+                                layer_backed = True
                             else:
                                 use_ocr = True
                         if use_ocr:
@@ -1594,7 +1717,7 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                             pil.save(png)
                             # (path, ページ番号) を持たせ、低品質時は再レンダリングして
                             # リトライできるようにする（元画像はディスクに無いため）
-                            ocr_jobs.append((key, png, (path, pi)))
+                            ocr_jobs.append((key, png, (path, pi), layer_backed))
                         if progress_cb:
                             progress_cb(idx, total,
                                         f"解析中: {os.path.basename(path)} ({pi+1}/{npages}p)")
@@ -1606,7 +1729,7 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                     img = preprocess_image(img, enable=preprocess)
                     png = os.path.join(tmpdir, f"img_{idx}.png")
                     img.save(png)
-                    ocr_jobs.append((key, png, path))
+                    ocr_jobs.append((key, png, path, False))
                 elif ext in TXT_EXT:
                     order.append(path)
                     text_parts[path] = strip_aozora(read_txt(path))
@@ -1621,11 +1744,11 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
             except Exception as e:
                 warnings.append(f"読み込み失敗 {os.path.basename(path)}: {e}")
 
-        # まとめてOCR
-        if ocr_jobs:
+        # まとめてOCR（キャンセル済みならスキップして部分結果へ）
+        if ocr_jobs and not (cancel_event is not None and cancel_event.is_set()):
             if progress_cb:
                 progress_cb(total - 1, total, f"OCR実行中... ({len(ocr_jobs)}枚)")
-            png_paths = [p for _, p, _o in ocr_jobs]
+            png_paths = [p for _, p, _o, _lb in ocr_jobs]
             ocr_errors = []
             ocr_failed = False
             try:
@@ -1644,12 +1767,14 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
             if len(ocr_errors) > 5:
                 warnings.append(f"…ほか{len(ocr_errors) - 5}件のOCR失敗")
             empty = 0
-            for key, png, orig in ocr_jobs:
+            for key, png, orig, layer_backed in ocr_jobs:
                 t = ocr_result.get(png, "")
                 # 低品質（写真の影・ムラ・横倒し等）なら前処理を変えて再OCRし、
                 # 良い方を採用。単体画像は元ファイルから、PDFページは再レンダリングで
-                # “未加工の元画像”を作ってリトライする。
-                if orig and _ocr_needs_retry(t, lang=lang) and IS_MAC:
+                # “未加工の元画像”を作ってリトライする。キャンセル後はリトライしない。
+                if (orig and _ocr_needs_retry(t, lang=lang) and IS_MAC
+                        and not (cancel_event is not None
+                                 and cancel_event.is_set())):
                     name = (os.path.basename(orig) if isinstance(orig, str)
                             else f"{os.path.basename(orig[0])} {orig[1]+1}p")
                     if progress_cb:
@@ -1661,15 +1786,34 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                                               lang=lang, strip_labels=strip_labels)
                     except Exception:
                         pass
+                conf_pairs = []
                 if fix_confusables and t:
                     t2 = fix_ocr_confusables(t)
-                    if report is not None and t2 != t:
+                    if t2 != t:
                         # 補正は文字の1:1置換のみで行の対応が崩れないため、
                         # 行単位の before/after を整形レポートに記録できる
-                        for b, a in zip(t.split("\n"), t2.split("\n")):
-                            if b != a:
-                                report.setdefault("confusables", []).append((b, a))
+                        conf_pairs = [(b, a) for b, a
+                                      in zip(t.split("\n"), t2.split("\n"))
+                                      if b != a]
                     t = t2
+                removed = []
+                if denoise and t:
+                    # 映像内オーバーレイの除去はOCR由来テキスト限定（v1.16.0〜）。
+                    # 除去行は整形レポートに記録し、誤削除に気づけるようにする
+                    removed = denoise_removed_lines(t)
+                    t = denoise_capture(t)
+                if layer_backed:
+                    # 短いテキスト層（透かし・ページ番号疑い）とOCRを比較し、
+                    # OCRが明確に良い（1.2倍超）ときだけ差し替える。同等なら層を信じる。
+                    # OCR不採用ならレポートにも載せない（最終テキストに存在しない
+                    # 行を「消えた行」として貼り戻させないため、記録は採用確定後）
+                    if not _ocr_retry_better(text_parts.get(key, ""), t):
+                        continue
+                if report is not None:
+                    if conf_pairs:
+                        report.setdefault("confusables", []).extend(conf_pairs)
+                    if removed:
+                        report.setdefault("removed", []).extend(removed)
                 text_parts[key] = t
                 if not t.strip():
                     empty += 1
@@ -1677,6 +1821,9 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                 warnings.append(
                     f"{empty}枚/ページで文字を検出できませんでした"
                     "（白紙、または画質不足の可能性）")
+
+        if cancel_event is not None and cancel_event.is_set():
+            warnings.append("抽出をキャンセルしました（そこまでの結果を表示しています）")
 
         # 出力順に結合（ファイル/ページ境界は空行）
         chunks = []
@@ -1839,18 +1986,22 @@ def vv_speaker_sample(base_url, speaker_uuid, style_id, timeout=15):
     raise RuntimeError("この話者のサンプル音声が見つかりませんでした。")
 
 
+def _format_kana(kana: str) -> str:
+    """audio_query の kana（AquesTalk風記法）からアクセント記号・区切りを除いて
+    人が読みやすい形にする。"""
+    return (kana.replace("'", "").replace("_", "")
+                .replace("/", " ").replace("？", "?"))
+
+
 def vv_reading(base_url, text, speaker_id, timeout=15):
     """VOICEVOXがこのテキストを“どう読むか”（カナ）を返す（誤読チェック用）。
-    audio_query の kana（AquesTalk風記法）からアクセント記号・区切りを除いて
-    人が読みやすい形にする。誤読を見つけたら「読み方辞書...」で直せる。"""
+    誤読を見つけたら「読み方辞書...」で直せる。"""
     import requests
     q = requests.post(base_url + "/audio_query",
                       params={"text": text, "speaker": speaker_id},
                       timeout=timeout)
     q.raise_for_status()
-    kana = q.json().get("kana", "")
-    return (kana.replace("'", "").replace("_", "")
-                .replace("/", " ").replace("？", "?"))
+    return _format_kana(q.json().get("kana", ""))
 
 
 def estimate_read_seconds(text: str, speed: float = 1.0) -> float:
@@ -1860,13 +2011,19 @@ def estimate_read_seconds(text: str, speed: float = 1.0) -> float:
     return n / (320.0 / 60.0) / max(float(speed), 0.1)
 
 
+def is_memo_line(line: str) -> bool:
+    """行頭が # / ＃ の「メモ行」（読み上げ・音声生成・vvproj出力の対象外）か。
+    GUI・CLI・時間概算の全経路がこの1関数で判定を共有する。"""
+    return str(line).strip().startswith(("#", "＃"))
+
+
 def speakable_text(text: str) -> str:
     """実際に読み上げ対象になる部分だけを返す（＃メモ行を除き、行頭の@話者タグを剥がす）。
     読み上げ時間の概算（estimate_read_seconds）が台本のメモやタグで水増しされないための前処理。"""
     out = []
     for ln in str(text).split("\n"):
         s = ln.strip()
-        if not s or s.startswith(("#", "＃")):
+        if not s or is_memo_line(s):
             continue
         name, rest = parse_speaker_tag(s)
         s = rest.strip() if name is not None else s
@@ -1886,15 +2043,17 @@ def voicevox_credit(speaker_labels) -> str:
     return "、".join(f"VOICEVOX:{n}" for n in names)
 
 
-def vv_synthesize_one(base_url, text, speaker_id, speed=1.0,
-                      pitch=0.0, intonation=1.0, volume=1.0, timeout=60):
-    """1文を合成してWAVバイト列を返す。
+def vv_synthesize_with_kana(base_url, text, speaker_id, speed=1.0,
+                            pitch=0.0, intonation=1.0, volume=1.0, timeout=60):
+    """1文を合成し (WAVバイト列, 読みカナ) を返す。audio_query は1回だけ実行し、
+    その kana を読み確認（vv_reading 相当）に再利用する（試聴の往復削減）。
     speed=話速(0.5〜2) / pitch=音高(-0.15〜0.15) / intonation=抑揚(0〜2) / volume=音量(0〜2)"""
     import requests
     q = requests.post(base_url + "/audio_query",
                       params={"text": text, "speaker": speaker_id}, timeout=timeout)
     q.raise_for_status()
     query = q.json()
+    reading = _format_kana(query.get("kana", ""))
     if speed and speed != 1.0:
         query["speedScale"] = float(speed)
     if pitch:
@@ -1909,7 +2068,158 @@ def vv_synthesize_one(base_url, text, speaker_id, speed=1.0,
                       headers={"Content-Type": "application/json"},
                       timeout=timeout)
     s.raise_for_status()
-    return s.content
+    return s.content, reading
+
+
+def vv_synthesize_one(base_url, text, speaker_id, speed=1.0,
+                      pitch=0.0, intonation=1.0, volume=1.0, timeout=60):
+    """1文を合成してWAVバイト列を返す（vv_synthesize_with_kana の音声のみ版）。"""
+    return vv_synthesize_with_kana(base_url, text, speaker_id, speed=speed,
+                                   pitch=pitch, intonation=intonation,
+                                   volume=volume, timeout=timeout)[0]
+
+
+# ============================================================
+#  行単位の合成キャッシュ（修正した行だけ再合成するための仕組み）
+# ============================================================
+# 同じ (テキスト, スタイル, 話速/音高/抑揚/音量, エンジン版, 辞書内容) の合成結果を
+# voice_cache/ にWAVで保存し、再生成・試聴・連続再生で再利用する。辞書やエンジンを
+# 変えるとキーが変わるため明示的な無効化は不要（古いファイルはLRUで消える）。
+SYNTH_CACHE_DIR = os.path.join(APP_DIR, "voice_cache")
+_SYNTH_CACHE_MAX_BYTES = 500 * 1024 * 1024   # 上限500MB（超えたら古い順に削除）
+
+
+def synth_cache_key(text, style_id, speed, pitch, intonation, volume,
+                    engine_ver="", dict_hash=""):
+    """行合成キャッシュのキー（sha1）。読みに影響する全入力を含める。"""
+    import hashlib
+    payload = "\x1f".join([str(text), str(style_id),
+                           f"{float(speed):.3f}", f"{float(pitch):.3f}",
+                           f"{float(intonation):.3f}", f"{float(volume):.3f}",
+                           str(engine_ver), str(dict_hash)])
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def vv_dict_hash(base_url, timeout=10):
+    """ユーザー辞書全体の内容ハッシュ（合成キャッシュのキー用）。
+    読みに影響し得る全フィールド（表記・読み・アクセント・品詞・優先度）を含める
+    （VOICEVOXエディタ側で「優先度」だけ変えた場合もキャッシュが正しく切り替わる）。
+    取得に失敗したら毎回変わる一意値を返し「キャッシュ全ミス」の安全側に倒す。"""
+    import hashlib
+    import requests
+    try:
+        r = requests.get(base_url + "/user_dict", timeout=timeout)
+        r.raise_for_status()
+        parts = []
+        for word_uuid, w in sorted(r.json().items()):
+            parts.append("\x1e".join(
+                str(w.get(k, "")) for k in ("surface", "pronunciation",
+                                            "accent_type", "word_type",
+                                            "priority")))
+        return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()
+    except Exception:
+        return uuid.uuid4().hex
+
+
+def synth_cache_get(key):
+    """キャッシュ済みWAVを返す（無ければ None）。ヒット時は mtime を更新して
+    LRUの新しい側へ移す。中身がWAVでない残骸（電源断等）は削除してミス扱い。"""
+    path = os.path.join(SYNTH_CACHE_DIR, key + ".wav")
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        if len(data) <= 44 or data[:4] != b"RIFF":
+            os.remove(path)   # 壊れたエントリは自己回復（合成し直される）
+            return None
+        os.utime(path, None)
+        return data
+    except OSError:
+        return None
+
+
+def synth_cache_put(key, wav_bytes):
+    """WAVをキャッシュへ保存し、総量が上限を超えたら古い順に削除する。
+    一時ファイル名は一意にする（同じ行を3並列で合成した場合の書き込み衝突防止）。
+    失敗は無視（キャッシュは高速化のためだけの層で、無くても結果は同じ）。"""
+    if not wav_bytes or wav_bytes[:4] != b"RIFF":
+        return   # WAVでないものはキャッシュ汚染になるだけなので保存しない
+    tmp = None
+    try:
+        os.makedirs(SYNTH_CACHE_DIR, exist_ok=True)
+        path = os.path.join(SYNTH_CACHE_DIR, key + ".wav")
+        fd, tmp = tempfile.mkstemp(dir=SYNTH_CACHE_DIR, suffix=".tmp")
+        with os.fdopen(fd, "wb") as f:
+            f.write(wav_bytes)
+        os.replace(tmp, path)
+        tmp = None
+        _synth_cache_evict()
+    except OSError:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def _synth_cache_evict(max_bytes=None):
+    """キャッシュ総量が上限を超えていたら mtime の古い順に削除する。
+    クラッシュで残った古い .tmp も掃除する（1日以上前のもの）。"""
+    if max_bytes is None:
+        max_bytes = _SYNTH_CACHE_MAX_BYTES
+    try:
+        entries = []
+        total = 0
+        now = time.time()
+        for name in os.listdir(SYNTH_CACHE_DIR):
+            p = os.path.join(SYNTH_CACHE_DIR, name)
+            if name.endswith(".tmp"):
+                try:
+                    if now - os.stat(p).st_mtime > 86400:
+                        os.remove(p)
+                except OSError:
+                    pass
+                continue
+            if not name.endswith(".wav"):
+                continue
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            entries.append((st.st_mtime, st.st_size, p))
+            total += st.st_size
+        if total <= max_bytes:
+            return
+        for _mtime, size, p in sorted(entries):
+            try:
+                os.remove(p)
+                total -= size
+            except OSError:
+                pass
+            if total <= max_bytes:
+                return
+    except OSError:
+        pass
+
+
+def vv_synthesize_cached(base_url, text, speaker_id, speed=1.0, pitch=0.0,
+                         intonation=1.0, volume=1.0, timeout=60,
+                         engine_ver="", dict_hash=""):
+    """vv_synthesize_one のキャッシュ付き版。engine_ver / dict_hash が空のときは
+    キーの精度が担保できないためキャッシュせず素通しする。"""
+    if not engine_ver or not dict_hash:
+        return vv_synthesize_one(base_url, text, speaker_id, speed=speed,
+                                 pitch=pitch, intonation=intonation,
+                                 volume=volume, timeout=timeout)
+    key = synth_cache_key(text, speaker_id, speed, pitch, intonation, volume,
+                          engine_ver, dict_hash)
+    wav = synth_cache_get(key)
+    if wav is not None:
+        return wav
+    wav = vv_synthesize_one(base_url, text, speaker_id, speed=speed,
+                            pitch=pitch, intonation=intonation,
+                            volume=volume, timeout=timeout)
+    synth_cache_put(key, wav)
+    return wav
 
 
 def concat_wavs(wav_bytes_list, gap_sec=0.4):
@@ -2061,6 +2371,18 @@ def vv_dict_add(base_url, surface, pronunciation, accent_type=0, timeout=10):
     return r.json()
 
 
+def vv_dict_update(base_url, word_uuid, surface, pronunciation,
+                   accent_type=0, timeout=10):
+    """登録済み単語を更新する（読みの修正。削除→再追加が不要になる）。"""
+    import requests
+    r = requests.put(base_url + f"/user_dict_word/{word_uuid}",
+                     params={"surface": surface,
+                             "pronunciation": pronunciation,
+                             "accent_type": int(accent_type)},
+                     timeout=timeout)
+    r.raise_for_status()
+
+
 def vv_dict_delete(base_url, word_uuid, timeout=10):
     """登録済み単語を削除する。"""
     import requests
@@ -2096,6 +2418,24 @@ def detect_chapters(lines: list) -> list:
     （呼び出し側が「全体で1章」等にフォールバックする）。"""
     return [(str(ln).strip(), i) for i, ln in enumerate(lines)
             if is_chapter_heading(ln)]
+
+
+def fallback_chapters(starts, lines, interval_sec=600):
+    """章見出しが無い本のための自動チャプター（約 interval_sec ごとに行頭で区切る）。
+    starts: 各行の開始秒（昇順） / lines: 各行のテキスト。
+    戻り値: [(タイトル, 開始秒), ...]。先頭は必ず ("冒頭", 0.0)。
+    タイトルは区切り行の本文冒頭12字（Apple Books等の章一覧で中身の見当がつく）。
+    interval に届かない短い本は先頭のみ＝実質チャプターなしと同じ。"""
+    if not starts:
+        return []
+    chapters = [("冒頭", 0.0)]
+    next_mark = float(interval_sec)
+    for t, ln in zip(starts, lines):
+        if t >= next_mark:
+            s = str(ln).strip()
+            chapters.append((s[:12] + ("…" if len(s) > 12 else ""), t))
+            next_mark = t + interval_sec
+    return chapters
 
 
 def _srt_ts(sec: float) -> str:

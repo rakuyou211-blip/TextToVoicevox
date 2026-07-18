@@ -9,7 +9,14 @@ __pycache__/
 
 # ユーザー個別の設定（初回起動時に自動生成される）
 settings.json
+settings.json.bak
 last_text.txt
+
+# 行単位の合成キャッシュ（自動生成・上限500MBでLRU削除）
+voice_cache/
+
+# pytest のキャッシュ
+.pytest_cache/
 
 # OS が生成するファイル
 .DS_Store
