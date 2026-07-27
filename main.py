@@ -66,7 +66,13 @@ def _portrait_key(name):
     return "".join(c for c in s if c not in _PORTRAIT_BAD and not c.isspace())
 
 # ドラッグ＆ドロップ対応（tkinterdnd2 が無くてもアプリは動く）
+# TTV_NO_DND=1 のときは最初から読み込まない: tkinterdnd2 はPythonモジュールが
+# import できてもネイティブ部品(tkdnd)の読み込みが Tk 初期化中に失敗する環境が
+# あり（ARM64版Windows・壊れたwheel等）、その場合に末尾の起動ガードがこの変数を
+# 立てて D&D 無しで自動再起動してくる。
 try:
+    if os.environ.get("TTV_NO_DND"):
+        raise ImportError("D&D disabled by TTV_NO_DND")
     from tkinterdnd2 import TkinterDnD, DND_FILES
     _HAS_DND = True
     _Base = TkinterDnD.Tk
@@ -4006,5 +4012,47 @@ class App(_Base):
         self._update_step_highlight()
 
 
+def _report_startup_error(err_text):
+    """起動失敗をユーザーに伝える。起動.bat は pythonw（コンソール無し）で起動する
+    ため、ここで拾わないと例外は完全に無言＝「ダブルクリックしても何も起きない」に
+    見える。ログに残した上でダイアログでも知らせる。Tk 自体が壊れているときは
+    Windows標準の MessageBox に退避する。"""
+    log_path = os.path.join(APP_DIR, "起動エラー.log")
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(err_text)
+    except Exception:
+        pass
+    msg = ("起動に失敗しました。\n\n"
+           "詳しい内容を「起動エラー.log」に保存しました。\n"
+           "setup.bat（Macは setup.command）をもう一度実行すると直ることがあります。\n"
+           "直らないときは「デバッグ起動」で画面に出るエラーを確認してください。")
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("テキスト抽出 → VOICEVOX", msg)
+        root.destroy()
+    except Exception:
+        if os.name == "nt":
+            try:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(
+                    None, msg, "テキスト抽出 → VOICEVOX", 0x10)
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
-    App().mainloop()
+    try:
+        App().mainloop()
+    except Exception as e:
+        # tkdnd（D&Dのネイティブ部品）だけが壊れている環境なら、D&D無効で
+        # 一度だけ自動でやり直す。D&D は無くても本体は動く設計（上の import 参照）。
+        if _HAS_DND and "tkdnd" in str(e).lower() and not os.environ.get("TTV_NO_DND"):
+            import sys
+            import subprocess
+            subprocess.Popen([sys.executable] + sys.argv,
+                             env=dict(os.environ, TTV_NO_DND="1"), cwd=APP_DIR)
+            raise SystemExit(0)
+        _report_startup_error(traceback.format_exc())
+        raise

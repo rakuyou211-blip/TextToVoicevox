@@ -47,7 +47,7 @@ You give it a file. It pulls the text out, cleans it up, and reads it aloud in a
 - **On-screen label removal** — for news image OCR it also removes short Japanese labels that plain text can't tell from the article (station logo, program name, timestamp, category — e.g. "MBSニュース", "国内"), using each line's position and font size to judge that it isn't body text. macOS only, sharing the same on/off as noise removal above; conservative (it never drops article body).
 - **Command line** — there's a CLI too, if you'd rather script it than click.
 
-The current release is **v1.19.0**. Recent versions brought two-step speaker selection (character → style), a per-line synthesis cache so regenerating a long book after fixing one misread line is nearly instant, streaming output that keeps memory flat even for 10-hour audiobooks, cancellable extraction/synthesis with partial-result saving, and atomic settings saves that survive crashes. The character art still isn't bundled with the app; you drop your own PNGs into `assets/立ち絵/` (see [`assets/立ち絵/README.md`](assets/立ち絵/README.md)), and everything works the same if you don't. The full history is in [CHANGELOG.md](CHANGELOG.md).
+The current release is **v1.19.1**. Recent versions brought two-step speaker selection (character → style), a per-line synthesis cache so regenerating a long book after fixing one misread line is nearly instant, streaming output that keeps memory flat even for 10-hour audiobooks, cancellable extraction/synthesis with partial-result saving, and atomic settings saves that survive crashes. The character art still isn't bundled with the app; you drop your own PNGs into `assets/立ち絵/` (see [`assets/立ち絵/README.md`](assets/立ち絵/README.md)), and everything works the same if you don't. The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -75,16 +75,12 @@ This app is a Python program. If you don't have Python yet, install it first (**
 
 **③ Install this app**
 Download the release zip (below) and unzip it somewhere. Then:
-- **Windows:** double-click `setup.bat`
-- **macOS:** run `setup.command`
-
-The setup script creates a local virtual environment and installs the dependencies for you. After that first setup, everything runs offline.
-
-Once setup finishes, launch the app itself:
 - **Windows:** double-click `起動.bat`
 - **macOS:** run `起動.command`
 
-If it won't start, run `デバッグ起動.bat` / `デバッグ起動.command` instead — it opens a console window so you can read the actual error.
+That's it. The first run sets everything up automatically (it creates a local virtual environment and installs the dependencies — internet is needed only for that first run). After that, everything runs offline. You normally never touch `setup.bat` / `setup.command` — those are the setup scripts the launcher calls for you, kept around in case you ever want to reinstall the parts by hand.
+
+If it won't start, run `デバッグ起動.bat` / `デバッグ起動.command` instead — it opens a console window so you can read the actual error. A failed start also leaves a `起動エラー.log` file in the folder.
 
 > Heads up: right now this is distributed as a **script zip**, not a ready-made `.exe` or `.app`. There is no packaged executable yet. That's on my list, but it isn't here today, and I'd rather say so than pretend otherwise.
 
