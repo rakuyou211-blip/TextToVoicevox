@@ -7,7 +7,10 @@ stdlibのみでCIでもそのまま動く。
 """
 import os
 import re
+import subprocess
 import sys
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core
@@ -39,6 +42,109 @@ def test_no_stale_zip_names():
         for m in pat.finditer(_read(name)):
             assert m.group(1) == core.APP_VERSION, (
                 f"{name} の zip 名が古い版です: {m.group(0)}")
+
+
+def test_first_readme_txt_covers_both_os():
+    """はじめにお読みください.txt に Win/Mac 双方の「開けないとき」導線がある。"""
+    txt = _read("はじめにお読みください.txt")
+    for needle in ("起動.bat", "詳細情報", "ブロックの解除",       # Windows
+                   "起動.command", "このまま開く", "setup_mac.sh",  # macOS
+                   "Unblock-File", "bash"):                         # コピペ1行
+        assert needle in txt, f"はじめにお読みください.txt に「{needle}」の案内がありません"
+
+
+def test_windows_scripts_self_unblock():
+    """.bat が Mark of the Web を自己解除する（setup は再帰・起動系は直下のみ）。"""
+    for name in ("setup.bat", "起動.bat", "デバッグ起動.bat"):
+        body = _read(name)
+        assert "Unblock-File" in body, f"{name} に Unblock-File の自己解除がありません"
+        assert "-ErrorAction SilentlyContinue" in body, \
+            f"{name} の Unblock-File が防御的（失敗しても続行）になっていません"
+    assert "-Recurse" in _read("setup.bat"), "setup.bat の解除が -Recurse ではありません"
+
+
+def test_mac_scripts_self_repair():
+    """.command / .sh が検疫フラグと実行権限を自己修復する。"""
+    for name in ("setup.command", "起動.command", "デバッグ起動.command", "setup_mac.sh"):
+        body = _read(name)
+        assert "com.apple.quarantine" in body, f"{name} に検疫フラグの自己修復がありません"
+        assert "chmod +x" in body, f"{name} に実行権限の自己修復がありません"
+
+
+def test_setup_mac_sh_is_gatekeeper_free_entry():
+    """setup_mac.sh は bash 用スクリプトで、修復後に 起動.command へ続く。"""
+    body = _read("setup_mac.sh")
+    assert body.startswith("#!/bin/bash"), "setup_mac.sh の先頭が #!/bin/bash ではありません"
+    assert "\ufeff" not in body, "setup_mac.sh に BOM が混入しています（shは BOM 不可）"
+    assert re.search(r"bash\s+\./起動\.command", body), \
+        "setup_mac.sh が 起動.command へ続いていません"
+
+
+def test_readmes_mention_rescue_paths():
+    """README（日英）が新しい救済導線（setup_mac.sh・案内テキスト）に触れている。"""
+    for name in ("README.md", "README.en.md"):
+        body = _read(name)
+        assert "setup_mac.sh" in body, f"{name} に setup_mac.sh の案内がありません"
+        assert "はじめにお読みください" in body, \
+            f"{name} に はじめにお読みください.txt への言及がありません"
+
+
+def test_zip_ships_expected_files():
+    """配布zip（git archive HEAD 由来）に入る顔ぶれをインデックスで検証。
+    PNG は3枚だけ（app-icon＋スクショ2枚）。公式素材の立ち絵PNGが紛れたら即失敗。"""
+    try:
+        out = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT,
+                             capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        pytest.skip("git が使えない環境")
+    if out.returncode != 0:
+        pytest.skip("git リポジトリではない（zip展開などで実行された）")
+    files = [f for f in out.stdout.decode("utf-8").split("\0") if f]
+    pngs = sorted(f for f in files if f.lower().endswith(".png"))
+    assert pngs == ["assets/app-icon.png",
+                    "docs/screenshot-dark.png",
+                    "docs/screenshot-light.png"], \
+        f"追跡中の PNG が想定と違います（立ち絵の混入?）: {pngs}"
+    for required in ("はじめにお読みください.txt", "setup_mac.sh"):
+        assert required in files, f"{required} が git 管理に入っていません（git add 忘れ）"
+
+
+def test_zip_scripts_keep_exec_bit():
+    """配布zipの実行ビットの源泉 = git index のモードが 100755 であること。
+    git archive は index のモードを zip にそのまま書くため、ここが 100644 に
+    退行すると Mac で「開けません／アクセス権がありません」が再発する。"""
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-s", "-z", "--", "setup_mac.sh", "*.command"],
+            cwd=ROOT, capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        pytest.skip("git が使えない環境")
+    if out.returncode != 0:
+        pytest.skip("git リポジトリではない（zip展開などで実行された）")
+    modes = {}
+    for entry in out.stdout.decode("utf-8").split("\0"):
+        if not entry:
+            continue
+        meta, path = entry.split("\t", 1)
+        modes[path] = meta.split(" ", 1)[0]
+    expected = {"setup_mac.sh", "setup.command", "起動.command", "デバッグ起動.command"}
+    assert set(modes) == expected, f"実行スクリプトの顔ぶれが想定と違います: {sorted(modes)}"
+    bad = {p: m for p, m in modes.items() if m != "100755"}
+    assert not bad, f"実行ビットが退行しています（git add し直しで消えがち）: {bad}"
+
+
+def test_first_readme_txt_bom_and_crlf_attr():
+    """はじめにお読みください.txt の BOM と eol=crlf 属性が生きていること。
+    どちらも Windows の古いメモ帳で読めるための本質（BOM無し→文字化け、
+    LF→1行につぶれる）。ファイル作り直しや .gitattributes 編集で消えやすい。"""
+    with open(os.path.join(ROOT, "はじめにお読みください.txt"), "rb") as f:
+        head = f.read(3)
+    assert head == b"\xef\xbb\xbf", \
+        "はじめにお読みください.txt の先頭に UTF-8 BOM がありません"
+    attrs = _read(".gitattributes")
+    assert re.search(r"^はじめにお読みください\.txt\s+text\s+eol=crlf\s*$",
+                     attrs, re.MULTILINE), \
+        ".gitattributes に はじめにお読みください.txt の eol=crlf 指定がありません"
 
 
 def test_python_version_requirement_consistent():

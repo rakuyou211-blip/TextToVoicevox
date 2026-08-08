@@ -2,6 +2,9 @@
 rem === Text-to-VOICEVOX launcher (no console window) ===
 chcp 65001 >nul
 cd /d "%~dp0"
+rem ダウンロード由来の警告ブロックが残っていれば静かに解除（直下のみ・失敗しても続行）
+set "APPDIR=%~dp0"
+powershell -NoProfile -Command "Get-ChildItem -LiteralPath $env:APPDIR -File | Unblock-File -ErrorAction SilentlyContinue" >nul 2>&1
 if not exist "%~dp0venv\Scripts\pythonw.exe" (
     echo 初回セットアップがまだのようなので、先に setup.bat を実行します。
     echo （初回だけネット接続が必要です。数分かかることがあります）

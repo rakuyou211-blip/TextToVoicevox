@@ -3,6 +3,14 @@
 # この初回だけネット接続が必要。以降はオフラインで動作します。
 cd "$(dirname "$0")" || exit 1
 
+# ダウンロード検疫フラグ（com.apple.quarantine）と実行権限を、フォルダごと自己修復する。
+# Gatekeeper の承認（macOS 15以降: システム設定→「このまま開く」／14以前: 右クリック→「開く」）
+# はこの setup.command の初回 1 回だけで済ませ、起動.command などの兄弟ファイルは
+# 以降ふつうのダブルクリックで開けるようにする。失敗しても続行（本筋はセットアップ）。
+echo "ダウンロード時の検疫フラグと実行権限を整えています..."
+xattr -dr com.apple.quarantine . 2>/dev/null
+chmod +x ./*.command ./*.sh 2>/dev/null
+
 # Tk 8.6+ を含む Python を優先して使う（AppleのCLT付属PythonはTk 8.5で画面が描画されない）
 PY=""
 for cand in "$HOME/.local/python3.12/bin/python3" \

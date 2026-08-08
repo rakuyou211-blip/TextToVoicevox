@@ -47,7 +47,7 @@ You give it a file. It pulls the text out, cleans it up, and reads it aloud in a
 - **On-screen label removal** — for news image OCR it also removes short Japanese labels that plain text can't tell from the article (station logo, program name, timestamp, category — e.g. "MBSニュース", "国内"), using each line's position and font size to judge that it isn't body text. macOS only, sharing the same on/off as noise removal above; conservative (it never drops article body).
 - **Command line** — there's a CLI too, if you'd rather script it than click.
 
-The current release is **v1.19.1**. Recent versions brought two-step speaker selection (character → style), a per-line synthesis cache so regenerating a long book after fixing one misread line is nearly instant, streaming output that keeps memory flat even for 10-hour audiobooks, cancellable extraction/synthesis with partial-result saving, and atomic settings saves that survive crashes. The character art still isn't bundled with the app; you drop your own PNGs into `assets/立ち絵/` (see [`assets/立ち絵/README.md`](assets/立ち絵/README.md)), and everything works the same if you don't. The full history is in [CHANGELOG.md](CHANGELOG.md).
+The current release is **v1.20.0**. Recent versions brought two-step speaker selection (character → style), a per-line synthesis cache so regenerating a long book after fixing one misread line is nearly instant, streaming output that keeps memory flat even for 10-hour audiobooks, cancellable extraction/synthesis with partial-result saving, and atomic settings saves that survive crashes. The character art still isn't bundled with the app; you drop your own PNGs into `assets/立ち絵/` (see [`assets/立ち絵/README.md`](assets/立ち絵/README.md)), and everything works the same if you don't. The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -74,11 +74,13 @@ VOICEVOX is a separate, free program that actually makes the voices. It is **not
 This app is a Python program. If you don't have Python yet, install it first (**Python 3.9 or newer** from the official python.org installer is recommended). On Windows, tick "Add Python to PATH" during install. The python.org installers for Windows and macOS already include tkinter, which the app's screen uses.
 
 **③ Install this app**
-Download the release zip (below) and unzip it somewhere. Then:
+Download the release zip (below) and unzip it somewhere (right-click → *Extract All* on Windows, double-click on macOS — the OS built-in extractor is recommended; some third-party tools mangle Japanese filenames or drop execute permissions). Then:
 - **Windows:** double-click `起動.bat`
 - **macOS:** run `起動.command`
 
 That's it. The first run sets everything up automatically (it creates a local virtual environment and installs the dependencies — internet is needed only for that first run). After that, everything runs offline. You normally never touch `setup.bat` / `setup.command` — those are the setup scripts the launcher calls for you, kept around in case you ever want to reinstall the parts by hand.
+
+If Windows or macOS shows a security warning on that first double-click, see **First run** below — you only need to get past it **once**; the launcher then clears the download flags from the other files for you. The zip also ships with `はじめにお読みください.txt` (a "read me first" note, in Japanese) covering the same steps.
 
 If it won't start, run `デバッグ起動.bat` / `デバッグ起動.command` instead — it opens a console window so you can read the actual error. A failed start also leaves a `起動エラー.log` file in the folder.
 
@@ -92,12 +94,15 @@ If it won't start, run `デバッグ起動.bat` / `デバッグ起動.command` i
 
 This app is **not code-signed** (signing certificates cost money I don't have yet, and I'm one person). Because of that, your computer may show a scary-looking warning the first time. That warning is about the *lack of a signature*, not about anything malicious — but you should never just trust a stranger's word on that, so here's what's actually happening and how to check.
 
+**Since v1.20.0, you only need to get past the warning once.** On its first run, the launcher (`起動.bat` / `起動.command`) — and the setup scripts it calls — automatically clears the download flags (Windows' Mark of the Web / macOS' quarantine flag and lost execute permissions) from the rest of the files, so everything opens without warnings afterwards.
+
 **Windows — SmartScreen**
-You may see *"Windows protected your PC."* This appears for apps it hasn't seen signed before. If you want to continue, click **More info → Run anyway**. If you'd rather be careful first, that's completely reasonable.
+You may see *"Windows protected your PC."* This appears for apps it hasn't seen signed before. If you want to continue, click **More info → Run anyway** — just this once, for `起動.bat`. As a fallback, right-click the file → **Properties** → tick **Unblock** → OK. If you'd rather be careful first, that's completely reasonable.
 
 **macOS — Gatekeeper**
-You may see *"cannot be opened because it is from an unidentified developer"* or *"Apple could not verify…"*. If you choose to continue, you can right-click (or Control-click) the file and choose **Open**, or allow it under **System Settings → Privacy & Security**. If it still refuses, you can clear the download quarantine flag from Terminal:
-`xattr -dr com.apple.quarantine "/path/to/the/unzipped/folder"`
+You may see *"cannot be opened"* / *"Apple could not verify…"*. Two ways past it, either just this once:
+- **The reliable way (any macOS, recommended):** open Terminal, type `bash ` (with a trailing space), drag **`setup_mac.sh`** from the folder onto the Terminal window, and press return. Running it through `bash` bypasses the quarantine block entirely — it also works when you get *"permission denied"* (some unzip tools drop the execute bit) — and repairs everything, then starts the app (running setup automatically on first use).
+- **The mouse-only way (macOS 15 Sequoia and later):** close the warning with **Done**, then open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to the "起動.command was blocked" notice, then **Open**. (On macOS 14 and earlier, the classic right-click → **Open** → **Open** shortcut still works; macOS 15 removed it.)
 
 **Antivirus false positives**
 Unsigned scripts sometimes get flagged as "suspicious" even when they're harmless. That's a false positive from being new and unsigned, not proof of anything.

@@ -4,6 +4,15 @@ rem Requires internet ONLY for this initial setup. The app itself runs offline.
 chcp 65001 >nul
 cd /d "%~dp0"
 
+rem ダウンロード由来の警告ブロック (Mark of the Web) をフォルダごと自己解除する。
+rem SmartScreen の「詳細情報」→「実行」はこの setup.bat の初回 1 回だけで済ませ、
+rem 起動.bat などの兄弟ファイルには警告を残さない。失敗しても続行（本筋はセットアップ）。
+rem 対象は %~dp0（このbatのあるフォルダ）を環境変数で明示的に渡す。カレントディレクトリ
+rem 依存にすると、UNCパス実行時に cd が失敗して C:\Windows を走査してしまうため。
+echo ダウンロード時の警告ブロックを解除しています...
+set "APPDIR=%~dp0"
+powershell -NoProfile -Command "Get-ChildItem -LiteralPath $env:APPDIR -Recurse -File | Unblock-File -ErrorAction SilentlyContinue" >nul 2>&1
+
 echo Python を探しています...
 rem 'py' ランチャを優先し、無ければ 'python' を試す。
 rem （まっさらな Windows では 'python' は Microsoft Store を開くだけのダミーで、
