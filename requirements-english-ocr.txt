@@ -1,0 +1,13 @@
+# 英語の文字読み取り（OCR）用の部品（任意）。欲しい人だけが「英語OCRを入れる.bat」で入れる。
+# setup.bat では入れない（入れるとアプリが約240MB大きくなるため）。
+# WindowsのOCRは日本語しか入っていないことが多く、英文の画像が漢字まじりに崩れて
+# 読まれてしまうため、英文の多い画像だけをこの RapidOCR で読み直す。
+# ここが入らなくてもアプリは動く（英文の多い画像のときに、そう案内するだけ）。
+#
+# ・モデルは wheel に同梱されていて、ネットにつながずに動く（中身を確認済み）
+# ・rapidocr_onnxruntime 1.4.4 は Python 3.13 未満のみ対応。64bit の Windows に限る
+# ・macOS は Apple Vision が日本語と英語を一緒に読めるので入れない
+# ・OpenCV は“次のメジャー”を弾く（requirements.txt と同じ考え方）
+
+rapidocr_onnxruntime==1.4.4 ; sys_platform == "win32" and platform_machine == "AMD64" and python_version < "3.13"
+opencv-python>=4.5.1.48,<6 ; sys_platform == "win32" and platform_machine == "AMD64" and python_version < "3.13"

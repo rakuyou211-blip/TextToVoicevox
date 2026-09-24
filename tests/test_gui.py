@@ -585,17 +585,27 @@ def test_cache_dialog_smoke(app):
     app._cache_win.destroy()
 
 
-def test_playall_done_5tuple_dispatch(app):
-    """playall_doneの5要素化: skipped込みの完走メッセージが出る。"""
+def test_playall_done_dispatch(app):
+    """完走メッセージ（skipped込み）が出る。世代番号は末尾に付く。"""
     app._previewing = True
-    app.q.put(("playall_done", True, False, 12, 2))
+    app.q.put(("playall_done", True, False, 12, 2, app._play_gen))
     app._poll_queue()
     assert "12行・2行スキップ" in app.status_var.get()
     assert app._previewing is False
 
 
+def test_playall_done_of_old_generation_is_ignored(app):
+    """ひとつ前の再生から遅れて届いた完了通知で、いまの再生を止めない。
+    止めた直後に次を始めたとき、古い通知に巻き添えで待機表示へ戻されていた。"""
+    app._play_gen += 1              # 新しい再生が始まった
+    app._previewing = True
+    app.q.put(("playall_done", True, False, 3, 0, app._play_gen - 1))
+    app._poll_queue()
+    assert app._previewing is True
+
+
 def test_playall_skip_dispatch(app):
-    app.q.put(("playall_skip", 7))
+    app.q.put(("playall_skip", 7, app._play_gen))
     app._poll_queue()
     assert "7行目" in app.status_var.get()
 
@@ -664,11 +674,34 @@ def test_recover_if_stuck_resets_preview(app):
     app.speakers = [("ずんだもん（ノーマル）", 3, "u")]
     app._build_char_map()
     app.char_cb.current(0); app._char_selected()
+    # ボタンを戻すかどうかは接続状態で決まる（つながっていないのに押せると、
+    # 押した先で失敗する）。ここでは「つながっている」側を見たいので整えておく
+    app._set_conn_state("ok", "0.0.0-test")
     app._previewing = True          # ワーカーが応答せず残った状態を模擬
     app.preview_btn.config(state="disabled")
-    app._recover_if_stuck()
+    app._recover_if_stuck(app._play_gen)
     assert app._previewing is False
     assert str(app.preview_btn["state"]) == "normal"
+
+
+def test_recover_if_stuck_keeps_buttons_off_when_disconnected(app):
+    """つながっていないときは、待機に戻しても音声のボタンは戻さない。"""
+    app.conn_state = "lost"
+    app._previewing = True
+    app.preview_btn.config(state="disabled")
+    app._recover_if_stuck(app._play_gen)
+    assert app._previewing is False
+    assert str(app.preview_btn["state"]) == "disabled"
+
+
+def test_recover_if_stuck_leaves_a_newer_playback_alone(app):
+    """安全網は「止めた再生の世代」のときだけ働く。すぐ次を再生し始めた場合に
+    1.5秒後のこれが効くと、鳴っている最中なのに待機表示へ戻ってしまう。"""
+    app._previewing = True
+    old_gen = app._play_gen
+    app._play_gen += 1              # 次の再生が始まった
+    app._recover_if_stuck(old_gen)
+    assert app._previewing is True
 
 
 def test_preview_blocked_gives_feedback(app):

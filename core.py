@@ -19,11 +19,12 @@ import subprocess
 import unicodedata
 from html.parser import HTMLParser
 from urllib.parse import unquote
-from xml.etree import ElementTree
+# xml.etree は docx/epub 抽出でのみ使う。importに40msほどかかるため、
+# 起動時ではなく使う関数の中で読み込む（extract_docx / extract_epub 参照）
 
 # アプリのバージョン（タイトルバー・CLI --version・不具合報告の目印に使う）。
 # リリースごとにここだけ更新する。
-APP_VERSION = "1.20.0"
+APP_VERSION = "1.21.0"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
@@ -1247,6 +1248,7 @@ def extract_docx(path: str) -> str:
     入り、さらに内側の w:p が独立段落としても列挙されるため、対策しないと同じ文言が
     最大4回読み上げられる。Fallback 分岐を捨て、他の w:p の子孫である w:p は
     スキップする（内側の文言は外側段落の p.iter() が1回だけ拾う）。"""
+    from xml.etree import ElementTree  # 遅延import（起動短縮）
     with zipfile.ZipFile(path) as z:
         xml = z.read("word/document.xml")
     root = ElementTree.fromstring(xml)
@@ -1332,6 +1334,7 @@ def extract_epub(path: str) -> str:
     """EPUBから本文テキストを抽出する（spine順・追加ライブラリ不要）。
     章ファイル名に空白や日本語（=hrefがパーセントエンコードされる）を含むEPUBでも
     取りこぼさないよう、zipエントリ名を正規化して突き合わせる。"""
+    from xml.etree import ElementTree  # 遅延import（起動短縮）
     ns_c = "{urn:oasis:names:tc:opendocument:xmlns:container}"
     ns_o = "{http://www.idpf.org/2007/opf}"
     with zipfile.ZipFile(path) as z:
@@ -1455,6 +1458,186 @@ def _ocr_text_score(text: str):
     return jp, len(chars)
 
 
+# 英語の読み取り（OCR）が入っていないPCで、英文の多い画像を読んだときの一言。
+# ファイルからの抽出とクリップボードOCRで同じ文面を使う
+# 英語の読み取り部品は、欲しい人だけが入れる（入れるとアプリが約240MB大きくなるため）。
+# 入っていないPCで英文の多い画像を読んだら、この2つの道を案内する
+OCR_ENGLISH_MISSING_MSG = (
+    "英語の多い画像がありました。英語を読み取る部品が入っていないため、"
+    "英文が崩れて読み取られています。次のどちらかで読めるようになります。\n\n"
+    "・Windows の［設定］→［時刻と言語］→［言語と地域］で"
+    "「英語（米国）」を追加する（アプリは大きくなりません）\n"
+    "・アプリのフォルダにある「英語OCRを入れる.bat」を実行する"
+    "（約88MBのダウンロード・アプリが約240MB大きくなります。"
+    "64bit の Windows・Python 3.12 まで）")
+
+
+def ocr_looks_english(text: str) -> bool:
+    """日本語OCRの結果を見て「元は英文の多い画像だった」と言えるか。
+    日本語OCRは英文を漢字に化かす（NOT→NO丁、files→創es）ので、日本語文字の
+    割合は当てにならない。決め手は**ひらがな**: 日本語の文は英単語だらけでも
+    助詞や語尾が残るが、英文を読み違えた結果にはほとんど出ない。
+    しきい値は実測（2026-09-15、日本語OCRのみのWindowsで同じ条件で読んだ値）:
+        英字の割合 / ひらがなの割合
+        日本語だけの文          0.00 / 0.67
+        英単語まじりの日本語    0.45 / 0.30
+        技術文書（英語多め）    0.68 / 0.22   <- 英字だけで判定すると誤って引っかかる
+        日本語のアプリ画面      0.13 / 0.13
+        英語のダイアログ（実物）0.69 / 0.02
+        英語だけ                0.91 / 0.00
+    ひらがなが 0.05 未満、かつ英字が半分以上、かつ短すぎない（20文字以上）ときだけ真。"""
+    chars = [c for c in text if not c.isspace()]
+    if len(chars) < 20:
+        return False
+    latin = sum(1 for c in chars if c.isascii() and c.isalpha())
+    hira = sum(1 for c in chars if "\u3041" <= c <= "\u309f")
+    return latin / len(chars) >= 0.5 and hira / len(chars) < 0.05
+
+
+def _english_ocr_better(ja_text: str, en_text: str) -> bool:
+    """英語で読み直した結果のほうが良いか。
+    日本語OCRは英字を漢字や記号に化かす（NOT→NO丁、files→創es）。だから決め手は
+    「化けの印（漢字・かな・全角文字）が減ったか」。英字の数だけで比べると、
+    化けた結果が英字をたくさん含んでいるとき、少し欠けたきれいな英文が負けて
+    捨てられてしまう（テストで実際に起きた: 化け44字 / きれいな英文40字）。
+    ・化けの印が減っていて、英字が日本語OCRの7割以上残っていれば採る
+      （英語で読み直すと改行や記号が少し落ちるのは普通なので、多少の欠けは許す）
+    ・日本語OCRの方に化けの印が無いなら、英字の多い方（従来どおり）"""
+    if not en_text or not en_text.strip():
+        return False
+    ja_latin = sum(1 for c in ja_text if c.isascii() and c.isalpha())
+    en_latin = sum(1 for c in en_text if c.isascii() and c.isalpha())
+    ja_noise = sum(1 for c in ja_text if is_cjk(c))
+    en_noise = sum(1 for c in en_text if is_cjk(c))
+    if ja_noise == 0:
+        return en_latin >= ja_latin
+    return en_noise < ja_noise and en_latin >= ja_latin * 0.7
+
+
+import threading as _threading
+
+# 同梱の英語OCR（RapidOCR）。読み込みは重い（インストール直後の初回はウイルス
+# 検査で15秒かかった。2回目以降は0.2秒）ので、英文の多い画像が来たときに
+# 初めて読み込み、以後は使い回す
+_RAPIDOCR = {"engine": None}
+_RAPIDOCR_LOCK = _threading.Lock()
+
+
+def rapidocr_available() -> bool:
+    """同梱の英語OCR（rapidocr_onnxruntime）が入っているか。
+    読み込まずに有無だけを調べる（読み込むと重いので、判定のために払わない）。"""
+    try:
+        import importlib
+        import importlib.util
+        # アプリを開いたまま「英語OCRを入れる.bat」で入れた場合にも気づけるように、
+        # インポートの探し先の覚えを捨ててから探す（呼ばれるのは英文の画像のときだけ）
+        importlib.invalidate_caches()
+        return importlib.util.find_spec("rapidocr_onnxruntime") is not None
+    except Exception:
+        return False
+
+
+def _rapidocr_engine():
+    """RapidOCR を1つだけ作って使い回す（複数スレッドから来ても1回だけ読む）。
+    モデルは wheel に同梱されていて、ネットには一切つながない（中身を確認済み）。"""
+    with _RAPIDOCR_LOCK:
+        if _RAPIDOCR["engine"] is None:
+            from rapidocr_onnxruntime import RapidOCR
+            # スレッド数は4まで。既定の「全コア」だと、コアの多い機体でかえって遅い
+            # （実測 2026-09-15・20コア: 全コア1.48秒 / 4スレッド0.65秒 /
+            #  2スレッド0.73秒 / 1スレッド1.11秒。メモリはどれも同じ）。
+            # コアの少ない機体では、その数まで
+            n = max(1, min(4, os.cpu_count() or 4))
+            try:
+                _RAPIDOCR["engine"] = RapidOCR(intra_op_num_threads=n,
+                                               inter_op_num_threads=n)
+            except TypeError:
+                _RAPIDOCR["engine"] = RapidOCR()   # 指定を受け付けない版でも動かす
+        return _RAPIDOCR["engine"]
+
+
+def _rapidocr_lines(result, width, height):
+    """RapidOCR の結果（[四隅の座標, 文字, 確からしさ] の並び）を、アプリ共通の
+    行の形（text と 正規化した x0/x1/y0/y1）に直す。
+    RapidOCR は1行を「Your decoy f」「files are」のように横に分けて返すことが
+    あるので、縦の位置が重なる断片を左から順につなげて1行にする。
+    分割の境目で同じ文字が二重に出る（f + files）ときは、前の断片の欠けた単語を捨てる。"""
+    boxes = []
+    for item in result or []:
+        try:
+            box, text = item[0], str(item[1]).strip()
+        except (IndexError, TypeError):
+            continue
+        if not text:
+            continue
+        xs = [float(p[0]) for p in box]
+        ys = [float(p[1]) for p in box]
+        boxes.append([min(xs), max(xs), min(ys), max(ys), text])
+    boxes.sort(key=lambda b: ((b[2] + b[3]) / 2, b[0]))
+    rows = []
+    for b in boxes:
+        cy = (b[2] + b[3]) / 2
+        for r in rows:
+            h = max(r["y1"] - r["y0"], b[3] - b[2])
+            if abs((r["y0"] + r["y1"]) / 2 - cy) <= h * 0.5:
+                r["parts"].append(b)
+                r["y0"], r["y1"] = min(r["y0"], b[2]), max(r["y1"], b[3])
+                break
+        else:
+            rows.append({"y0": b[2], "y1": b[3], "parts": [b]})
+    lines = []
+    for r in rows:
+        parts = sorted(r["parts"], key=lambda b: b[0])
+        words = parts[0][4].split(" ")
+        for prev, cur in zip(parts, parts[1:]):
+            nxt = cur[4].split(" ")
+            # 横に重なっていて、前の末尾の単語が次の先頭の単語の書きかけなら捨てる
+            if (cur[0] < prev[1] and words and nxt
+                    and nxt[0].lower().startswith(words[-1].lower())
+                    and len(words[-1]) < len(nxt[0])):
+                words.pop()
+            words.extend(nxt)
+        lines.append({"text": " ".join(w for w in words if w),
+                      "x0": parts[0][0] / width,
+                      "x1": max(p[1] for p in parts) / width,
+                      "y0": r["y0"] / height, "y1": r["y1"] / height})
+    lines.sort(key=lambda l: (l["y0"], l["x0"]))
+    return lines
+
+
+def run_rapidocr(image_paths, strip_labels=True, cancel_event=None,
+                 progress_cb=None):
+    """同梱の RapidOCR で画像を読み、{path: text} を返す（英文用。日本語は
+    ひらがなを落とすので、英文の多い画像にだけ使うこと）。
+    行の組み立て後は Windows / macOS の経路と同じく、strip_labels のときだけ
+    strip_overlay_labels、その後 reflow_ocr_lines で折り返しをつなぐ。
+    1枚の失敗は他を止めない（その画像は結果に入らない＝元の結果が残る）。
+    cancel_event: 1枚ごとに見る（1枚1〜3秒かかるので、まとめて見ると止まらない）。
+    progress_cb(done, total): 1枚読むごとに呼ぶ。"""
+    engine = _rapidocr_engine()
+    from PIL import Image as _Image
+    out = {}
+    total = len(image_paths)
+    for i, path in enumerate(image_paths):
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        if progress_cb:
+            progress_cb(i, total)
+        try:
+            with _Image.open(path) as im:
+                width, height = im.size
+            result, _elapse = engine(path)
+            lines = _rapidocr_lines(result, width, height)
+            if strip_labels and lines:
+                lines = strip_overlay_labels(lines)
+            out[path] = reflow_ocr_lines(lines) if lines else ""
+        except Exception:
+            continue
+    if progress_cb and not (cancel_event is not None and cancel_event.is_set()):
+        progress_cb(total, total)
+    return out
+
+
 def _ocr_needs_retry(text: str, lang: str = "ja") -> bool:
     """前処理を変えて再OCRを試す価値がある低品質結果か
     （ほとんど読めていない・日本語文書のはずなのに日本語比率が低すぎる）。"""
@@ -1507,7 +1690,7 @@ def ocr_retry_if_poor(text, img, tmpdir, lang="ja", strip_labels=True):
 
 
 def run_ocr(image_paths, lang="ja", strip_labels=True, errors=None,
-            progress_cb=None, cancel_event=None):
+            progress_cb=None, cancel_event=None, notices=None):
     """
     画像パスのリストをOS標準のオフラインOCRに渡し、{path: text} を返す。
     Windows: Windows.Media.Ocr（PowerShellヘルパー） / macOS: Apple Vision（pyobjc）
@@ -1522,9 +1705,11 @@ def run_ocr(image_paths, lang="ja", strip_labels=True, errors=None,
     if not image_paths:
         return {}
     if IS_WIN:
+        # notices: 「英語のOCRが入っていない」などの知らせを受け取るリスト。
+        # macOS の Vision は日本語と英語を一緒に読むので、この問題は起きない
         return run_windows_ocr(image_paths, lang=lang, strip_labels=strip_labels,
                                errors=errors, progress_cb=progress_cb,
-                               cancel_event=cancel_event)
+                               cancel_event=cancel_event, notices=notices)
     if IS_MAC:
         if APP_DIR not in sys.path:
             sys.path.insert(0, APP_DIR)  # 他ディレクトリからのimportでも ocr_mac を見つける
@@ -1536,7 +1721,7 @@ def run_ocr(image_paths, lang="ja", strip_labels=True, errors=None,
     raise RuntimeError("この環境ではオフラインOCRを利用できません（Windows / macOS のみ対応）。")
 
 
-def _parse_windows_ocr_result(data, strip_labels=True, errors=None):
+def _parse_windows_ocr_result(data, strip_labels=True, errors=None, meta=None):
     """ocr_win.ps1 の出力JSONを {path: text} に変換する（純関数・単体テスト用に分離）。
     行の外接矩形(lines)があれば ocr_mac.py と同じ座標パイプラインを適用する:
     strip_labels=True のときだけ strip_overlay_labels、reflow_ocr_lines は常時。
@@ -1547,6 +1732,16 @@ def _parse_windows_ocr_result(data, strip_labels=True, errors=None):
         data = [data]
     result = {}
     for item in data:
+        if meta is not None:
+            # 実際に使った言語と、使える言語（新しい ocr_win.ps1 だけが載せる）。
+            # PS5.1 の ConvertTo-Json は1要素の配列を文字列に畳むので両方受ける
+            if item.get("engine_lang"):
+                meta["engine_lang"] = str(item["engine_lang"])
+            av = item.get("available_langs")
+            if isinstance(av, str):
+                av = [av]
+            if isinstance(av, list):
+                meta["available_langs"] = [str(x) for x in av if x]
         path = item.get("path", "")
         text = item.get("text", "") if item.get("ok") else ""
         if not item.get("ok") and errors is not None and item.get("error"):
@@ -1578,7 +1773,8 @@ def _parse_windows_ocr_result(data, strip_labels=True, errors=None):
 
 
 def run_windows_ocr(image_paths, lang="ja", strip_labels=True, errors=None,
-                    progress_cb=None, cancel_event=None, chunk_size=20):
+                    progress_cb=None, cancel_event=None, chunk_size=20,
+                    notices=None):
     """
     画像パスのリストをWindows標準OCRに渡し、{path: text} を返す。
     chunk_size 枚ずつPowerShellヘルパー(ocr_win.ps1)を起動して処理する
@@ -1589,6 +1785,7 @@ def run_windows_ocr(image_paths, lang="ja", strip_labels=True, errors=None,
         return {}
     result = {}
     fatal = []
+    meta = {}
     n = len(image_paths)
     for start in range(0, n, chunk_size):
         if cancel_event is not None and cancel_event.is_set():
@@ -1597,7 +1794,7 @@ def run_windows_ocr(image_paths, lang="ja", strip_labels=True, errors=None,
         try:
             result.update(_run_windows_ocr_chunk(chunk, lang=lang,
                                                  strip_labels=strip_labels,
-                                                 errors=errors))
+                                                 errors=errors, meta=meta))
         except Exception as e:
             fatal.append(str(e))
         if progress_cb:
@@ -1607,11 +1804,86 @@ def run_windows_ocr(image_paths, lang="ja", strip_labels=True, errors=None,
         raise RuntimeError(fatal[0])
     if errors is not None:
         errors.extend(fatal)   # 一部チャンクの失敗は警告として通知
+    if lang == "ja" and result:
+        _english_second_pass(result, meta, strip_labels, notices,
+                             cancel_event, chunk_size, progress_cb=progress_cb)
     return result
 
 
+def _english_second_pass(result, meta, strip_labels, notices, cancel_event,
+                         chunk_size=20, progress_cb=None):
+    """日本語で読んだ結果のうち、英文の多い画像だけを英語で読み直す（Windows）。
+    読み手は、Windowsの英語OCR（入っていれば）→ 同梱の RapidOCR の順。
+    どちらも使えなければ読み直さず、notices に "english_ocr_missing" を足す
+    ＝呼び出し側が利用者に知らせる。以前は英語を頼んでも黙って日本語で読み、
+    崩れた結果をそのまま返していた。
+    ここでの失敗は本番の結果を壊さない（日本語の結果のまま返す）。"""
+    targets = [p for p, t in result.items() if ocr_looks_english(t)]
+    if not targets:
+        return
+    en_tag = next((l for l in meta.get("available_langs", [])
+                   if l.lower().startswith("en")), None)
+    total = len(targets)
+
+    def tell(done):
+        # 読み直しは「英語」の段として知らせる（3つ目の引数を知らない受け手は、
+        # 2つだけで呼ぶ run_windows_ocr 側の通知と同じに扱える）
+        if progress_cb:
+            try:
+                progress_cb(done, total, "english")
+            except TypeError:
+                progress_cb(done, total)
+
+    if en_tag is not None:
+        # Windows に英語のOCRが入っている＝追加の重さ無しで読める。
+        # PowerShell を1回起動するごとにまとめて読むので、キャンセルはチャンクごと
+        def read_all():
+            got = {}
+            for start in range(0, total, chunk_size):
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                chunk = targets[start:start + chunk_size]
+                tell(start)
+                try:
+                    got.update(_run_windows_ocr_chunk(chunk, lang=en_tag,
+                                                      strip_labels=strip_labels))
+                except Exception:
+                    continue
+            return got
+    elif rapidocr_available():
+        # 入っていなければ同梱の RapidOCR。読み込みに失敗する環境
+        # （DLLが足りない等）では、黙って崩れた結果を返さず案内に回す
+        try:
+            _rapidocr_engine()
+        except Exception:
+            if notices is not None and "english_ocr_missing" not in notices:
+                notices.append("english_ocr_missing")
+            return
+
+        def read_all():
+            # 1枚ずつ読むので、キャンセルも進捗も1枚ごとに効く
+            try:
+                return run_rapidocr(targets, strip_labels=strip_labels,
+                                    cancel_event=cancel_event,
+                                    progress_cb=lambda d, t: tell(d))
+            except Exception:
+                return {}
+    else:
+        if notices is not None and "english_ocr_missing" not in notices:
+            notices.append("english_ocr_missing")
+        return
+    again = read_all()
+    used = False
+    for p in targets:
+        if p in again and _english_ocr_better(result[p], again[p]):
+            result[p] = again[p]
+            used = True
+    if used and notices is not None and "english_ocr_used" not in notices:
+        notices.append("english_ocr_used")
+
+
 def _run_windows_ocr_chunk(image_paths, lang="ja", strip_labels=True,
-                           errors=None):
+                           errors=None, meta=None):
     """PowerShellヘルパーを1回起動して image_paths を処理する（チャンク実体）。"""
     tmpdir = tempfile.mkdtemp(prefix="t2v_ocr_")
     try:
@@ -1646,7 +1918,7 @@ def _run_windows_ocr_chunk(image_paths, lang="ja", strip_labels=True,
         if isinstance(data, dict) and "fatal" in data:
             raise RuntimeError(data["fatal"])
         return _parse_windows_ocr_result(data, strip_labels=strip_labels,
-                                         errors=errors)
+                                         errors=errors, meta=meta)
     finally:
         # OCRが済めばmanifest.txt/result.json（＝抽出全文）は不要。%TEMP%に残さない。
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1868,7 +2140,11 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
         # まとめてOCR（キャンセル済みならスキップして部分結果へ）
         if ocr_jobs and not (cancel_event is not None and cancel_event.is_set()):
             if progress_cb:
-                progress_cb(total - 1, total, f"OCR実行中... ({len(ocr_jobs)}枚)")
+                # 目盛りをページ数に切り替える。ファイル数のままだと、PDFを
+                # 1冊だけ入れたときは分母が1で、十数分かかっても 0% で止まって
+                # 見える（「固まった」と誤解される一番の原因だった）
+                progress_cb(0, len(ocr_jobs),
+                            f"OCR実行中... 0/{len(ocr_jobs)}枚")
             png_paths = [p for _, p, _o, _lb in ocr_jobs]
             ocr_errors = []
             ocr_failed = False
@@ -1876,13 +2152,29 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
             # 1呼び出しで、キャンセルを押してもバッチ完了まで効かなかった）
             ocr_progress = None
             if progress_cb:
-                def ocr_progress(i, n):
-                    progress_cb(total - 1, total, f"OCR実行中... ({i}/{n}枚)")
+                phase_clock = {"phase": None, "t": time.monotonic()}
+
+                def ocr_progress(i, n, phase=None):
+                    # 残り時間の見当も出す（音声生成側と同じ数え方）。
+                    # 何分かかるのか分からない待ちがいちばん不安なので。
+                    # 英語の読み直しは速さが違うので、段が変わったら数え直す
+                    if phase != phase_clock["phase"]:
+                        phase_clock.update(phase=phase, t=time.monotonic())
+                    note = ""
+                    if i:
+                        eta = (time.monotonic() - phase_clock["t"]) / i * (n - i)
+                        if eta > 5:
+                            note = f"（残り{fmt_duration(eta)}）"
+                    label = ("英語を読み直しています…" if phase == "english"
+                             else "OCR実行中...")
+                    progress_cb(i, n, f"{label} {i}/{n}枚{note}")
+            ocr_notices = []
             try:
                 ocr_result = run_ocr(png_paths, lang=lang,
                                      strip_labels=strip_labels, errors=ocr_errors,
                                      progress_cb=ocr_progress,
-                                     cancel_event=cancel_event)
+                                     cancel_event=cancel_event,
+                                     notices=ocr_notices)
             except Exception as e:
                 # 全滅時の例外メッセージに理由は集約済み。個別エラーと空ページ警告を
                 # 重ねると同じ障害が三重に表示されるため、ここで抑止する
@@ -1890,13 +2182,15 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                 ocr_result = {}
                 ocr_errors = []
                 ocr_failed = True
+            if "english_ocr_missing" in ocr_notices:
+                warnings.append(OCR_ENGLISH_MISSING_MSG)
             # 一部ファイルの失敗理由を警告として表示（従来は無言で空になっていた）
             for e in ocr_errors[:5]:
                 warnings.append(f"OCR失敗 {e}")
             if len(ocr_errors) > 5:
                 warnings.append(f"…ほか{len(ocr_errors) - 5}件のOCR失敗")
             empty = 0
-            for key, png, orig, layer_backed in ocr_jobs:
+            for retry_done, (key, png, orig, layer_backed) in enumerate(ocr_jobs):
                 t = ocr_result.get(png, "")
                 # 低品質（写真の影・ムラ・横倒し等）なら前処理を変えて再OCRし、
                 # 良い方を採用。単体画像は元ファイルから、PDFページは再レンダリングで
@@ -1907,7 +2201,8 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                     name = (os.path.basename(orig) if isinstance(orig, str)
                             else f"{os.path.basename(orig[0])} {orig[1]+1}p")
                     if progress_cb:
-                        progress_cb(total - 1, total, f"再OCR中（画像補正）: {name}")
+                        progress_cb(retry_done, len(ocr_jobs),
+                                    f"再OCR中（画像補正）: {name}")
                     try:
                         src = (Image.open(orig) if isinstance(orig, str)
                                else _render_pdf_page(orig[0], orig[1], dpi))
@@ -1962,29 +2257,165 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
 # ============================================================
 #  VOICEVOX 本体の検出・起動 / 試聴再生（OS別）
 # ============================================================
-def find_voicevox():
-    """VOICEVOX本体のインストール先を探して返す。見つからなければ None。"""
+_VV_PATH_CACHE = {}
+
+
+def _win_registry_voicevox():
+    """アンインストール情報からVOICEVOXの場所を拾う（Windowsのみ）。
+    標準以外の場所（Dドライブなど）へ入れた人でも見つけられるようにする。"""
+    try:
+        import winreg   # Windows専用。Macでは import 自体が失敗するので関数内で
+    except Exception:
+        return None
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+    views = [(winreg.HKEY_CURRENT_USER, 0),
+             (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_64KEY),
+             (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_32KEY)]
+    for root, flag in views:
+        try:
+            with winreg.OpenKey(root, key_path, 0,
+                                winreg.KEY_READ | flag) as k:
+                for i in range(winreg.QueryInfoKey(k)[0]):
+                    try:
+                        sub = winreg.EnumKey(k, i)
+                        with winreg.OpenKey(k, sub) as sk:
+                            name = str(winreg.QueryValueEx(sk, "DisplayName")[0])
+                            if "voicevox" not in name.lower():
+                                continue
+                            loc = ""
+                            for value in ("InstallLocation", "UninstallString"):
+                                try:
+                                    v = str(winreg.QueryValueEx(sk, value)[0])
+                                except Exception:
+                                    continue
+                                v = v.strip()
+                                if not v:
+                                    continue
+                                if value == "UninstallString":
+                                    # 実測: VOICEVOX は InstallLocation が空で、
+                                    # 場所はアンインストーラのパスにしか入っていない。
+                                    # 「"C:\\...\\Uninstall VOICEVOX.exe" /currentuser」
+                                    # の形なので、引用符の中を取り出して親フォルダを使う
+                                    if v.startswith('"'):
+                                        v = v[1:].split('"', 1)[0]
+                                    else:
+                                        v = v.split(" /")[0].split(" -")[0]
+                                    v = os.path.dirname(v)
+                                if v:
+                                    loc = v
+                                    break
+                    except Exception:
+                        continue   # 読めないキーは飛ばす（数百件あるので普通のこと）
+                    exe = os.path.join(loc, "VOICEVOX.exe") if loc else ""
+                    if exe and os.path.exists(exe):
+                        return exe
+        except Exception:
+            continue
+    return None
+
+
+def _fixed_drives():
+    """固定ディスクのドライブ文字だけを返す（Windows）。
+    USBやネットワークドライブを触ると、回転待ちで何秒も固まることがある。"""
+    try:
+        import ctypes
+        out = []
+        bits = ctypes.windll.kernel32.GetLogicalDrives()
+        for i in range(26):
+            if not (bits >> i) & 1:
+                continue
+            d = "%s:\\" % chr(ord("A") + i)
+            if ctypes.windll.kernel32.GetDriveTypeW(d) == 3:   # DRIVE_FIXED
+                out.append(d)
+        return out
+    except Exception:
+        return []
+
+
+def find_voicevox(user_path=None, refresh=False):
+    """VOICEVOX本体のインストール先を探して返す。見つからなければ None。
+    user_path: 設定で手動指定された場所（あれば最優先）。
+    探すのに少し時間がかかるので、一度見つけたら覚えておく（refresh=Trueで再探索）。"""
+    if user_path and os.path.exists(user_path):
+        return user_path
+    if not refresh and "path" in _VV_PATH_CACHE:
+        return _VV_PATH_CACHE["path"]
+    found = None
     if IS_WIN:
         candidates = [
             os.path.expandvars(r"%LOCALAPPDATA%\Programs\VOICEVOX\VOICEVOX.exe"),
             os.path.expandvars(r"%ProgramFiles%\VOICEVOX\VOICEVOX.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\VOICEVOX\VOICEVOX.exe"),
+            os.path.expandvars(r"%ProgramW6432%\VOICEVOX\VOICEVOX.exe"),
         ]
+        for p in candidates:
+            if "%" not in p and os.path.exists(p):
+                found = p
+                break
+        if not found:
+            found = _win_registry_voicevox()
+        if not found:
+            # 最後の手段。固定ディスクの分かりやすい場所だけを見る
+            for d in _fixed_drives():
+                for sub in ("VOICEVOX", r"Program Files\VOICEVOX"):
+                    p = os.path.join(d, sub, "VOICEVOX.exe")
+                    if os.path.exists(p):
+                        found = p
+                        break
+                if found:
+                    break
     elif IS_MAC:
-        candidates = [
-            "/Applications/VOICEVOX.app",
-            os.path.expanduser("~/Applications/VOICEVOX.app"),
-        ]
-    else:
+        for p in ("/Applications/VOICEVOX.app",
+                  os.path.expanduser("~/Applications/VOICEVOX.app")):
+            if os.path.exists(p):
+                found = p
+                break
+        if not found:
+            # Spotlight に聞く（切っている環境では空が返るだけ・害はない）
+            try:
+                r = subprocess.run(
+                    ["/usr/bin/mdfind",
+                     "kMDItemCFBundleIdentifier == 'jp.hiroshiba.voicevox'"],
+                    capture_output=True, text=True, timeout=2)
+                for line in (r.stdout or "").splitlines():
+                    if line.strip().endswith(".app") and os.path.exists(line.strip()):
+                        found = line.strip()
+                        break
+            except Exception:
+                pass
+    # 見つかったときだけ覚える。見つからなかった結果まで覚えると、
+    # あとからVOICEVOXを入れた人が再起動するまで気づけない
+    if found:
+        _VV_PATH_CACHE["path"] = found
+    return found
+
+
+def find_voicevox_engine(user_path=None):
+    """VOICEVOX本体に同梱されている「エンジンだけ」の実行ファイルを返す。
+    これを直接動かすと、エディタ画面（重いElectron）を立ち上げずに
+    読み上げだけができる。見つからなければ None。"""
+    app = find_voicevox(user_path)
+    if not app:
         return None
-    for p in candidates:
-        if os.path.exists(p):
-            return p
-    return None
+    if IS_MAC:
+        # ※Mac側は未検証（このパスに無ければ「エンジンのみ起動」は使えないだけ）
+        run = os.path.join(app, "Contents", "Resources", "vv-engine", "run")
+    else:
+        run = os.path.join(os.path.dirname(app), "vv-engine", "run.exe")
+    return run if os.path.exists(run) else None
 
 
-def launch_voicevox():
-    """VOICEVOX本体を起動する。見つからなければ FileNotFoundError。"""
-    path = find_voicevox()
+def free_port(host="127.0.0.1"):
+    """今すぐ使えるポート番号をひとつ借りる。"""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
+        sk.bind((host, 0))
+        return sk.getsockname()[1]
+
+
+def launch_voicevox(user_path=None):
+    """VOICEVOX本体（エディタ画面つき）を起動する。見つからなければ FileNotFoundError。"""
+    path = find_voicevox(user_path)
     if not path:
         hint = (r"%LOCALAPPDATA%\Programs\VOICEVOX\VOICEVOX.exe" if IS_WIN
                 else "/Applications/VOICEVOX.app")
@@ -1994,6 +2425,52 @@ def launch_voicevox():
     else:
         subprocess.Popen([path])
     return path
+
+
+def launch_voicevox_engine(host="127.0.0.1", port=50021, use_gpu=False,
+                           user_path=None):
+    """エンジンだけを起動して (プロセス, URL) を返す。
+    渡す引数は、VOICEVOX本体が自分で使っているものと同じ3つだけにしてある
+    （--host / --port / --use_gpu）。素性の分からないオプションは使わない。"""
+    run = find_voicevox_engine(user_path)
+    if not run:
+        raise FileNotFoundError(
+            "VOICEVOXのエンジン(vv-engine)が見つかりませんでした。\n"
+            "VOICEVOX本体から起動してください。")
+    argv = [run, "--host", str(host), "--port", str(int(port))]
+    if use_gpu:
+        argv.append("--use_gpu")
+    env = dict(os.environ, VV_OUTPUT_LOG_UTF8="1")   # 本体と同じ環境変数
+    kw = {}
+    if IS_WIN:
+        # 黒いコンソール窓を出さない。CTRL+C がこちらへ飛ばないよう別グループに
+        kw["creationflags"] = (CREATE_NO_WINDOW
+                               | subprocess.CREATE_NEW_PROCESS_GROUP)
+    # 出力は捨てる。PIPE にして読まないと、たまった時点でエンジンが止まる
+    proc = subprocess.Popen(argv, cwd=os.path.dirname(run), env=env,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, **kw)
+    return proc, f"http://{host}:{int(port)}"
+
+
+def stop_process(proc, timeout=5):
+    """自分が起動したプロセスを終わらせる。子プロセスごと確実に片づける。"""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout)
+    except Exception:
+        try:
+            if IS_WIN:
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True,
+                               creationflags=CREATE_NO_WINDOW)
+            else:
+                proc.kill()
+        except Exception:
+            pass
 
 
 def can_play():
@@ -2015,24 +2492,150 @@ def wav_duration(wav_bytes) -> float:
         return w.getnframes() / float(w.getframerate())
 
 
+# 再生に使った一時ファイルのうち、まだ消せていないもの。
+# 鳴らし終わった直後は Windows がファイルを掴んだままのことがあり、その場に
+# 居座って待つと連続再生の間合いが延びてしまう。次の再生が始まれば前のファイルは
+# 解放されるので、そのときに片づける（居残るのは多くても1つ）。
+_PLAY_TMP_PENDING = []
+
+
+def _sweep_play_tmp():
+    """前回までに消せなかった一時ファイルを片づける。"""
+    for path in list(_PLAY_TMP_PENDING):
+        try:
+            os.remove(path)
+            _PLAY_TMP_PENDING.remove(path)
+        except OSError:
+            pass   # まだ掴まれている。次の機会に
+
+
+# このアプリが %TEMP%（Macなら /var/folders/...）に作る作業用の名前。
+# 正常に終われば finally で消えるが、プロセスごと落とされると残る
+# （実例: 合成の途中で強制終了され、13MBのスプールが1週間居座っていた）。
+_TMP_PREFIXES = ("t2v_play_", "t2v_prev_", "t2v_spool_", "t2v_ocr_",
+                 "t2v_img_", "t2v_clip_", "t2v_enc_")
+
+
+def sweep_stale_tmp(max_age_sec=86400):
+    """前回までの異常終了で残った作業用ファイル/フォルダを片づける。
+    いま動いている別のインスタンスの作業を巻き添えにしないよう、
+    **最終更新から1日以上たったものだけ**を消す（合成キャッシュの .tmp を
+    掃除している _synth_cache_evict と同じ考え方）。
+    消せなかったものは黙って見送る＝次の起動でまた挑む。
+    戻り値は (消した数, 回収したバイト数)。"""
+    freed, count = 0, 0
+    try:
+        root = tempfile.gettempdir()
+        now = time.time()
+        for name in os.listdir(root):
+            if not name.startswith(_TMP_PREFIXES):
+                continue
+            path = os.path.join(root, name)
+            try:
+                if now - os.stat(path).st_mtime <= max_age_sec:
+                    continue
+                if os.path.isdir(path):
+                    size = 0
+                    for base, _dirs, files in os.walk(path):
+                        for f in files:
+                            try:
+                                size += os.path.getsize(os.path.join(base, f))
+                            except OSError:
+                                pass
+                    shutil.rmtree(path, ignore_errors=True)
+                    if not os.path.exists(path):
+                        freed += size
+                        count += 1
+                else:
+                    size = os.path.getsize(path)
+                    os.remove(path)
+                    freed += size
+                    count += 1
+            except OSError:
+                pass   # 使用中・権限なし。次の機会に
+    except OSError:
+        pass
+    return count, freed
+
+
+def sweep_play_tmp_on_exit():
+    """終了時の後片づけ。最後に鳴らした音のファイルを1つ手放して消す。
+    自然に鳴り終わったときは末尾を切らないよう音を止めていないので、
+    Windowsがそのファイルを掴んだままセッションが終わる（%TEMPに1個残る）。
+    もう何も鳴らさないと決まった場面でだけ呼ぶこと。"""
+    if IS_WIN and _PLAY_TMP_PENDING:
+        try:
+            import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:
+            pass
+    for _ in range(10):
+        _sweep_play_tmp()
+        if not _PLAY_TMP_PENDING:
+            break
+        time.sleep(0.05)
+
+
+def _remove_play_tmp(path, tries=6):
+    """一時ファイルを消す。消せなければ次回に持ち越す（待ち続けない）。"""
+    for i in range(tries):
+        try:
+            os.remove(path)
+            return
+        except OSError:
+            if i < tries - 1:
+                time.sleep(0.02)
+    if path not in _PLAY_TMP_PENDING:
+        _PLAY_TMP_PENDING.append(path)
+
+
 def play_wav_blocking(wav_bytes, stop_event=None):
     """WAVバイト列を同期再生する（ワーカースレッドから呼ぶ想定）。
     stop_event (threading.Event) がセットされたら途中で再生を打ち切る。"""
+    if stop_event is not None and stop_event.is_set():
+        # もう止められた再生。ここで PlaySound を出すと、Windows は再生を
+        # プロセスに1本しか持てないので、今鳴っている「次の再生」の音を
+        # 差し替えたうえ直後の PURGE で黙らせてしまう（停止→すぐ別の行を
+        # 試聴、で音が消えていた）
+        return
     if IS_WIN:
         import winsound
         if stop_event is None:
-            # SND_MEMORY 同期再生（従来どおり）
+            # SND_MEMORY 同期再生（止める必要がないときはこれで足りる）
             winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
             return
-        # 非同期再生し、停止要求を監視しながら再生時間ぶん待つ
-        dur = wav_duration(wav_bytes)
-        winsound.PlaySound(wav_bytes, winsound.SND_MEMORY | winsound.SND_ASYNC)
-        deadline = time.monotonic() + dur
-        while time.monotonic() < deadline:
-            if stop_event.is_set():
-                winsound.PlaySound(None, winsound.SND_PURGE)
-                return
-            time.sleep(0.05)
+        # 途中で止められるようにするには非同期再生が要るが、winsound は
+        # 「メモリから非同期」を受け付けない（SND_MEMORY|SND_ASYNC は必ず
+        # RuntimeError: Cannot play asynchronously from memory になる。
+        # CPython の winsound が参照カウントの都合で明示的に禁じている）。
+        # そこで一度だけ一時ファイルへ書き、ファイル指定で非同期再生する
+        # ――Mac の afplay 経路と同じ考え方。
+        _sweep_play_tmp()   # 前回の置き土産をここで片づける
+        fd, path = tempfile.mkstemp(prefix="t2v_play_", suffix=".wav")
+        stopped = False
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(wav_bytes)
+            try:
+                dur = wav_duration(wav_bytes)
+            except Exception:
+                dur = 0.0   # 長さが読めなくても再生自体は試す
+            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            deadline = time.monotonic() + dur
+            while time.monotonic() < deadline:
+                if stop_event.is_set():
+                    stopped = True
+                    break
+                time.sleep(0.05)
+        finally:
+            # 音を切るのは「途中で止めたとき」だけ。最後まで鳴らしたときに
+            # 切ると、再生が始まるまでのわずかな遅れのぶん末尾が欠ける
+            if stopped:
+                try:
+                    winsound.PlaySound(None, winsound.SND_PURGE)
+                except Exception:
+                    pass
+            _remove_play_tmp(path)
         return
     if IS_MAC:
         fd, path = tempfile.mkstemp(prefix="t2v_prev_", suffix=".wav")
@@ -2061,16 +2664,168 @@ def play_wav_blocking(wav_bytes, stop_event=None):
 # ============================================================
 #  VOICEVOX エンジン連携
 # ============================================================
-def vv_check(base_url, timeout=3):
-    """エンジン到達確認。バージョン文字列 or None。"""
-    import requests
+# 既定のエンジンURL（VOICEVOX本体の engine_manifest.json の port と同じ）
+VOICEVOX_URL = "http://127.0.0.1:50021"
+
+
+def vv_normalize_url(text):
+    """入力されたURLを整える。"http://" を書き忘れても通るようにする
+    （素のままだと requests が MissingSchema で落ち、「未接続」という
+    無関係な表示になってしまう）。空文字なら空文字を返す。"""
+    u = str(text or "").strip().rstrip("/")
+    if not u:
+        return ""
+    if "://" not in u:
+        u = "http://" + u
+    return u
+
+
+def _is_local_url(url):
+    """このURLが自分のPC（ループバック）を指しているか。"""
     try:
-        r = requests.get(base_url + "/version", timeout=timeout)
-        if r.ok:
-            return r.text.strip().strip('"')
+        from urllib.parse import urlsplit
+        host = (urlsplit(url).hostname or "").lower()
     except Exception:
-        return None
-    return None
+        return False
+    return host in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
+
+
+def vv_probe(base_url, timeout=3):
+    """エンジンの状態を調べて内訳つきで返す。
+    {"ok": bool, "version": str, "status": str, "http": int|None, "detail": str}
+    status は次のどれか:
+      ok           つながった
+      refused      誰も応答しない（VOICEVOXが起動していない）
+      timeout      応答が遅い（起動中かもしれない）
+      bad_url      URLの形が正しくない
+      http_error   応答はあるがエラー（404など）
+      not_voicevox 別のソフトがそのポートを使っている
+      unknown      それ以外
+    vv_check は「版番号 or None」しか返せず、この4つを区別できなかった。"""
+    import requests
+    from requests import exceptions as rex
+    url = vv_normalize_url(base_url)
+    if not url:
+        return {"ok": False, "version": "", "status": "bad_url",
+                "http": None, "detail": "URLが空です"}
+    try:
+        r = requests.get(url + "/version", timeout=timeout)
+    # except の順番が大事: ConnectTimeout は ConnectionError と Timeout の
+    # 両方を継承しているので、Timeout を先に見ないと refused に吸われる
+    except (rex.MissingSchema, rex.InvalidSchema, rex.InvalidURL) as e:
+        return {"ok": False, "version": "", "status": "bad_url",
+                "http": None, "detail": str(e)}
+    except rex.ConnectTimeout as e:
+        # つなぐ段階でのタイムアウト。相手が自分のPCなら「誰もいない」と同じ意味
+        # （Windowsでは閉じたポートが拒否を返さず、黙って時間切れになる）。
+        # 外のホストなら本当に遅いのかもしれないので分けて扱う
+        return {"ok": False, "version": "",
+                "status": "refused" if _is_local_url(url) else "timeout",
+                "http": None, "detail": str(e)}
+    except rex.ReadTimeout as e:
+        # つながったが応答が返らない＝起動中でモデルを読んでいる最中など
+        return {"ok": False, "version": "", "status": "timeout",
+                "http": None, "detail": str(e)}
+    except rex.Timeout as e:
+        return {"ok": False, "version": "", "status": "timeout",
+                "http": None, "detail": str(e)}
+    except rex.ConnectionError as e:
+        return {"ok": False, "version": "", "status": "refused",
+                "http": None, "detail": str(e)}
+    except Exception as e:
+        return {"ok": False, "version": "", "status": "unknown",
+                "http": None, "detail": str(e)}
+    if not r.ok:
+        # 応答はあるのにエラー＝そのポートで動いているのは別のソフト。
+        # 本物のVOICEVOXは /version で失敗しないので、こう案内したほうが早い
+        return {"ok": False, "version": "", "status": "not_voicevox",
+                "http": r.status_code, "detail": r.reason or ""}
+    ver = r.text.strip().strip('"')
+    # 版番号らしくない応答＝別のソフトがそのポートで動いている
+    if not ver or not re.match(r"^\d", ver) or len(ver) > 40:
+        return {"ok": False, "version": "", "status": "not_voicevox",
+                "http": r.status_code, "detail": ver[:60]}
+    return {"ok": True, "version": ver, "status": "ok",
+            "http": r.status_code, "detail": ""}
+
+
+def vv_check(base_url, timeout=3):
+    """エンジン到達確認。バージョン文字列 or None。
+    内訳が要るときは vv_probe を使う（この関数は cli.py が使う従来の契約）。"""
+    return vv_probe(base_url, timeout=timeout)["version"] or None
+
+
+def vv_runtime_info_path():
+    """VOICEVOX本体が「今どのURLでエンジンを動かしているか」を書き出すファイル。
+    ポートが取り合いになったとき本体は別のポートへ逃げるので、決め打ちの
+    50021 だけを見ていると見失う。無ければ None。"""
+    if IS_WIN:
+        base = os.environ.get("APPDATA")
+        p = os.path.join(base, "voicevox", "runtime-info.json") if base else None
+    elif IS_MAC:
+        p = os.path.expanduser(
+            "~/Library/Application Support/voicevox/runtime-info.json")
+    else:
+        p = None
+    return p if (p and os.path.exists(p)) else None
+
+
+def vv_runtime_urls():
+    """runtime-info.json に載っているエンジンのURL一覧。読めなければ空リスト。
+    ※このファイルはVOICEVOXを終了しても残る（実測確認済み）。つまり
+    「書いてある＝生きている」ではないので、必ず vv_probe で確かめること。"""
+    p = vv_runtime_info_path()
+    if not p:
+        return []
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+        infos = data.get("engineInfos")
+        if not isinstance(infos, list):
+            return []
+        urls = []
+        # 名前に VOICEVOX を含むものを先に試す（追加エンジンがある場合の優先順）
+        for want_official in (True, False):
+            for e in infos:
+                if not isinstance(e, dict):
+                    continue
+                u = vv_normalize_url(e.get("url"))
+                is_official = "voicevox" in str(e.get("name", "")).lower()
+                if u and is_official == want_official and u not in urls:
+                    urls.append(u)
+        return urls
+    except Exception:
+        return []   # 壊れていても起動を止めない
+
+
+# 探索のときの待ち時間（秒）。ローカルの閉じたポートは拒否ではなく時間切れに
+# なるので、候補ごとにこの秒数を丸ごと待つ。短くしすぎると起動直後の
+# エンジンを取り逃がすため、実測（応答は1〜2秒）を踏まえて1.2秒にする
+DISCOVER_TIMEOUT = 1.2
+
+
+def vv_find_engine(preferred=None, timeout=DISCOVER_TIMEOUT):
+    """候補URLを順に試して、最初に応答したものを (url, probe) で返す。
+    どれも駄目なら (None, 最後のprobe結果) を返す。"""
+    last = {"ok": False, "version": "", "status": "refused",
+            "http": None, "detail": ""}
+    for u in vv_discover_urls(preferred):
+        p = vv_probe(u, timeout=timeout)
+        if p["ok"]:
+            return u, p
+        last = p
+    return None, last
+
+
+def vv_discover_urls(preferred=None):
+    """試す価値のあるエンジンURLを、試す順に並べて返す。
+    ポート番号を総当たりで探すことはしない（時間がかかるうえ、ウイルス対策
+    ソフトに嫌われる）。runtime-info.json が代替ポートを正確に持っている。"""
+    out = []
+    for u in [vv_normalize_url(preferred)] + vv_runtime_urls() + [VOICEVOX_URL]:
+        if u and u not in out:
+            out.append(u)
+    return out
 
 
 def vv_speakers(base_url, timeout=10):
@@ -2122,6 +2877,19 @@ def vv_reading(base_url, text, speaker_id, timeout=15):
                       timeout=timeout)
     q.raise_for_status()
     return _format_kana(q.json().get("kana", ""))
+
+
+def vv_audio_query(base_url, text, speaker_id, timeout=None):
+    """1文ぶんの audio_query（読み・アクセント・調整値の入れ物）をそのまま返す。
+    合成はせず、.vvproj にエディタと同じ形の query を埋めるために使う。"""
+    import requests
+    if timeout is None:
+        timeout = max(30, 15 + len(text) // 20)
+    q = requests.post(base_url + "/audio_query",
+                      params={"text": text, "speaker": speaker_id},
+                      timeout=timeout)
+    q.raise_for_status()
+    return q.json()
 
 
 def estimate_read_seconds(text: str, speed: float = 1.0) -> float:
@@ -2286,6 +3054,23 @@ def synth_cache_key(text, style_id, speed, pitch, intonation, volume,
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+def vv_warm_speaker(base_url, style_id, timeout=120):
+    """話者の音声モデルをエンジンに読み込ませておく（VOICEVOXエディタと同じ手）。
+    読み込みは最初の合成のときに暗黙で走るので、何もしないと「押してから
+    最初の音が出るまで」だけ極端に遅い（実測 2.05秒。温めておくと 0.60秒）。
+    skip_reinit=true なので、既に読み込み済みならエンジン側で素通りする。
+    失敗しても黙って False を返す（温まっていないだけで、動作には影響しない）。"""
+    import requests
+    try:
+        r = requests.post(base_url + "/initialize_speaker",
+                          params={"speaker": int(style_id),
+                                  "skip_reinit": "true"},
+                          timeout=timeout)
+        return r.status_code < 400
+    except Exception:
+        return False
+
+
 def vv_dict_hash(base_url, timeout=10):
     """ユーザー辞書全体の内容ハッシュ（合成キャッシュのキー用）。
     読みに影響し得る全フィールド（表記・読み・アクセント・品詞・優先度）を含める
@@ -2425,7 +3210,8 @@ def vv_synthesize_cached(base_url, text, speaker_id, speed=1.0, pitch=0.0,
 _WAV_MAX_DATA = 0xFFFFFFFF - 44
 
 
-def concat_wavs_to_file(sources, out_path, gap_sec=0.4, chunk_frames=1 << 18):
+def concat_wavs_to_file(sources, out_path, gap_sec=0.4, chunk_frames=1 << 18,
+                        progress_cb=None):
     """WAV（bytes または ファイルパス）の列を無音を挟んで out_path へ逐次連結し、
     各ソースの再生秒のリストを返す（SRT・チャプター計算にそのまま使える）。
     全体をメモリに持たないため、10時間級の本でもメモリは1チャンク分で済む。
@@ -2433,8 +3219,11 @@ def concat_wavs_to_file(sources, out_path, gap_sec=0.4, chunk_frames=1 << 18):
     durations = []
     out = wave.open(out_path, "wb")
     params, silence, written = None, b"", 0
+    nsrc = len(sources) if hasattr(sources, "__len__") else 0
     try:
         for i, src in enumerate(sources):
+            if progress_cb:
+                progress_cb(i, nsrc)   # 長い本ではここだけで何分もかかる
             f = (io.BytesIO(src) if isinstance(src, (bytes, bytearray))
                  else open(src, "rb"))
             with f, wave.open(f, "rb") as w:
@@ -2631,39 +3420,103 @@ def encode_audio(wav_bytes, out_path, fmt, encoders=None):
 def hira_to_kata(s: str) -> str:
     """ひらがなを全角カタカナに変換する（辞書の読みはカタカナ必須のため）。"""
     return "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in s)
-def vv_dict_list(base_url, timeout=10):
-    """登録済みユーザー辞書を [(uuid, surface, pronunciation, accent_type)] で返す。"""
+# 単語の種類（word_type）と、エンジンが返す品詞の対応。
+# エンジンは POST/PUT では word_type を受け取るが、GET /user_dict では返さず
+# part_of_speech（品詞）としてしか見えない。更新のときに元の種類を引き継ぐには
+# ここから逆引きする必要がある。実機(0.25.2)で1件ずつ登録して確認した対応。
+_WORD_TYPE_BY_POS = {
+    ("名詞", "固有名詞"): "PROPER_NOUN",
+    ("名詞", "一般"): "COMMON_NOUN",
+    ("動詞", "自立"): "VERB",
+    ("形容詞", "自立"): "ADJECTIVE",
+    ("名詞", "接尾"): "SUFFIX",
+}
+# 画面に出す名前（内部値は英語のまま送る）
+WORD_TYPE_LABELS = [
+    ("PROPER_NOUN", "固有名詞"),
+    ("COMMON_NOUN", "普通名詞"),
+    ("VERB", "動詞"),
+    ("ADJECTIVE", "形容詞"),
+    ("SUFFIX", "語尾"),
+]
+
+
+def word_type_of(word):
+    """GET /user_dict の1語から word_type を逆引きする。分からなければ None。
+    None のときは更新時に word_type を送らない＝エンジンの既定に任せる。"""
+    key = (str(word.get("part_of_speech", "")),
+           str(word.get("part_of_speech_detail_1", "")))
+    return _WORD_TYPE_BY_POS.get(key)
+
+
+def dict_surface_key(s):
+    """辞書の重複を調べるための、表記の比較用キー。
+    エンジンは登録時に表記を正規化するので、こちらが打った "ABC" が
+    エンジン側では "ＡＢＣ" になっていることがある。素の文字列比較だと
+    「登録済みなのに見つからない」＝二重登録になるため、幅と大小をそろえて比べる。
+    ※比較にだけ使う。登録する値そのものは加工しない。"""
+    return unicodedata.normalize("NFKC", str(s)).strip().lower()
+
+
+def vv_dict_list(base_url, timeout=10, full=False):
+    """登録済みユーザー辞書を返す。
+    full=False: [(uuid, surface, pronunciation, accent_type)]（従来どおり）
+    full=True : [{uuid, surface, pronunciation, accent_type, word_type, priority}]
+                （品詞と優先度を保ったまま更新するのに使う）"""
     import requests
     r = requests.get(base_url + "/user_dict", timeout=timeout)
     r.raise_for_status()
     out = []
     for word_uuid, w in r.json().items():
-        out.append((word_uuid, w.get("surface", ""),
-                    w.get("pronunciation", ""), w.get("accent_type", 0)))
-    out.sort(key=lambda x: x[1])
+        if full:
+            out.append({"uuid": word_uuid,
+                        "surface": w.get("surface", ""),
+                        "pronunciation": w.get("pronunciation", ""),
+                        "accent_type": w.get("accent_type", 0),
+                        "word_type": word_type_of(w),
+                        "priority": w.get("priority"),
+                        "raw": w})
+        else:
+            out.append((word_uuid, w.get("surface", ""),
+                        w.get("pronunciation", ""), w.get("accent_type", 0)))
+    out.sort(key=lambda x: x["surface"] if full else x[1])
     return out
 
 
-def vv_dict_add(base_url, surface, pronunciation, accent_type=0, timeout=10):
+def _dict_params(surface, pronunciation, accent_type, word_type, priority):
+    """POST/PUT に渡すパラメータを組む。word_type / priority は None のとき
+    「送らない」＝エンジンの既定に任せる（従来の呼び出しと同じ挙動になる）。"""
+    p = {"surface": surface, "pronunciation": pronunciation,
+         "accent_type": int(accent_type)}
+    if word_type:
+        p["word_type"] = str(word_type)
+    if priority is not None:
+        p["priority"] = int(priority)
+    return p
+
+
+def vv_dict_add(base_url, surface, pronunciation, accent_type=0, timeout=10,
+                word_type=None, priority=None):
     """単語を登録し、word_uuid を返す。pronunciation は全角カタカナ。"""
     import requests
     r = requests.post(base_url + "/user_dict_word",
-                      params={"surface": surface,
-                              "pronunciation": pronunciation,
-                              "accent_type": int(accent_type)},
+                      params=_dict_params(surface, pronunciation, accent_type,
+                                          word_type, priority),
                       timeout=timeout)
     r.raise_for_status()
     return r.json()
 
 
 def vv_dict_update(base_url, word_uuid, surface, pronunciation,
-                   accent_type=0, timeout=10):
-    """登録済み単語を更新する（読みの修正。削除→再追加が不要になる）。"""
+                   accent_type=0, timeout=10, word_type=None, priority=None):
+    """登録済み単語を更新する（読みの修正。削除→再追加が不要になる）。
+    word_type / priority を渡さないとエンジンは既定値で作り直すため、
+    読みを直しただけのつもりでも品詞や優先度が巻き戻る。呼び出し側は
+    vv_dict_list(full=True) で読んだ今の値を渡すこと。"""
     import requests
     r = requests.put(base_url + f"/user_dict_word/{word_uuid}",
-                     params={"surface": surface,
-                             "pronunciation": pronunciation,
-                             "accent_type": int(accent_type)},
+                     params=_dict_params(surface, pronunciation, accent_type,
+                                         word_type, priority),
                      timeout=timeout)
     r.raise_for_status()
 
@@ -2793,6 +3646,158 @@ def make_srt(lines, durations, gap_sec=0.0) -> str:
 VV_ENGINE_ID = "074fc39e-678b-4c13-8916-ffca8d505d1d"
 
 
+def vv_engine_id(base_url, timeout=5):
+    """接続中エンジンの識別子(UUID)を返す。取れなければ公式エンジンのIDを返す。
+    .vvproj の voice.engineId は「どのエンジンで作った音声か」の印で、ここが実物と
+    違うとエディタ側で音声を復元できない。公式エンジンなら値は同じなので、
+    普段づかいでは何も変わらない（別エンジンを繋いだときだけ効く）。"""
+    import requests
+    try:
+        r = requests.get(base_url + "/engine_manifest", timeout=timeout)
+        if r.ok:
+            uid = str(r.json().get("uuid", "")).strip()
+            # 壊れた値を書き込むほうが危ないので、UUIDの形だけは確かめる
+            if len(uid) == 36 and uid.count("-") == 4:
+                return uid
+    except Exception:
+        pass
+    return VV_ENGINE_ID
+
+
+# .vvproj(0.22形式) の query が持つキー。ここに無いキーは書き出さない。
+# ・新しいエンジンが増やしたキー → 0.22 として読まれるときに邪魔なので落とす
+# ・古いエンジンに無いキー → 既定値で埋めて形をそろえる
+_VVPROJ_QUERY_DEFAULTS = {
+    "accentPhrases": [],
+    "speedScale": 1.0,
+    "pitchScale": 0.0,
+    "intonationScale": 1.0,
+    "volumeScale": 1.0,
+    "prePhonemeLength": 0.1,
+    "postPhonemeLength": 0.1,
+    "pauseLength": None,
+    "pauseLengthScale": 1.0,
+    "outputSamplingRate": 24000,
+    "outputStereo": False,
+    "kana": "",
+}
+
+
+def _to_camel(name):
+    """accent_phrases → accentPhrases のように、先頭以外の単語を大文字始まりにする。"""
+    head, _, rest = str(name).partition("_")
+    if not rest:
+        return str(name)
+    return head + "".join(w[:1].upper() + w[1:] for w in rest.split("_"))
+
+
+def _camelize(obj):
+    """辞書のキーを snake_case から camelCase へ再帰的に変換する。
+    VOICEVOXは「エンジンAPIは snake_case・エディタのプロジェクト形式は camelCase」
+    という食い違いがあり、そのまま書くとエディタの型チェックに弾かれて
+    「プロジェクトを読み込めません」になる（accent_phrases / pause_mora /
+    is_interrogative / consonant_length / vowel_length が該当）。"""
+    if isinstance(obj, dict):
+        return {_to_camel(k): _camelize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_camelize(v) for v in obj]
+    return obj
+
+
+def _drop_nulls(obj):
+    """値が None のキーを再帰的に取り除く。
+    エンジンは「無い」を null で返すが（子音のないモーラの consonant、間のない句の
+    pause_mora など）、エディタ側は「キーごと無い」を期待しており、null のまま渡すと
+    型チェックに弾かれて「プロジェクトを読み込めません」になる。"""
+    if isinstance(obj, dict):
+        return {k: _drop_nulls(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_drop_nulls(v) for v in obj]
+    return obj
+
+
+def normalize_vvproj_query(query, speed=1.0, pitch=0.0, intonation=1.0,
+                           volume=1.0, pause_scale=1.0):
+    """audio_query の生レスポンスを .vvproj に入れられる形へ整えて返す。
+    元の dict は変更せず、新しい dict を作る。
+    アクセント情報の中身は組み立て直さない：キー名を camelCase へ直すだけで、
+    値はエンジンが返したものを丸ごと通す（自前で作ると必ず壊れる）。"""
+    src = query if isinstance(query, dict) else {}
+    out = {}
+    for key, default in _VVPROJ_QUERY_DEFAULTS.items():
+        out[key] = src.get(key, default)
+    # エンジンは accent_phrases、エディタは accentPhrases。中身のキー
+    # （pause_mora 等）も含めて丸ごと camelCase へ直してから載せる
+    out["accentPhrases"] = _drop_nulls(_camelize(
+        src.get("accent_phrases", src.get("accentPhrases", []))))
+    # 調整値を上書き。エディタの検証は型に厳しいので、ここで型を確定させる
+    out["speedScale"] = float(speed)
+    out["pitchScale"] = float(pitch)
+    out["intonationScale"] = float(intonation)
+    out["volumeScale"] = float(volume)
+    # 句読点の間は、エンジンが対応しているとき（キーを返したとき）だけ触る
+    if "pauseLengthScale" in src:
+        out["pauseLengthScale"] = float(pause_scale)
+    out["prePhonemeLength"] = float(out.get("prePhonemeLength") or 0.0)
+    out["postPhonemeLength"] = float(out.get("postPhonemeLength") or 0.0)
+    out["outputSamplingRate"] = int(out.get("outputSamplingRate") or 24000)
+    out["outputStereo"] = bool(out.get("outputStereo"))
+    out["kana"] = str(out.get("kana") or "")
+    if out.get("pauseLength") is not None:
+        out["pauseLength"] = float(out["pauseLength"])
+    out["pauseLengthScale"] = float(out.get("pauseLengthScale") or 1.0)
+    return out
+
+
+def validate_vvproj(text):
+    """書き出す直前の自己点検。おかしければ ValueError を投げる。
+    エディタに「開けない」と言われても原因が見えないので、こちらで先に落とす。"""
+    try:
+        proj = json.loads(text)
+    except Exception as e:
+        raise ValueError("JSONとして壊れています: %s" % e)
+    if not isinstance(proj.get("appVersion"), str):
+        raise ValueError("appVersion がありません")
+    talk = proj.get("talk")
+    if not isinstance(talk, dict):
+        raise ValueError("talk セクションがありません")
+    keys, items = talk.get("audioKeys"), talk.get("audioItems")
+    if not isinstance(keys, list) or not isinstance(items, dict):
+        raise ValueError("audioKeys / audioItems の形が違います")
+    # 片方にしか無いキーがあるとエディタは確実に壊れる
+    if set(keys) != set(items.keys()):
+        raise ValueError("audioKeys と audioItems の対応が取れていません")
+    if len(keys) != len(set(keys)):
+        raise ValueError("audioKeys に重複があります")
+    allowed = set(_VVPROJ_QUERY_DEFAULTS)
+    for k in keys:
+        item = items[k]
+        if not isinstance(item.get("text"), str):
+            raise ValueError("text が文字列ではありません")
+        v = item.get("voice")
+        if not isinstance(v, dict):
+            raise ValueError("voice がありません")
+        if not isinstance(v.get("engineId"), str) or not isinstance(
+                v.get("speakerId"), str):
+            raise ValueError("engineId / speakerId が文字列ではありません")
+        if not isinstance(v.get("styleId"), int):
+            raise ValueError("styleId が整数ではありません")
+        q = item.get("query")
+        if q is None:
+            continue
+        if not isinstance(q, dict):
+            raise ValueError("query が辞書ではありません")
+        extra = set(q) - allowed
+        if extra:
+            raise ValueError("query に想定外のキー: %s" % sorted(extra))
+        if not isinstance(q.get("accentPhrases"), list):
+            raise ValueError("accentPhrases がリストではありません")
+        for nk in ("speedScale", "pitchScale", "intonationScale", "volumeScale"):
+            if not isinstance(q.get(nk), float):
+                raise ValueError("%s が小数ではありません" % nk)
+    return proj
+
+
 def make_vvproj(lines, style_id, speaker_uuid, engine_id=VV_ENGINE_ID):
     """
     行リストから VOICEVOX エディタで開けるプロジェクト(JSON文字列)を作る。
@@ -2801,14 +3806,22 @@ def make_vvproj(lines, style_id, speaker_uuid, engine_id=VV_ENGINE_ID):
     ・0.22以降のスキーマ追加（phonemeTimingEditData 等）はエディタ側の
       マイグレーションが自動補完するため、この形式が安全な最小構成
     speaker_uuid: vv_speakers() が返す話者UUID（voice.speakerId に入る）
-    lines の要素は文字列、または行別話者の (text, style_id, speaker_uuid) タプル
-    （タプルの style_id/speaker_uuid が None なら既定値を使う）
+    lines の要素は次の3つのいずれか:
+      ・文字列
+      ・(text, style_id, speaker_uuid)            行別話者
+      ・(text, style_id, speaker_uuid, query)     調整値つき
+    （style_id/speaker_uuid が None なら既定値を使う。query が None なら
+      そのブロックだけ query 無しになる＝有り無しが混ざってよい）
     """
     audio_keys = []
     audio_items = {}
     for ln in lines:
+        query = None
         if isinstance(ln, (tuple, list)):
-            text, sid, sp_uuid = ln
+            if len(ln) >= 4:
+                text, sid, sp_uuid, query = ln[0], ln[1], ln[2], ln[3]
+            else:
+                text, sid, sp_uuid = ln
             sid = style_id if sid is None else sid
             sp_uuid = speaker_uuid if sp_uuid is None else sp_uuid
         else:
@@ -2826,6 +3839,10 @@ def make_vvproj(lines, style_id, speaker_uuid, engine_id=VV_ENGINE_ID):
                 "styleId": int(sid),
             },
         }
+        # query は 0.22 形式でも省略できるフィールド。持たせると話速・音高・
+        # 抑揚・音量がエディタ側にそのまま引き継がれる（無ければ既定値で開く）
+        if query is not None:
+            audio_items[key]["query"] = query
     track_id = str(uuid.uuid4())
     proj = {
         "appVersion": "0.22.0",

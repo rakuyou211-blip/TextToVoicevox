@@ -8,8 +8,11 @@ pypdfium2>=4,<6          # PDFの解析・ページ描画
 pillow>=10,<13           # 画像処理（前処理・クリップボード画像の取り込み）
 requests>=2.28,<3        # VOICEVOXエンジンとのHTTP通信
 
-# ドラッグ＆ドロップ（無くてもアプリは起動する。入れると画面へ直接放り込める）
-tkinterdnd2>=0.3,<1
+# ドラッグ＆ドロップ（無くてもアプリは起動する。ファイルは「選ぶ」ボタンからも使える）
+# Windows では必須から外した: 対応する部品が無い環境（ARM64版Windowsなど）だと
+# ここで失敗した拍子にセットアップ全体が止まってしまうため。代わりに setup.bat が
+# 別途 tkinterdnd2 を入れる（入らなくても続行する）。
+tkinterdnd2>=0.3,<1 ; sys_platform != "win32"
 
 # macOS 専用: Apple Vision フレームワークでのオフラインOCR
 pyobjc-framework-Vision>=9 ; sys_platform == "darwin"

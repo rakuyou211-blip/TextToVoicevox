@@ -56,6 +56,17 @@ if ($null -eq $engine) {
     exit 2
 }
 
+# 実際に使った言語と、このPCで使えるOCR言語。Python側が「英語を頼んだのに
+# 日本語で読んだ」「英語のOCRが入っていない」を見分けるために結果へ載せる
+# （知らないキーは旧版のPythonが無視するので互換は崩れない）
+$engineLang = ""
+try { $engineLang = [string]$engine.RecognizerLanguage.LanguageTag } catch { $engineLang = "" }
+$availLangs = @()
+try {
+    $availLangs = @([Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages |
+        ForEach-Object { [string]$_.LanguageTag })
+} catch { $availLangs = @() }
+
 function Read-Image-Text([string]$path) {
     $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($path)) ([Windows.Storage.StorageFile])
     $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
@@ -123,7 +134,8 @@ $results = New-Object System.Collections.Generic.List[object]
 foreach ($line in [System.IO.File]::ReadAllLines($Manifest, [System.Text.Encoding]::UTF8)) {
     $p = $line.Trim()
     if ([string]::IsNullOrWhiteSpace($p)) { continue }
-    $obj = [ordered]@{ path = $p; text = ""; ok = $false; error = "" }
+    $obj = [ordered]@{ path = $p; text = ""; ok = $false; error = "";
+                       engine_lang = $engineLang; available_langs = $availLangs }
     try {
         $r = Read-Image-Text $p
         $obj["text"] = $r.text

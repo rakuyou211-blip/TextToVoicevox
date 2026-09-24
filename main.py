@@ -19,8 +19,6 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter import font as tkfont
 
-from PIL import ImageGrab
-
 import core
 
 try:
@@ -116,11 +114,38 @@ else:
     UI_FONT = None
     TEXT_FONT = None
 
+# 高DPI対応（Windowsのみ）。宣言しないとWindowsが窓全体をビットマップ拡大する
+# ため、150%や250%表示の画面では文字がボケる（Tk自身は宣言してくれない）。
+# ここで「システムDPI対応」を宣言し、文字はTkが点(pt)指定から正しい解像度で
+# 描き直す。pxで書いた余白は小さくなってしまうので、倍率 UI_SCALE で補正する。
+UI_SCALE = 1.0
+if core.IS_WIN:
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+        try:
+            UI_SCALE = ctypes.windll.user32.GetDpiForSystem() / 96.0
+        except Exception:
+            dc = ctypes.windll.user32.GetDC(0)
+            UI_SCALE = ctypes.windll.gdi32.GetDeviceCaps(dc, 88) / 96.0  # LOGPIXELSX
+            ctypes.windll.user32.ReleaseDC(0, dc)
+    except Exception:
+        UI_SCALE = 1.0
+
+
+def _px(n):
+    """レイアウト用のピクセル値をDPI倍率で補正する（Mac・100%表示では素通し）。"""
+    return int(round(n * UI_SCALE))
+
+
 # レイアウトの余白定数（全セクションで統一し、バラバラなpadx/padyを解消する）
-PAD_X = 8    # セクション外周の水平余白
-PAD_Y = 6    # セクション外周の垂直余白
-GAPX = 6     # 同一行のラベルと入力欄・小ブロック間の間隔
-GAPY = 4     # grid の行間
+PAD_X = _px(8)   # セクション外周の水平余白
+PAD_Y = _px(6)   # セクション外周の垂直余白
+GAPX = _px(6)    # 同一行のラベルと入力欄・小ブロック間の間隔
+GAPY = _px(4)    # grid の行間
 
 
 class _Tooltip:
@@ -182,18 +207,58 @@ class App(_Base):
     # 出力単位: 内部キー → 表示ラベル（コンボボックスの並び順と一致させる）
     _UNITS = {"each": "1行=1ファイル", "combine": "全文を結合",
               "nlines": "N行ごと", "para": "段落ごと"}
+    # 接続の見張りの間隔（ミリ秒）。ループバックの /version は1ミリ秒未満なので
+    # 15秒おきでも負荷は実質ゼロ。接続中かつ待機中だけ動く
+    _HEALTH_INTERVAL_MS = 15000
+    # 接続できていないときの表示。状態ごとに理由が伝わる言葉にする
+    _CONN_TEXT = {
+        "waiting": "エンジン: 起動を待っています…（自動で再接続）",
+        "searching": "エンジン: 探しています…",
+        "refused": "エンジン: 未接続（VOICEVOXを起動してください）",
+        "lost": "⚠ 接続が切れました（VOICEVOXを起動してください）",
+        "timeout": "エンジン: 応答が遅いです（起動中かもしれません）",
+        "bad_url": "エンジン: URLの形式が正しくありません",
+        "http_error": "エンジン: エラーが返ってきました",
+        "not_voicevox": "エンジン: 別のソフトが応答しています（ポート番号を確認）",
+        "unknown": "エンジン: 未接続",
+    }
 
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
         self._set_window_icon()
-        self.geometry("980x880")
-        self.minsize(860, 700)
+        self.geometry(f"{_px(980)}x{_px(880)}")
+        self.minsize(_px(860), _px(700))
+        # 構築中（Windowsは絵文字フォントの初回読み込みだけで最大1秒近く固まる）は
+        # 本体を隠し、代わりに小さな「起動しています」窓を出す。ダブルクリックから
+        # 無反応に見える時間をなくすため。窓が出せない環境でも起動自体は続ける
+        self.withdraw()
+        self._splash = self._show_splash()
 
         self.files = []                 # 入力ファイルパス
         self.q = queue.Queue()          # ワーカー→UI 通知
         self.busy = False
         self.speakers = []              # [(label, style_id, speaker_uuid)]
+        # 接続状態はここだけが持つ。self.speakers は「話者リストの中身」で
+        # あって「今つながっているか」ではない（切断後もリストは保持する）
+        self.conn_state = "unknown"     # unknown / ok / waiting / refused / lost
+        self._conn_fail = 0             # ヘルスチェックの連続失敗数（2回で切断）
+        self._health_checking = False   # ヘルス確認スレッドの多重起動防止
+        self._conn_retry_running = False   # 再接続tickが回っているか（二重起動防止）
+        self._conn_retry_interval = 3000   # 再接続tickの間隔（ミリ秒）
+        # エンジンURLの決め方: auto=別ポートに逃げたVOICEVOXも自動で見つける /
+        # manual=ユーザーが指定したURLだけを使う。設定から復元する
+        self._engine_url_mode = "auto"
+        # 「エンジンのみ起動」で自分が起動したエンジン。None のときは
+        # 「自分の子ではない」＝終了時に絶対に手を出さない（誤って
+        # ユーザーが自分で開いたVOICEVOXを閉じてしまわないため）
+        self._engine_proc = None
+        self._voicevox_path = None      # 手動で指定された本体の場所
+        # 定期的に自分を呼び直すループの予約。終了時にまとめて止める
+        # （止めないと、窓を閉じた後にコールバックが動こうとして
+        #  Tclがエラーを吐く。pythonw起動では見えないが行儀が悪い）
+        self._ticks = {}
+        self._engine_use_gpu = False    # エンジンのみ起動でGPUを使うか
         self.base_url = VOICEVOX_DEFAULT
         self._previewing = False
         self._preview_buf = None        # 再生中WAVの参照保持（GC防止）
@@ -212,6 +277,15 @@ class App(_Base):
         self._shape_report = {}         # 整形レポート {"removed": [...], "confusables": [...]}
         self._report_win = None         # 整形レポートのウィンドウ（多重表示防止）
         self._synth_cancel = None       # 音声生成のキャンセルEvent（生成中のみ非None）
+        self._vvproj_cancel = None      # .vvproj書き出しのキャンセルEvent
+        self._workers = []              # 終了時に後片づけを待つワーカースレッド
+        self._warmed = set()            # 先読み済みの (エンジン, 話者) の組
+        self._prefetching = False       # カーソル行の先読みが動いているか
+        self._prefetch_after = None     # その予約（カーソルが動くたび取り直す）
+        self._prefetch_target = None    # 先読み中の (本文, 話者, 声の数値)
+        self._prefetch_done = None      # その先読みが終わったら立つ Event
+        self._play_gen = 0              # 再生の世代番号（古い完了通知を捨てる）
+        self._engine_id = core.VV_ENGINE_ID  # 接続中エンジンの識別子（実物で上書き）
         self._playall_pause = None      # 連続再生の一時停止Event（再生中のみ非None）
         self._preview_stop = None       # 試聴・声サンプルの停止Event（再生中のみ非None）
         self._extract_cancel = None     # テキスト抽出のキャンセルEvent（抽出中のみ非None）
@@ -234,10 +308,51 @@ class App(_Base):
         self._restore_text_cache()
         self._update_step_highlight()   # 本文の有無に応じて「次に押すボタン」を絞る
         self._schedule_stats()          # 復元本文の行数・めやすを表示
+        # 構築が済んだのでスプラッシュを引っ込め、本体を表示する
+        if self._splash:
+            try:
+                self._splash.destroy()
+            except tk.TclError:
+                pass
+            self._splash = None
+        self.deiconify()
+        if getattr(self, "_want_zoomed", False):
+            try:
+                self.state("zoomed")   # 前回、最大化したまま閉じていた
+            except tk.TclError:
+                pass
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(120, self._poll_queue)
+        self._tick("poll", 120, self._poll_queue)
         self.after(600, self._auto_connect)  # 起動時にエンジンへ自動接続
-        self.after(60000, self._autosave_tick)  # 本文の自動保存（クラッシュ対策）
+        self._tick("autosave", 60000, self._autosave_tick)
+        self._tick("health", self._HEALTH_INTERVAL_MS, self._health_tick)
+
+    def _show_splash(self):
+        """起動中だけ出す小窓。失敗したら None（見た目だけの機能なので起動は続行）。
+        文言に絵文字を使わないこと：Windowsでは初回の絵文字描画がフォント探索で
+        数百ms固まるため、この窓だけは必ず一瞬で出す必要がある。"""
+        try:
+            sp = tk.Toplevel(self)
+            sp.overrideredirect(True)
+            sp.configure(bg="#fdfdfd", highlightthickness=1,
+                         highlightbackground="#ced6e0")
+            f_main = ("Yu Gothic UI", 11, "bold") if core.IS_WIN else None
+            f_sub = ("Yu Gothic UI", 9) if core.IS_WIN else None
+            tk.Label(sp, text="テキスト抽出 → VOICEVOX", bg="#fdfdfd",
+                     fg="#171a1f", **(dict(font=f_main) if f_main else {})
+                     ).pack(padx=_px(32), pady=(_px(20), _px(2)))
+            tk.Label(sp, text="起動しています…", bg="#fdfdfd",
+                     fg="#6e7781", **(dict(font=f_sub) if f_sub else {})
+                     ).pack(padx=_px(32), pady=(0, _px(16)))
+            tk.Frame(sp, bg="#2e7cf0", height=_px(3)).pack(fill="x", side="bottom")
+            sp.update_idletasks()
+            x = (sp.winfo_screenwidth() - sp.winfo_reqwidth()) // 2
+            y = (sp.winfo_screenheight() - sp.winfo_reqheight()) // 2
+            sp.geometry(f"+{x}+{y}")
+            sp.update()
+            return sp
+        except Exception:
+            return None
 
     # ---------------- UI構築 ----------------
     def _build_ui(self):
@@ -390,6 +505,12 @@ class App(_Base):
         self._adv_btn = ttk.Button(head, text="詳細設定 ▸", width=12,
                                    command=self._toggle_advanced)
         self._adv_btn.pack(side="right")
+        # 英文の画像が崩れて読まれる人への説明。押しても何も入れない（説明を出すだけ）
+        self._en_btn = ttk.Button(head, text="英語の画像は？", width=13,
+                                  command=self.open_english_ocr_help)
+        self._en_btn.pack(side="right", padx=(0, GAPX))
+        _Tooltip(self._en_btn,
+                 "英文の画像が漢字まじりに崩れて読まれるときの、直し方の説明です。")
 
         common = ttk.Frame(opt)
         common.pack(fill="x", padx=GAPX, pady=(2, 0))
@@ -454,11 +575,11 @@ class App(_Base):
         _Tooltip(self.extract_btn,
                  "追加したファイルからテキストを抽出します"
                  f"（{'⌘' if core.IS_MAC else 'Ctrl+'}Return）。")
-        self.progress = ttk.Progressbar(run, mode="determinate", length=240)
+        self.progress = ttk.Progressbar(run, mode="determinate", length=_px(240))
         self.progress.pack(side="left", padx=10)
-        # テーマ選択（🍂ライト/🌙ダーク/☀️くっきり/🌿ずんだ）。packは後詰めから縮むため、
-        # 固定コントロールのテーマ選択を先に確保し、伸縮できる状態文を最後にする
-        self.theme_cb = ttk.Combobox(run, width=11, state="readonly",
+        # テーマ選択（🍂ライト/🌙ダーク/☀️くっきり/🌿ずんだ）。
+        # packは後詰めから縮むため、固定のテーマ選択を先に確保し、伸縮する状態文を最後に
+        self.theme_cb = ttk.Combobox(run, width=12, state="readonly",
                                      values=[l for _k, l, _p in self.THEMES])
         self.theme_cb.pack(side="right", padx=4)
         self.theme_cb.bind("<<ComboboxSelected>>", self._theme_selected)
@@ -487,7 +608,7 @@ class App(_Base):
         busy_gated: 処理・再生中に実際に無効化されるボタン（生成/試聴/連続再生）は
         True。busy中も押せるボタン（辞書・vvproj保存）は False にして誤案内を防ぐ。"""
         def _text():
-            if not self.speakers:
+            if not self._engine_ready():
                 return ("VOICEVOXエンジン未接続です。\n"
                         "「エンジン接続確認」を押すと使えるようになります。")
             if busy_gated and (self.busy or self._previewing):
@@ -579,8 +700,18 @@ class App(_Base):
         ttk.Label(c, text="接続", style="Cluster.TLabel").pack(side="left", padx=(0, GAPX))
         self._conn_detail = ttk.Frame(c)
         self._conn_detail.pack(side="left")
-        ttk.Button(self._conn_detail, text="VOICEVOX起動",
-                   command=self.launch_voicevox).pack(side="left")
+        _b_gui = ttk.Button(self._conn_detail, text="VOICEVOX起動",
+                            command=self.launch_voicevox)
+        _b_gui.pack(side="left")
+        _Tooltip(_b_gui, "VOICEVOX本体（エディタ画面つき）を起動します。\n"
+                         "あとから手直ししたいときはこちら。")
+        self.engine_only_btn = ttk.Button(self._conn_detail, text="エンジンのみ",
+                                          command=self.launch_engine_only)
+        self.engine_only_btn.pack(side="left", padx=(2, 0))
+        _Tooltip(self.engine_only_btn,
+                 "エディタ画面を開かず、読み上げエンジンだけを起動します。\n"
+                 "起動が軽くて速いぶん、VOICEVOX上での手直しはできません。\n"
+                 "このアプリを閉じると一緒に終了します。")
         ttk.Label(self._conn_detail, text="URL:").pack(side="left", padx=(GAPX, 2))
         self.url_var = tk.StringVar(value=self.base_url)
         ttk.Entry(self._conn_detail, textvariable=self.url_var,
@@ -615,6 +746,11 @@ class App(_Base):
         self.speaker_cb = ttk.Combobox(va, width=14, state="disabled")
         self.speaker_cb.pack(side="left", padx=(0, 2))
         self.speaker_cb.bind("<<ComboboxSelected>>", self._update_portrait, add="+")
+        # 声を選び直したら、その声のモデルを裏で読み込ませておく
+        self.speaker_cb.bind("<<ComboboxSelected>>",
+                             lambda e: self._warm_speaker(), add="+")
+        self.char_cb.bind("<<ComboboxSelected>>",
+                          lambda e: self.after(50, self._warm_speaker), add="+")
         _Tooltip(self.speaker_cb, "スタイル（ノーマル・あまあま等）を選びます。\n"
                                   "「🔊 声を聴く」で聴き比べできます。")
         # 声サンプル試聴（エンジン同梱の公式サンプルを再生。声選びが楽になる）
@@ -719,6 +855,15 @@ class App(_Base):
         _Tooltip(self.vvproj_btn, self._tip_engine_gate(
             "VOICEVOXエディタでそのまま開けるプロジェクト(.vvproj)を保存します。",
             busy_gated=False))
+        self.vvproj_query_var = tk.BooleanVar(value=True)
+        _cb = ttk.Checkbutton(ob, text="調整値も入れる",
+                              variable=self.vvproj_query_var)
+        _cb.pack(side="left")
+        _Tooltip(_cb,
+                 "話速・音高・抑揚・音量の調整を、プロジェクトにも書き込みます。\n"
+                 "VOICEVOXで開いたとき、このアプリと同じ声の設定から始められます。\n"
+                 "行数が多いと少し時間がかかります"
+                 "（調整していないときは何も待ちません）。")
         _sep()
 
         # === 再生・生成 ===
@@ -745,7 +890,8 @@ class App(_Base):
                                       command=self.play_all, state="disabled")
         self.playall_btn.pack(side="left", padx=4)
         _Tooltip(self.playall_btn, self._tip_engine_gate(
-            "カーソル行から最後まで順に読み上げます。"))
+            "本文の最初から順に読み上げます。\n"
+            "途中から聴きたいときは、その行を右クリック →「ここから連続再生」。"))
         self.pause_btn = ttk.Button(p, text="⏸ 一時停止", width=10,
                                     command=self.toggle_pause, state="disabled")
         self.pause_btn.pack(side="left", padx=4)
@@ -757,7 +903,7 @@ class App(_Base):
         self.resume_btn.pack(side="left", padx=4)
 
         def _resume_tip():
-            if not self.speakers:
+            if not self._engine_ready():
                 return ("VOICEVOXエンジン接続後、連続再生すると\n"
                         "しおりが作られ、続きから再生できます。")
             if self._bookmark is None:
@@ -841,6 +987,9 @@ class App(_Base):
         self.text.config(yscrollcommand=tsb.set)
         # 本文が（全消去/復元“以外”の理由で）変わったら復元ポイントを無効化する一元フック
         self.text.bind("<<Modified>>", self._on_text_modified)
+        # カーソルが止まったら、その行を裏で先に合成しておく（▶試聴を待たせない）
+        for seq in ("<KeyRelease>", "<ButtonRelease-1>"):
+            self.text.bind(seq, self._schedule_prefetch, add="+")
 
         # 右クリックメニュー（編集・この行を試聴・辞書登録・@タグ・＃メモ行）。
         # macのTk(aqua)は右クリック=Button-2（Ctrl+クリックも慣習）、Win/LinuxはButton-3
@@ -982,7 +1131,7 @@ class App(_Base):
         has_sel = bool(self.text.tag_ranges("sel"))
         sel = self.text.get("sel.first", "sel.last").strip() if has_sel else ""
         line = self.text.get("insert linestart", "insert lineend")
-        can_speak = ("normal" if (self.speakers and not self.busy
+        can_speak = ("normal" if (self._engine_ready() and not self.busy
                                   and not self._previewing) else "disabled")
         m = self._text_menu
         m.delete(0, "end")
@@ -999,10 +1148,12 @@ class App(_Base):
         m.add_separator()
         m.add_command(label="▶ この行を試聴", state=can_speak,
                       command=self.preview_selected)
+        m.add_command(label="▶▶ ここから連続再生", state=can_speak,
+                      command=self.play_from_cursor)
         m.add_command(
             label=(f"「{sel[:10]}」を読み方辞書に登録..." if sel
                    else "選択語を読み方辞書に登録..."),
-            state="normal" if (sel and self.speakers) else "disabled",
+            state="normal" if (sel and self._engine_ready()) else "disabled",
             command=lambda w=sel: self._register_word_to_dict(w))
         m.add_separator()
         # @話者タグ: キャラ名だけのサブメニュー（スタイル名まで並べると多すぎるため。
@@ -1428,6 +1579,128 @@ class App(_Base):
         return dict(speed=self.speed_var.get(), pitch=self.pitch_var.get(),
                     intonation=self.into_var.get(), volume=self.vol_var.get())
 
+    def _warm_speaker(self, style_id=None):
+        """選ばれている話者のモデルを、裏でエンジンに読み込ませておく。
+        押してから最初の音が出るまでの待ちを縮めるための先回り。
+        同じ話者は一度しか頼まない（エンジン側でも素通りするが、往復も省く）。"""
+        if style_id is None:
+            sp = self._current_speaker()
+            style_id = sp[1] if sp else None
+        if style_id is None or not self._engine_ready():
+            return
+        key = (self._engine_id, int(style_id))
+        if key in self._warmed:
+            return
+        self._warmed.add(key)
+        base = self.base_url
+        threading.Thread(
+            target=lambda: core.vv_warm_speaker(base, style_id),
+            daemon=True).start()
+
+    # ---------------- カーソル行の先読み ----------------
+    _PREFETCH_MS = 700   # これだけ手が止まったら「読む行が決まった」とみなす
+    _PREFETCH_MAX_CHARS = 200   # これより長い行は先読みしない（エンジンをふさがない）
+
+    def _schedule_prefetch(self, event=None):
+        """カーソルが止まったら先読みを予約する（動くたびに取り直す）。"""
+        if self._prefetch_after:
+            try:
+                self.after_cancel(self._prefetch_after)
+            except tk.TclError:
+                pass
+        try:
+            self._prefetch_after = self.after(self._PREFETCH_MS,
+                                              self._prefetch_line)
+        except tk.TclError:
+            self._prefetch_after = None
+
+    def _prefetch_line(self):
+        """カーソル行を裏で合成してキャッシュに置く。画面には何も出さない。
+        つながっていて、かつ何もしていないときだけ動く（本番の合成・再生の
+        じゃまをしない）。失敗しても黙って諦める＝押したときに普通に合成される。"""
+        self._prefetch_after = None
+        if self._prefetching:
+            # 先読みが1本走っている。ここで捨てると、そのあいだに移った
+            # 「本当に読ませたい行」が先読みされない。終わるころに見直す
+            self._schedule_prefetch()
+            return
+        if (self.busy or self._previewing
+                or not self._engine_ready() or not core.can_play()):
+            return
+        default_sp = self._current_speaker()
+        if default_sp is None:
+            return
+        try:
+            line = self.text.get("insert linestart", "insert lineend").strip()
+        except tk.TclError:
+            return   # 終了中
+        if not line or core.is_memo_line(line):
+            return
+        spoken, sp = self._resolve_line(line)
+        if not spoken.strip():
+            return
+        if len(spoken) > self._PREFETCH_MAX_CHARS:
+            # PDF整形などで数千字の1行ができることがある。そんな行を頼まれても
+            # いないのに合成すると、エンジンを数十秒ふさいで、その間に押した
+            # ▶試聴まで遅くなる。待ちが気になるのは短い行なので、長い行は見送る
+            return
+        try:
+            voice = self._voice_params()
+        except tk.TclError:
+            return   # 数値欄が空。先回りは黙って見送る（押したときに案内が出る）
+        style_id = sp[1] if sp else default_sp[1]
+        done = threading.Event()
+        # ▶試聴 がこの先読みと同じ行だと分かるように、行き先を覚えておく
+        self._prefetch_target = (spoken, style_id, tuple(sorted(voice.items())))
+        self._prefetch_done = done
+        self._prefetching = True
+        try:
+            threading.Thread(
+                target=self._prefetch_worker,
+                args=(self.base_url, self._engine_ver, spoken, style_id,
+                      voice, done),
+                daemon=True).start()
+        except RuntimeError:
+            done.set()
+            self._prefetching = False
+
+    def _prefetch_worker(self, base, ver, spoken, style_id, voice, done):
+        """▶試聴 が使うのと同じキーで合成し、同じキャッシュへ置く。
+        キーの作り方が1つでもずれると当たらないので、_preview_worker と
+        同じ材料（辞書ハッシュ・エンジン版・声の数値）から作ること。"""
+        try:
+            dict_hash = core.vv_dict_hash(base)
+            key = core.synth_cache_key(spoken, style_id, engine_ver=ver,
+                                       dict_hash=dict_hash, **voice)
+            if core.synth_cache_get(key) is None:
+                wb, _reading = core.vv_synthesize_with_kana(
+                    base, spoken, style_id, **voice)
+                if ver and dict_hash:
+                    core.synth_cache_put(key, wb)
+        except Exception:
+            pass
+        finally:
+            done.set()
+            self._prefetching = False
+
+    def _housekeeping(self):
+        """起動時のお掃除（別スレッド。画面には何も出さない）。
+        合成キャッシュの上限戻しに加えて、前回までの異常終了で %TEMP% に
+        残った作業用ファイルも片づける。アプリが自分で閉じるときは finally で
+        消えるが、プロセスごと落とされると誰も片づけないため、実際に
+        13MB のスプールが1週間残っていたことがある。"""
+        try:
+            core._synth_cache_evict()
+        except Exception:
+            pass
+        try:
+            count, freed = core.sweep_stale_tmp()
+            if count:
+                print("[housekeeping] 前回の残骸を%d件片づけました（%.1fMB）"
+                      % (count, freed / 1e6))
+        except Exception:
+            pass
+
     def _dict_hash_tracker(self):
         """合成ワーカー用: 「今の辞書ハッシュ」を返す関数を作る（ワーカースレッドで呼ぶ）。
         辞書ボタンはbusy中も押せる仕様のため、実行中に辞書を直すと (1)修正前の音声が
@@ -1640,8 +1913,7 @@ class App(_Base):
         self.extract_btn.config(text="⛔ キャンセル", command=self.cancel_extract,
                                 state="normal")
         self.progress.config(mode="determinate", maximum=len(self.files), value=0)
-        threading.Thread(target=self._extract_worker,
-                         args=(params, clean_opts), daemon=True).start()
+        self._spawn(self._extract_worker, (params, clean_opts))
 
     def cancel_extract(self):
         """実行中のテキスト抽出を中断する（そこまでの部分結果は表示される）。"""
@@ -1691,29 +1963,187 @@ class App(_Base):
     # ---------------- VOICEVOX ----------------
     def launch_voicevox(self):
         try:
-            core.launch_voicevox()
+            core.launch_voicevox(self._voicevox_path)
             self.status_var.set("VOICEVOXを起動したよ。準備ができたら自動でつなぐね🍂")
             self._start_connect_retry()
         except FileNotFoundError as e:
-            messagebox.showwarning("VOICEVOX", str(e))
+            self._ask_voicevox_path(str(e))
         except Exception as e:
             messagebox.showerror("VOICEVOX", f"起動に失敗: {e}")
 
-    def _start_connect_retry(self, seconds=90):
-        """VOICEVOX起動後、エンジンが応答するまで自動で接続を試みる
-        （従来は起動→手動で「エンジン接続確認」の2ステップだった）。"""
+    def launch_engine_only(self):
+        """エディタ画面を出さず、読み上げエンジンだけを起動する。
+        すでにVOICEVOXが動いているならそれを使う（二重に立ち上げない）。"""
+        if self._engine_proc is not None and self._engine_proc.poll() is None:
+            self.status_var.set("エンジンはもう動いているよ。接続を確かめるね🍂")
+            self._start_connect_retry(30, interval=2000)
+            self.check_engine(quiet=True)
+            return
+        try:
+            # すでに誰かが使っているポートの扱いを、状態を見て決める
+            p = core.vv_probe(self.base_url, timeout=core.DISCOVER_TIMEOUT)
+            if p["ok"]:
+                # 本人がVOICEVOXを開いている＝そこへ繋ぐだけ。勝手に増やさない
+                self.status_var.set("VOICEVOXがもう動いていたので、そのままつなぐね🍂")
+                self.check_engine(quiet=True)
+                return
+            port = 50021
+            try:
+                from urllib.parse import urlsplit
+                port = urlsplit(self.base_url).port or 50021
+            except Exception:
+                pass
+            if p["status"] == "not_voicevox":
+                port = core.free_port()   # 別のソフトが使っているので空きを borrow
+            proc, url = core.launch_voicevox_engine(
+                port=port, use_gpu=self._engine_use_gpu,
+                user_path=self._voicevox_path)
+            self._engine_proc = proc
+            self.base_url = url
+            self.url_var.set(url)
+            self.status_var.set(
+                f"エンジンを起動したよ（{url}）。準備ができたら自動でつなぐね🍂")
+            self._start_connect_retry(60, interval=2000)
+        except FileNotFoundError as e:
+            self._ask_voicevox_path(str(e))
+        except Exception as e:
+            messagebox.showerror("VOICEVOX", f"エンジンの起動に失敗: {e}")
+
+    def _ask_voicevox_path(self, message):
+        """VOICEVOXが見つからないとき、場所を手で教えてもらう。
+        標準以外の場所に入れている人が、ここで詰まって終わらないように。"""
+        if not messagebox.askyesno(
+                "VOICEVOXが見つかりません",
+                f"{message}\n\nVOICEVOXの場所を手動で選びますか？"):
+            return
+        if core.IS_MAC:
+            # .app はフォルダ扱いなのでファイル選択では選べない
+            path = filedialog.askdirectory(title="VOICEVOX.app を選んでください")
+        else:
+            path = filedialog.askopenfilename(
+                title="VOICEVOX.exe を選んでください",
+                filetypes=[("VOICEVOX", "VOICEVOX.exe"), ("すべて", "*.*")])
+        if not path:
+            return
+        if "voicevox" not in os.path.basename(path).lower():
+            messagebox.showwarning(
+                "確認", "VOICEVOX本体ではないようです。\n"
+                        "VOICEVOX.exe（Macは VOICEVOX.app）を選んでください。")
+            return
+        self._voicevox_path = path
+        core.find_voicevox(refresh=True)
+        self.status_var.set(f"VOICEVOXの場所を覚えたよ: {path}")
+
+    def _engine_ready(self):
+        """音声機能が使える状態か。話者リストの有無ではなく接続状態で判断する。
+        self.speakers は切断後も保持する（選択やタグ検証を生かしたままにする）
+        ので、それだけでは「今つながっている」の根拠にならない。"""
+        return self.conn_state == "ok" and bool(self.speakers)
+
+    def _set_conn_state(self, state, ver=""):
+        """接続状態の変更はすべてここを通す。ラベル・スタイル・ボタンの活性を
+        一箇所で決めることで、「● 接続OK」と出ているのに実は切れている、という
+        嘘の表示が起きないようにする。"""
+        self.conn_state = state
+        ok = (state == "ok")
+        if ok:
+            self._engine_ver = ver
+            self._conn_fail = 0
+            self.engine_var.set(f"● 接続OK (v{ver})")
+            self.engine_lbl.config(style="EngineOK.TLabel")
+        else:
+            # 版番号は「つながっている証拠」なので必ず捨てる。合成キャッシュの
+            # キーにも使われており、残すと切断中のキャッシュ判定が狂う
+            self._engine_ver = ""
+            self.engine_var.set(
+                self._CONN_TEXT.get(state, self._CONN_TEXT["refused"]))
+            self.engine_lbl.config(style="TLabel")
+            # 直し方が分かる状態のときだけ、具体的な手がかりを添える
+            if state == "bad_url":
+                self.status_var.set(
+                    "URLは「http://」から書いてください（例: "
+                    f"{VOICEVOX_DEFAULT}）。")
+            elif state == "not_voicevox":
+                self.status_var.set(
+                    "そのポートは別のソフトが使っています。"
+                    "VOICEVOXを起動し直すと空いているポートに移ることがあります。")
+        self._set_conn_compact(ok)
+        # エンジンが要るボタンの活性。処理中・再生中は _set_busy 側が持ち場なので
+        # 触らない（ここで有効化すると生成中のボタンが復活してしまう）
+        ready = self._engine_ready()
+        st = "normal" if ready else "disabled"
+        self.dict_btn.config(state=st)
+        self.vvproj_btn.config(state=st)
+        if not (self.busy or self._previewing):
+            self.sample_btn.config(state=st)
+            self.preview_btn.config(state=st)
+            self.playall_btn.config(state=st)
+            if self._synth_cancel is None:
+                self.synth_btn.config(state=st)
+            self.resume_btn.config(state=("normal" if (ready and self._bookmark
+                                                       is not None) else "disabled"))
+        self._update_step_highlight()
+
+    def _health_tick(self):
+        """接続中だけ、たまにエンジンの生存を確かめる見張り。VOICEVOXを閉じたのに
+        「接続OK」のまま放置されるのを防ぐ。切断中は何もしない＝エンジンを使わない
+        人の裏でずっと通信し続けることはない。"""
+        # 次回の予約を先に済ませる（この先で何が起きてもループを止めないため）
+        self._tick("health", self._HEALTH_INTERVAL_MS, self._health_tick)
+        if "health" not in self._ticks:
+            return   # 終了中
+        if (self.conn_state != "ok" or self.busy or self._previewing
+                or self._health_checking):
+            return
+        # 自分で起動したエンジンが落ちていたら、通信するまでもなく切断とわかる
+        if self._engine_proc is not None and self._engine_proc.poll() is not None:
+            self._engine_proc = None
+            self._set_conn_state("lost")
+            self.status_var.set("エンジンが終了しました。もう一度起動してください。")
+            return
+        try:
+            if self.state() == "iconic":
+                return   # 最小化中は見張らない（ノートPCのバッテリー配慮）
+        except tk.TclError:
+            return
+        self._health_probe_now()
+
+    def _health_probe_now(self):
+        """今すぐ一度だけ生存を確かめる（次回の予約はしない）。
+        1回目の失敗のあと、本番の間隔まで待たずに念のためもう一度見るのに使う。"""
+        if self._health_checking or self.conn_state != "ok":
+            return
+        self._health_checking = True
+        threading.Thread(target=self._health_worker, daemon=True).start()
+
+    def _health_worker(self):
+        """見張りの実処理。ウィジェットには触れず、結果はキュー越しに返す
+        （tkinter はワーカースレッドから触ると不定期に落ちる）。"""
+        try:
+            ver = core.vv_check(self.base_url, timeout=3)
+        except Exception:
+            ver = None
+        self.q.put(("health", ver))
+
+    def _start_connect_retry(self, seconds=90, interval=3000):
+        """エンジンが応答するまで自動で接続を試みる窓を開く
+        （従来は起動→手動で「エンジン接続確認」の2ステップだった）。
+        窓が二重に開かないよう、tick は1本だけ回す。"""
         self._conn_retry_until = time.monotonic() + seconds
-        self.after(3000, self._connect_retry_tick)
+        self._conn_retry_interval = interval
+        if not self._conn_retry_running:
+            self._conn_retry_running = True
+            self._tick("retry", interval, self._connect_retry_tick)
 
     def _connect_retry_tick(self):
-        if self.speakers or time.monotonic() > self._conn_retry_until:
+        if self.conn_state == "ok" or time.monotonic() > self._conn_retry_until:
+            self._conn_retry_running = False
             return   # 接続できた/諦めた（以降は手動の接続確認で）
         if not (self.busy or self._previewing):
             self.check_engine(quiet=True)   # ボタンを明滅させずに静かに確認
-        try:
-            self.after(3000, self._connect_retry_tick)
-        except tk.TclError:
-            pass   # 終了中
+        self._tick("retry", self._conn_retry_interval, self._connect_retry_tick)
+        if "retry" not in self._ticks:
+            self._conn_retry_running = False   # 終了中
 
     def check_engine(self, quiet=False):
         # _previewing もガードする（連続再生中に実行すると _set_busy の往復で
@@ -1726,8 +2156,15 @@ class App(_Base):
         # 静かに確認する（3秒ごとのリトライで全ボタンが明滅するのを防ぐ）
         if quiet and self._conn_checking:
             return
-        url = self.url_var.get().strip().rstrip("/")
+        # 「http://」の書き忘れをここで直す。直した結果を欄にも書き戻して、
+        # 何が使われているかが見えるようにする
+        url = core.vv_normalize_url(self.url_var.get())
         self.base_url = url or VOICEVOX_DEFAULT
+        if self.url_var.get().strip() != self.base_url:
+            self.url_var.set(self.base_url)
+        # 自分でURLを変えた＝以後は自動で別ポートへ移らない（手動運用に切り替え）
+        if not quiet and self.base_url != VOICEVOX_DEFAULT:
+            self._engine_url_mode = "manual"
         self._conn_checking = True
         if not quiet:
             self._set_busy(True)
@@ -1737,14 +2174,24 @@ class App(_Base):
 
     def _check_worker(self, quiet=False):
         try:
-            ver = core.vv_check(self.base_url)
-            if not ver:
-                self.q.put(("engine", None, None, quiet))
+            p = core.vv_probe(self.base_url, timeout=core.DISCOVER_TIMEOUT)
+            url = self.base_url
+            # 自動モードなら、既定のURLが駄目でも VOICEVOX が書き出している
+            # 実際のURL（ポートが取り合いになると本体は別のポートへ逃げる）を試す
+            if not p["ok"] and self._engine_url_mode == "auto":
+                found, p2 = core.vv_find_engine(self.base_url)
+                if found:
+                    url, p = found, p2
+            if not p["ok"]:
+                self.q.put(("engine", None, None, quiet, p["status"], url))
                 return
-            speakers = core.vv_speakers(self.base_url)
-            self.q.put(("engine", ver, speakers, quiet))
+            speakers = core.vv_speakers(url)
+            # .vvproj の engineId に使う。取れなければ公式エンジンのIDのまま
+            self._engine_id = core.vv_engine_id(url)
+            self.base_url = url
+            self.q.put(("engine", p["version"], speakers, quiet, "ok", url))
         except Exception:
-            self.q.put(("engine", None, None, quiet))
+            self.q.put(("engine", None, None, quiet, "unknown", self.base_url))
 
     def _confirm_speaker_tags(self, tail="該当行はタグ文字列ごと既定話者が読み上げます。"
                                           "続けますか？\n（「いいえ」で最初の該当行へジャンプ）"):
@@ -1864,10 +2311,8 @@ class App(_Base):
         self.synth_btn.config(text="⛔ キャンセル", command=self.cancel_synth,
                               state="normal")
         self.progress.config(mode="determinate", maximum=len(jobs), value=0)
-        threading.Thread(target=self._synth_worker,
-                         args=(jobs, groups, voice, target, unit,
-                               gap, fmt, srt),
-                         daemon=True).start()
+        self._spawn(self._synth_worker,
+                    (jobs, groups, voice, target, unit, gap, fmt, srt))
 
     def cancel_synth(self):
         """実行中の音声生成を中断する（未完了のファイルは保存しない）。"""
@@ -1937,7 +2382,9 @@ class App(_Base):
                                if n < len(jobs) else "")))
                 return (p, dur)
 
-            # エンジンへ3並列で投げる（順序はexecutor.mapが保持する）
+            # エンジンへ3並列で投げる（順序はexecutor.mapが保持する）。
+            # 1行が力尽きたときは、map の結果イテレータが自分で未着手の
+            # ジョブをキャンセルしてくれる（実測: 30行中3行で切り上がった）
             with ThreadPoolExecutor(max_workers=3) as ex:
                 wavs = list(ex.map(synth, enumerate(jobs)))
 
@@ -1981,6 +2428,23 @@ class App(_Base):
 
             width = max(3, len(str(len(groups))))   # 999超でも名前順が崩れない
             multi = len({j[1] for j in jobs}) > 1
+            # 保存フェーズは「合成中」より長いことがある（10時間の本なら結合
+            # だけで数分）。従来はここで一度しか喋らず、進捗バーは100%のまま
+            # 止まって見えたので、何をしているかを出し続ける
+            nmark = max(len(groups), 1)
+            last_say = [0.0]
+
+            def say(pos, text, throttle=0.0):
+                """pos は 0〜nmark の小数（グループ内の進み具合を含む）。
+                保存は合成とは別の工程として、バーを0%から数え直す（文言も
+                「つないでいます」「変換中」に変わるので工程の切り替わりが分かる）。
+                保存フェーズの中では前にしか進まない。"""
+                if throttle:
+                    now = time.monotonic()
+                    if now - last_say[0] < throttle:
+                        return
+                    last_say[0] = now
+                self.q.put(("progress", pos, nmark, text))
             srt_count = 0
             chap_note = ""
             csv_rows = []
@@ -2009,7 +2473,9 @@ class App(_Base):
                     out_path = os.path.join(target, f"{stem}.{fmt}")
                 paths = [wavs[i][0] for i in idxs]
                 durs = [wavs[i][1] for i in idxs]
+                where = (f"（{gi+1}/{len(groups)}）" if len(groups) > 1 else "")
                 if len(paths) == 1:
+                    say(gi + 0.5, f"{fmt.upper()}に変換中…{where}")
                     core.encode_audio_file(paths[0], out_path, fmt,
                                            self.encoders, keep_input=True)
                 else:
@@ -2017,7 +2483,19 @@ class App(_Base):
                     # 同じフォルダに .part 名で作り、終わったら消す
                     part = out_path + ".part.wav"
                     try:
-                        core.concat_wavs_to_file(paths, part, gap_sec=gap)
+                        # 結合は行数ぶんかかる。バーは「今のファイル」の中の
+                        # 進み具合で動かす（gi + 0〜1 の小数を渡す）
+                        def cat_progress(k, total_src, _gi=gi, _w=where):
+                            # 結合はこのグループの前半（0〜0.8）ぶんとして数える。
+                            # 通知は0.2秒に1回まで（1万行で1万通の通知を投げると
+                            # キューとUIがそれだけで詰まる）
+                            frac = (k / total_src * 0.8) if total_src else 0
+                            say(_gi + frac,
+                                f"音声をつないでいます… {k}/{total_src}行{_w}",
+                                throttle=0.2)
+                        core.concat_wavs_to_file(paths, part, gap_sec=gap,
+                                                 progress_cb=cat_progress)
+                        say(gi + 0.85, f"{fmt.upper()}に変換中…{where}")
                         core.encode_audio_file(part, out_path, fmt,
                                                self.encoders)
                     finally:
@@ -2027,9 +2505,11 @@ class App(_Base):
                             except OSError:
                                 pass
                 if fmt == "m4b":
+                    say(gi + 0.93, f"チャプターを埋め込んでいます…{where}")
                     chap_note = self._embed_chapters(out_path, jobs, idxs,
                                                     durs, gap)
                 if srt:
+                    say(gi + 0.97, f"字幕(SRT)を書き出しています…{where}")
                     lines = [jobs[i][0] for i in idxs]
                     srt_path = os.path.splitext(out_path)[0] + ".srt"
                     with open(srt_path, "w", encoding="utf-8") as f:
@@ -2044,6 +2524,8 @@ class App(_Base):
                                 self._speaker_label_for_id(jobs[i][1])),
                             jobs[i][0], round(wavs[i][1], 2)))
             if csv_rows:
+                self.q.put(("progress", nmark, nmark,
+                            "セリフ一覧(CSV)を書き出しています…"))
                 import csv as _csv
                 csv_path = os.path.join(target, "セリフ一覧.csv")
                 # utf-8-sig: BOM無しだとWindowsのExcelが文字化けする
@@ -2155,6 +2637,10 @@ class App(_Base):
         self.status_var.set("クリップボードにコピーしました。")
 
     def save_vvproj(self):
+        # 再生・処理中のガード（従来は無く、連続再生中でも押せてしまっていた）
+        if self.busy or self._previewing:
+            self.status_var.set("再生／処理の実行中です。停止・完了してからお試しください。")
+            return
         text = self.text.get("1.0", "end").strip()
         if not text:
             messagebox.showinfo("情報", "保存するテキストがありません。")
@@ -2166,6 +2652,13 @@ class App(_Base):
         # 合成前と同じく@タグのタイプミスを事前に指摘（プロジェクトに混入させない）
         if not self._confirm_speaker_tags(
                 "該当行はタグ文字列ごと既定話者のブロックになります。続けますか？"):
+            return
+        # 数値欄は _set_busy より前（UIスレッド）で読む
+        try:
+            v = self._voice_params()
+        except tk.TclError:
+            messagebox.showwarning(
+                "数値の確認", "話速・音高・抑揚・音量に数字を入れてください。")
             return
         out = filedialog.asksaveasfilename(
             title="VOICEVOXプロジェクトを保存", defaultextension=".vvproj",
@@ -2179,14 +2672,139 @@ class App(_Base):
                 continue   # メモ行（行頭#）は音声生成と同様に含めない
             spoken, sp = self._resolve_line(ln.strip())
             if spoken.strip():
-                entries.append((spoken, sp[1] if sp else None, sp[2] if sp else None))
-        with open(out, "w", encoding="utf-8") as f:
-            f.write(core.make_vvproj(entries, default[1], default[2]))
+                entries.append((spoken, sp[1] if sp else None,
+                                sp[2] if sp else None))
+        if not entries:
+            messagebox.showinfo("情報", "書き出せる行がありませんでした。")
+            return
+        # 調整値がすべて既定のままなら、引き継ぐ情報は無い（アクセントはエディタが
+        # 開くときに自分で取り直す）。エンジンへ一度も問い合わせず、これまでと
+        # まったく同じ最小構成をその場で書く＝待ち時間ゼロ
+        need_query = (self.vvproj_query_var.get()
+                      and (v["speed"] != 1.0 or v["pitch"] != 0.0
+                           or v["intonation"] != 1.0 or v["volume"] != 1.0))
+        if not need_query:
+            payload = core.make_vvproj(entries, default[1], default[2],
+                                       engine_id=self._engine_id)
+            self._finish_vvproj(out, payload, 0, entries, default)
+            return
+        # 行数ぶんエンジンへ問い合わせるので、ボタンをキャンセルに変えて裏で走らせる
+        self._vvproj_cancel = threading.Event()
+        self._set_busy(True)
+        self.vvproj_btn.config(text="⛔ キャンセル", command=self.cancel_vvproj,
+                               state="normal")
+        self.progress.config(mode="determinate", maximum=len(entries), value=0)
+        self.status_var.set(f"調整値を取得中… 0/{len(entries)}行")
+        self._spawn(self._vvproj_worker, (entries, default, out, v))
+
+    def cancel_vvproj(self):
+        """.vvproj の書き出しを中断する（ファイルは作らない）。"""
+        if self._vvproj_cancel is not None:
+            self._vvproj_cancel.set()
+            self.vvproj_btn.config(state="disabled")
+            self.status_var.set("キャンセルしています...")
+
+    def _vvproj_restore_button(self):
+        """書き出しの完了/キャンセル/エラー後にボタンを元へ戻す。"""
+        self._vvproj_cancel = None
+        # cancel_vvproj が state を disabled にしているので、ここで戻す。
+        # 戻さないと、次に接続状態が変わるまでボタンが灰色のままになる
+        self.vvproj_btn.config(text="プロジェクト保存(.vvproj)",
+                               command=self.save_vvproj,
+                               state=("normal" if self._engine_ready()
+                                      else "disabled"))
+
+    def _vvproj_worker(self, entries, default, out, v):
+        """各行の audio_query を集めて .vvproj の中身を作る（ワーカースレッド）。
+        取れなかった行は query 無しにして続ける＝その行だけ既定値で開かれる。"""
+        from concurrent.futures import ThreadPoolExecutor
+        cancel = self._vvproj_cancel
+        base = self.base_url
+        results = [None] * len(entries)
+        memo, lock = {}, threading.Lock()
+
+        def one(i):
+            text, sid, _uid = entries[i]
+            style = default[1] if sid is None else sid
+            key = (text, style)   # 同じ文でも話者が違えば読みは別物
+            with lock:
+                if key in memo:
+                    return i, memo[key], False
+            for attempt in range(3):
+                if cancel.is_set():
+                    return i, None, False
+                try:
+                    raw = core.vv_audio_query(base, text, style)
+                    q = core.normalize_vvproj_query(
+                        raw, v["speed"], v["pitch"], v["intonation"],
+                        v["volume"])
+                    with lock:
+                        memo[key] = q
+                    return i, q, False
+                except Exception:
+                    if attempt < 2:
+                        time.sleep(0.5 * (attempt + 1))
+            return i, None, True
+
+        nfail = 0
+        try:
+            with ThreadPoolExecutor(max_workers=3) as ex:
+                for done, (i, q, failed) in enumerate(
+                        ex.map(one, range(len(entries))), 1):
+                    results[i] = q
+                    if failed:
+                        nfail += 1
+                    if done % 5 == 0 or done == len(entries):
+                        self.q.put(("vvproj_progress", done, len(entries)))
+            if cancel.is_set():
+                self.q.put(("vvproj_cancelled",))
+                return
+            # 全滅＝エンジンが落ちた等。調整値は諦め、確実に開ける形で保存する
+            if nfail >= len(entries):
+                payload = core.make_vvproj(entries, default[1], default[2],
+                                           engine_id=self._engine_id)
+            else:
+                withq = [(e[0], e[1], e[2], results[i])
+                         for i, e in enumerate(entries)]
+                payload = core.make_vvproj(withq, default[1], default[2],
+                                           engine_id=self._engine_id)
+            self.q.put(("vvproj_done", out, payload, nfail, entries, default))
+        except Exception:
+            self.q.put(("vvproj_error", traceback.format_exc()))
+
+    def _finish_vvproj(self, out, payload, nfail, entries, default):
+        """書き出す直前に自己点検し、問題があれば調整値を捨てた最小構成
+        （これまでと同じ＝実績のある形）へ落としてから保存する。"""
+        note = ""
+        try:
+            core.validate_vvproj(payload)
+        except ValueError as e:
+            payload = core.make_vvproj(entries, default[1], default[2],
+                                       engine_id=self._engine_id)
+            try:
+                core.validate_vvproj(payload)
+            except ValueError as e2:
+                messagebox.showerror(
+                    "保存できませんでした",
+                    f"プロジェクトの形に問題があります:\n{e2}\n\n"
+                    "壊れたファイルを書き出さないため、保存を中止しました。")
+                return
+            note += ("\n\n※調整値の形に問題があったため、"
+                     "調整値なしで保存しました（開くことはできます）。")
+        try:
+            _write_atomic(out, payload)
+        except Exception as e:
+            messagebox.showerror("保存できませんでした",
+                                 f"書き込みに失敗しました:\n{e}")
+            return
+        if nfail:
+            note += (f"\n\n※うち{nfail}行は調整値を取得できませんでした"
+                     "（その行だけ既定値で開かれます）。")
         messagebox.showinfo("保存完了",
                             f"保存しました:\n{out}\n\n"
                             "VOICEVOXの「ファイル → プロジェクト読み込み」で開くと、\n"
                             "1行 = 1ブロックとして読み込まれ、行ごとに話者や\n"
-                            "イントネーションを調整できます。")
+                            "イントネーションを調整できます。" + note)
 
     # ---------------- クリップボード画像OCR ----------------
     def clipboard_ocr(self):
@@ -2194,6 +2812,8 @@ class App(_Base):
             self.status_var.set("再生／処理の実行中です。停止・完了してからお試しください。")
             return
         try:
+            # PILは重いので起動時に読まず、初めて使うここで読み込む（起動短縮）
+            from PIL import ImageGrab
             data = ImageGrab.grabclipboard()
         except Exception as e:
             messagebox.showerror("クリップボード", f"取得に失敗しました: {e}")
@@ -2215,10 +2835,9 @@ class App(_Base):
         clean_opts = self._gather_clean_opts()
         self._set_busy(True)
         self.status_var.set("クリップボード画像をOCR中...")
-        threading.Thread(target=self._clipboard_worker,
-                         args=(data, self.pre_var.get(), clean_opts,
-                               self.fixconf_var.get(), self.denoise_var.get()),
-                         daemon=True).start()
+        self._spawn(self._clipboard_worker,
+                    (data, self.pre_var.get(), clean_opts,
+                     self.fixconf_var.get(), self.denoise_var.get()))
 
     def _clipboard_worker(self, img, preprocess, clean_opts,
                           fix_confusables=False, denoise=True):
@@ -2228,7 +2847,8 @@ class App(_Base):
             with tempfile.TemporaryDirectory(prefix="t2v_clip_") as tmpdir:
                 png = os.path.join(tmpdir, "clip.png")
                 core.preprocess_image(img, enable=preprocess).save(png)
-                res = core.run_ocr([png], strip_labels=denoise)
+                notices = []
+                res = core.run_ocr([png], strip_labels=denoise, notices=notices)
                 raw = res.get(png, "")
                 # 低品質（写真の影・ムラ）なら照明平坦化で再OCR（macのみ・自動）
                 raw = core.ocr_retry_if_poor(raw, img, tmpdir, strip_labels=denoise)
@@ -2246,7 +2866,9 @@ class App(_Base):
                     report["removed"] = removed
                 raw = core.denoise_capture(raw)
             cleaned = core.clean_text(raw, **clean_opts)
-            self.q.put(("clip_done", cleaned, report))
+            warnings = ([core.OCR_ENGLISH_MISSING_MSG]
+                        if "english_ocr_missing" in notices else [])
+            self.q.put(("clip_done", cleaned, report, warnings))
         except Exception:
             self.q.put(("error", traceback.format_exc()))
 
@@ -2257,27 +2879,40 @@ class App(_Base):
             return
         win = tk.Toplevel(self)
         win.title("読み方辞書（VOICEVOXユーザー辞書）")
-        win.geometry("560x420")
+        win.geometry("760x470")
         self._dict_win = win
 
         ttk.Label(win, text="固有名詞などの読み間違いを登録できます。"
                             "登録した読みはVOICEVOX全体で使われます。").pack(anchor="w", padx=8, pady=(8, 2))
 
-        cols = ("surface", "pron", "accent")
+        cols = ("surface", "pron", "accent", "wtype", "prio")
         tree = ttk.Treeview(win, columns=cols, show="headings", height=10)
         tree.heading("surface", text="単語")
         tree.heading("pron", text="読み（カタカナ）")
         tree.heading("accent", text="アクセント核")
-        tree.column("surface", width=180)
-        tree.column("pron", width=220)
-        tree.column("accent", width=90, anchor="center")
+        tree.heading("wtype", text="品詞")
+        tree.heading("prio", text="優先度")
+        tree.column("surface", width=150)
+        tree.column("pron", width=180)
+        tree.column("accent", width=80, anchor="center")
+        tree.column("wtype", width=80, anchor="center")
+        tree.column("prio", width=60, anchor="center")
         tree.pack(fill="both", expand=True, padx=8, pady=4)
         tree.bind("<Double-1>", self._dict_edit_selected)
         self._dict_tree = tree
+        # VOICEVOXエディタ側で辞書を直してからこの窓に戻ってきたときに追いつく
+        # （ポーリングはせず、窓が前面に来たときだけ読み直す）
+        self._dict_refreshed_at = 0.0
+        win.bind("<FocusIn>", self._dict_focus_refresh, add="+")
 
         form = ttk.Frame(win); form.pack(fill="x", padx=8, pady=4)
         ttk.Label(form, text="単語:").pack(side="left")
         self._dict_surface = tk.StringVar()
+        # 単語欄の内容が変わったら、その単語が一覧にあるか見て品詞・優先度を
+        # 合わせる。こうしないと「本文を右クリック→辞書に登録」の経路で
+        # フォームの既定値（固有名詞・5）が既存の設定を上書きしてしまう。
+        # 画面に出ている値がそのまま適用される、を常に成り立たせるための仕掛け
+        self._dict_surface.trace_add("write", self._dict_sync_form_to_word)
         ttk.Entry(form, textvariable=self._dict_surface, width=14).pack(side="left", padx=2)
         ttk.Label(form, text="読み:").pack(side="left", padx=(8, 0))
         self._dict_pron = tk.StringVar()
@@ -2286,6 +2921,23 @@ class App(_Base):
         self._dict_accent = tk.IntVar(value=0)
         ttk.Spinbox(form, from_=0, to=30, width=4,
                     textvariable=self._dict_accent).pack(side="left", padx=2)
+        ttk.Label(form, text="品詞:").pack(side="left", padx=(8, 0))
+        self._dict_wtype = ttk.Combobox(
+            form, width=8, state="readonly",
+            values=[lb for _v, lb in core.WORD_TYPE_LABELS])
+        self._dict_wtype.current(0)   # 既定は固有名詞（人名・地名の読み直しが主用途）
+        self._dict_wtype.pack(side="left", padx=2)
+        _Tooltip(self._dict_wtype,
+                 "単語の種類です。人名・地名などは「固有名詞」のままで大丈夫です。\n"
+                 "一覧をダブルクリックすると、その単語の今の設定が入ります。")
+        ttk.Label(form, text="優先度:").pack(side="left", padx=(8, 0))
+        self._dict_prio = tk.IntVar(value=5)
+        _sp_prio = ttk.Spinbox(form, from_=0, to=10, width=4,
+                               textvariable=self._dict_prio)
+        _sp_prio.pack(side="left", padx=2)
+        _Tooltip(_sp_prio,
+                 "同じ表記が複数あるとき、どれを優先するか。\n"
+                 "普通は5のままで大丈夫です。")
 
         btns = ttk.Frame(win); btns.pack(fill="x", padx=8, pady=(2, 8))
         b_add = ttk.Button(btns, text="追加/上書き", command=self._dict_add)
@@ -2305,14 +2957,48 @@ class App(_Base):
         self._dict_refresh()
 
     def _dict_refresh(self):
+        self._dict_refreshed_at = time.monotonic()
         threading.Thread(target=self._dict_list_worker, daemon=True).start()
+
+    def _dict_focus_refresh(self, _event=None):
+        """辞書の窓が前面に戻ったら読み直す（エディタ側での変更に追いつくため）。
+        窓を触るたびに何度も叩かないよう、直前2秒以内なら何もしない。"""
+        if time.monotonic() - getattr(self, "_dict_refreshed_at", 0.0) > 2.0:
+            self._dict_refresh()
 
     def _dict_list_worker(self):
         try:
-            rows = core.vv_dict_list(self.base_url)
+            rows = core.vv_dict_list(self.base_url, full=True)
             self.q.put(("dict_list", rows))
         except Exception as e:
             self.q.put(("dict_status", f"辞書の取得に失敗: {e}"))
+
+    def _dict_sync_form_to_word(self, *_args):
+        """単語欄の単語が一覧にあれば、その品詞・優先度をフォームへ写す。
+        一覧（Treeview）を引くだけでエンジンには問い合わせない。"""
+        tree = getattr(self, "_dict_tree", None)
+        if tree is None:
+            return
+        try:
+            if not tree.winfo_exists():
+                return
+            key = core.dict_surface_key(self._dict_surface.get())
+            if not key:
+                return
+            labels = [lb for _v, lb in core.WORD_TYPE_LABELS]
+            for iid in tree.get_children():
+                vals = tree.item(iid, "values")
+                if len(vals) < 5 or core.dict_surface_key(vals[0]) != key:
+                    continue
+                if vals[3] in labels:
+                    self._dict_wtype.current(labels.index(vals[3]))
+                try:
+                    self._dict_prio.set(int(vals[4]))
+                except (ValueError, tk.TclError):
+                    pass
+                return
+        except tk.TclError:
+            pass   # 閉じている最中
 
     def _dict_edit_selected(self, event=None):
         """一覧のダブルクリックで単語をフォームへ読み込む（編集して「追加/上書き」）。"""
@@ -2327,6 +3013,16 @@ class App(_Base):
                 self._dict_accent.set(int(vals[2]))
             except (ValueError, tk.TclError):
                 self._dict_accent.set(0)
+        # 品詞・優先度もフォームへ。こうしておくと「読みだけ直して上書き」でも
+        # 元の設定がそのまま送られ、勝手に既定値へ戻ることがない
+        if len(vals) >= 5:
+            labels = [lb for _v, lb in core.WORD_TYPE_LABELS]
+            if vals[3] in labels:
+                self._dict_wtype.current(labels.index(vals[3]))
+            try:
+                self._dict_prio.set(int(vals[4]))
+            except (ValueError, tk.TclError):
+                pass
 
     def _dict_add(self):
         surface = self._dict_surface.get().strip()
@@ -2338,26 +3034,40 @@ class App(_Base):
             accent = self._dict_accent.get()
         except tk.TclError:
             accent = 0
-        # 同じ単語が一覧にあれば上書き（従来は重複エントリが2つできていた）
-        existing_uuid = None
-        for iid in self._dict_tree.get_children():
-            vals = self._dict_tree.item(iid, "values")
-            if vals and vals[0] == surface:
-                existing_uuid = iid   # iid = word_uuid
-                break
+        # フォームの品詞・優先度も一緒に読む（UIスレッドで）
+        idx = self._dict_wtype.current()
+        word_type = (core.WORD_TYPE_LABELS[idx][0]
+                     if 0 <= idx < len(core.WORD_TYPE_LABELS) else None)
+        try:
+            priority = int(self._dict_prio.get())
+        except (ValueError, tk.TclError):
+            priority = None
 
         def worker():
             try:
-                if existing_uuid:
-                    core.vv_dict_update(self.base_url, existing_uuid,
-                                        surface, pron, accent)
-                    self.q.put(("dict_status", f"上書きしました：{surface} → {pron}"))
+                # 重複はエンジンの実データで調べる。画面の一覧だけを見ていると、
+                # VOICEVOXエディタ側で先に登録された単語に気づけず二重登録になる
+                rows = core.vv_dict_list(self.base_url, full=True)
+                key = core.dict_surface_key(surface)
+                hits = [w for w in rows
+                        if core.dict_surface_key(w["surface"]) == key]
+                if hits:
+                    core.vv_dict_update(self.base_url, hits[0]["uuid"],
+                                        surface, pron, accent,
+                                        word_type=word_type or hits[0]["word_type"],
+                                        priority=(priority if priority is not None
+                                                  else hits[0]["priority"]))
+                    extra = (f"（同じ単語が{len(hits)}件あります。1件目を更新しました）"
+                             if len(hits) > 1 else "")
+                    self.q.put(("dict_status",
+                                f"上書きしました：{surface} → {pron}{extra}"))
                 else:
-                    core.vv_dict_add(self.base_url, surface, pron, accent)
+                    core.vv_dict_add(self.base_url, surface, pron, accent,
+                                     word_type=word_type, priority=priority)
                     self.q.put(("dict_status", f"登録しました：{surface} → {pron}"))
                 self._dict_gen += 1   # 実行中の合成に辞書変更を知らせる（キャッシュ鮮度）
-                rows = core.vv_dict_list(self.base_url)
-                self.q.put(("dict_list", rows))
+                self.q.put(("dict_list",
+                            core.vv_dict_list(self.base_url, full=True)))
             except Exception as e:
                 self.q.put(("dict_status", f"登録に失敗: {e}（読みは全角カタカナのみ）"))
         threading.Thread(target=worker, daemon=True).start()
@@ -2385,20 +3095,26 @@ class App(_Base):
         self.sample_btn.config(state="disabled")
         self.resume_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
-        threading.Thread(target=self._dict_preview_worker,
-                         args=(surface, sp[1], voice), daemon=True).start()
+        self._play_gen += 1
+        self._spawn(self._dict_preview_worker,
+                    (surface, sp[1], voice, self._preview_stop, self._play_gen))
 
-    def _dict_preview_worker(self, text, speaker_id, voice):
+    def _dict_preview_worker(self, text, speaker_id, voice, stop, gen):
         # 登録直後の読みを確認する用途なのでキャッシュは通さない
         try:
             wb, reading = core.vv_synthesize_with_kana(self.base_url, text,
                                                        speaker_id, **voice)
+            if stop.is_set() or gen != self._play_gen:
+                # 合成を待っている間に止められた／次の再生が始まった。
+                # 音は出さずに終わる（出すと次の再生の音を奪う）
+                self.q.put(("preview_done", True, reading, gen))
+                return
             self._preview_buf = wb
-            self.q.put(("preview_playing", text, speaker_id, None))
-            core.play_wav_blocking(wb, stop_event=self._preview_stop)
-            self.q.put(("preview_done", True, reading))
+            self.q.put(("preview_playing", text, speaker_id, None, gen))
+            core.play_wav_blocking(wb, stop_event=stop)
+            self.q.put(("preview_done", True, reading, gen))
         except Exception:
-            self.q.put(("preview_done", False, traceback.format_exc()))
+            self.q.put(("preview_done", False, traceback.format_exc(), gen))
 
     def _dict_delete(self):
         sel = self._dict_tree.selection()
@@ -2413,8 +3129,8 @@ class App(_Base):
                     core.vv_dict_delete(self.base_url, u)
                 self._dict_gen += 1   # 実行中の合成に辞書変更を知らせる（キャッシュ鮮度）
                 self.q.put(("dict_status", f"{len(uuids)}件削除しました。"))
-                rows = core.vv_dict_list(self.base_url)
-                self.q.put(("dict_list", rows))
+                self.q.put(("dict_list",
+                            core.vv_dict_list(self.base_url, full=True)))
             except Exception as e:
                 self.q.put(("dict_status", f"削除に失敗: {e}"))
         threading.Thread(target=worker, daemon=True).start()
@@ -2430,9 +3146,14 @@ class App(_Base):
 
         def worker():
             try:
-                rows = core.vv_dict_list(self.base_url)
-                data = [{"surface": s, "pronunciation": p, "accent_type": a}
-                        for _u, s, p, a in rows]
+                rows = core.vv_dict_list(self.base_url, full=True)
+                # リスト形式は変えない。各要素にキーを足すだけなら、
+                # 旧バージョンのアプリでも知らないキーを無視して読める
+                data = [{"surface": w["surface"],
+                         "pronunciation": w["pronunciation"],
+                         "accent_type": w["accent_type"],
+                         "word_type": w["word_type"],
+                         "priority": w["priority"]} for w in rows]
                 with open(out, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
                 self.q.put(("dict_status", f"{len(data)}語を書き出しました: {out}"))
@@ -2454,28 +3175,33 @@ class App(_Base):
                     data = json.load(f)
                 if not isinstance(data, list):
                     raise ValueError("辞書JSONの形式が違います（リストではありません）")
-                existing = {s for _u, s, _p, _a in core.vv_dict_list(self.base_url)}
+                existing = {core.dict_surface_key(w["surface"])
+                            for w in core.vv_dict_list(self.base_url, full=True)}
                 added = skipped = 0
                 for w in data:
                     surface = (w.get("surface") or "").strip()
                     pron = (w.get("pronunciation") or "").strip()
                     if not surface or not pron:
                         continue
-                    if surface in existing:
+                    key = core.dict_surface_key(surface)
+                    if key in existing:
                         skipped += 1
                         continue
                     core.vv_dict_add(self.base_url, surface,
                                      core.hira_to_kata(pron),
-                                     int(w.get("accent_type", 0)))
+                                     int(w.get("accent_type", 0)),
+                                     word_type=w.get("word_type"),
+                                     priority=w.get("priority"))
                     added += 1
                     # JSON内の同一単語の2件目以降もスキップさせる（重複登録防止）
-                    existing.add(surface)
+                    existing.add(key)
                 if added:
                     self._dict_gen += 1   # キャッシュ鮮度（実行中の合成へ変更通知）
                 self.q.put(("dict_status",
                             f"辞書読み込み: {added}語追加"
                             + (f" / {skipped}語は登録済みのためスキップ" if skipped else "")))
-                self.q.put(("dict_list", core.vv_dict_list(self.base_url)))
+                self.q.put(("dict_list",
+                            core.vv_dict_list(self.base_url, full=True)))
             except Exception as e:
                 self.q.put(("dict_status", f"読み込みに失敗: {e}"))
         threading.Thread(target=worker, daemon=True).start()
@@ -2528,12 +3254,25 @@ class App(_Base):
         self.resume_btn.config(state="disabled")   # 押すと画面だけ飛ぶため
         self.stop_btn.config(state="normal")   # 試聴も■停止/Escで止められる
         self.status_var.set("試聴を生成中...")
-        threading.Thread(target=self._preview_worker,
-                         args=(spoken, speaker_id, voice, lineno),
-                         daemon=True).start()
+        self._play_gen += 1
+        self._spawn(self._preview_worker,
+                    (spoken, speaker_id, voice, lineno,
+                     self._preview_stop, self._play_gen))
 
-    def _preview_worker(self, line, speaker_id, voice, lineno=None):
+    def _preview_worker(self, line, speaker_id, voice, lineno,
+                        stop, gen):
         try:
+            done, target = self._prefetch_done, self._prefetch_target
+            if (done is not None and not done.is_set()
+                    and target == (line, speaker_id,
+                                   tuple(sorted(voice.items())))):
+                # ちょうどこの行を裏で先読みしている最中。同じ合成をもう1本
+                # 投げるとエンジンを取り合って先読み前より遅くなるので、
+                # それが終わってキャッシュに置かれるのを待つ（■停止には応じる）
+                limit = time.monotonic() + 30
+                while not done.wait(0.05):
+                    if stop.is_set() or time.monotonic() > limit:
+                        break
             # audio_query 1回で合成と読み確認の両方をまかなう（往復削減）。
             # キャッシュにあれば合成せず、読みだけ audio_query で取り直す
             dict_hash = core.vv_dict_hash(self.base_url)
@@ -2551,13 +3290,18 @@ class App(_Base):
                     reading = core.vv_reading(self.base_url, line, speaker_id)
                 except Exception:
                     pass   # 読み取得の失敗は試聴を妨げない
+            if stop.is_set() or gen != self._play_gen:
+                # 合成を待っている間に止められた／次の再生が始まった。
+                # 音は出さずに終わる（出すと次の再生の音を奪う）
+                self.q.put(("preview_done", True, reading, gen))
+                return
             self._preview_buf = wb
-            self.q.put(("preview_playing", line, speaker_id, lineno))
+            self.q.put(("preview_playing", line, speaker_id, lineno, gen))
             # ワーカースレッドなので同期再生でブロックして問題ない
-            core.play_wav_blocking(wb, stop_event=self._preview_stop)
-            self.q.put(("preview_done", True, reading))
+            core.play_wav_blocking(wb, stop_event=stop)
+            self.q.put(("preview_done", True, reading, gen))
         except Exception:
-            self.q.put(("preview_done", False, traceback.format_exc()))
+            self.q.put(("preview_done", False, traceback.format_exc(), gen))
 
     # ---------------- 話者の声サンプル試聴 ----------------
     def play_speaker_sample(self):
@@ -2579,23 +3323,40 @@ class App(_Base):
         self.resume_btn.config(state="disabled")
         self.stop_btn.config(state="normal")   # サンプルも■停止/Escで止められる
         self.status_var.set(f"サンプル取得中: {label}")
-        threading.Thread(target=self._sample_worker,
-                         args=(label, style_id, sp_uuid), daemon=True).start()
+        self._play_gen += 1
+        self._spawn(self._sample_worker,
+                    (label, style_id, sp_uuid,
+                     self._preview_stop, self._play_gen))
 
-    def _sample_worker(self, label, style_id, sp_uuid):
+    def _sample_worker(self, label, style_id, sp_uuid, stop, gen):
         try:
             wav = self._sample_cache.get((sp_uuid, style_id))
             if wav is None:
                 wav = core.vv_speaker_sample(self.base_url, sp_uuid, style_id)
                 self._sample_cache[(sp_uuid, style_id)] = wav
-            self.q.put(("preview_playing", f"（声サンプル: {label}）", style_id, None))
-            core.play_wav_blocking(wav, stop_event=self._preview_stop)
-            self.q.put(("preview_done", True, ""))
+            if stop.is_set() or gen != self._play_gen:
+                # 合成を待っている間に止められた／次の再生が始まった。
+                # 音は出さずに終わる（出すと次の再生の音を奪う）
+                self.q.put(("preview_done", True, "", gen))
+                return
+            self.q.put(("preview_playing", f"（声サンプル: {label}）", style_id,
+                        None, gen))
+            core.play_wav_blocking(wav, stop_event=stop)
+            self.q.put(("preview_done", True, "", gen))
         except Exception:
-            self.q.put(("preview_done", False, traceback.format_exc()))
+            self.q.put(("preview_done", False, traceback.format_exc(), gen))
 
     # ---------------- 連続再生（カーソル行から最後まで） ----------------
     def play_all(self):
+        """本文の最初から順に読み上げる（「▶▶ 連続再生」ボタンの動作）。
+        カーソルがどこにあっても頭から読む。押した人の期待に一番近いのがこれで、
+        途中から聴きたいときは「⏵ 続きから」か、本文の右クリックから選ぶ。"""
+        self._cursor_to_top()
+        self.play_from_cursor()
+
+    def play_from_cursor(self):
+        """カーソル行から最後まで読み上げる。
+        「⏵ 続きから」と本文の右クリック「ここから連続再生」の共通の実体。"""
         if self._previewing or self.busy:
             self.status_var.set("再生／処理の実行中です。停止してからお試しください"
                                 "（止まらないときは■停止/Esc）。")
@@ -2644,8 +3405,12 @@ class App(_Base):
         self.sample_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.pause_btn.config(text="⏸ 一時停止", state="normal")
-        threading.Thread(target=self._playall_worker,
-                         args=(targets, voice), daemon=True).start()
+        # 最初の1行の合成が終わるまで1秒前後かかる。その間なにも言わないと
+        # 「押しても反応しない」に見えるので、押した瞬間に返事をする
+        self.status_var.set(f"読み上げの準備中…（{len(targets)}行）")
+        self.update_idletasks()
+        self._play_gen += 1
+        self._spawn(self._playall_worker, (targets, voice, self._play_gen))
 
     def toggle_pause(self):
         """連続再生の一時停止/再開（再開時は同じ行の頭から読み直す）。"""
@@ -2683,7 +3448,7 @@ class App(_Base):
         line = min(self._bookmark, last)
         self.text.mark_set("insert", f"{line}.0")
         self.text.see(f"{line}.0")
-        self.play_all()
+        self.play_from_cursor()   # ここで play_all を呼ぶと先頭に戻ってしおりが無意味になる
 
     def stop_playall(self):
         if self._playall_stop is not None:
@@ -2695,11 +3460,18 @@ class App(_Base):
         # 万一ワーカーが応答せず状態が残ったら（完了通知が来ない等）強制復帰する。
         # これが無いと _previewing が立ちっぱなしになり、以降の試聴・連続再生が
         # 反応しなくなる（＝「試聴が動かない」に見える）
-        self.after(1500, self._recover_if_stuck)
+        gen = self._play_gen
+        self._tick("recover", 1500, lambda: self._recover_if_stuck(gen))
 
-    def _recover_if_stuck(self):
-        """停止後も再生状態が残っていたらUIを強制的に待機状態へ戻す（安全網）。"""
-        if not self._previewing:
+    def _recover_if_stuck(self, gen):
+        """停止後も再生状態が残っていたらUIを強制的に待機状態へ戻す（安全網）。
+        止めた再生の世代のときだけ働く。すぐ次を再生し始めた場合、この予約が
+        1.5秒後に効いてしまうと、鳴っている最中なのに待機表示に戻り、行の
+        ハイライトも一時停止ボタンも消える（実測で起きていた）。
+        なお、ここで待機状態に戻したあと旧ワーカーが完了通知を投げてくるが、
+        世代番号の合わない通知は受け側で捨てるので巻き添えにはならない。"""
+        self._ticks.pop("recover", None)
+        if gen != self._play_gen or not self._previewing:
             return
         self._previewing = False
         self._preview_stop = None
@@ -2708,7 +3480,7 @@ class App(_Base):
         self._stop_mouth()
         self.text.tag_remove("playing", "1.0", "end")
         self.pause_btn.config(text="⏸ 一時停止", state="disabled")
-        if self.speakers and not self.busy:
+        if self._engine_ready() and not self.busy:
             self.preview_btn.config(state="normal")
             self.playall_btn.config(state="normal")
             self.sample_btn.config(state="normal")
@@ -2716,7 +3488,7 @@ class App(_Base):
                 self.resume_btn.config(state="normal")
         self.status_var.set("停止しました（待機中）。")
 
-    def _playall_worker(self, targets, voice):
+    def _playall_worker(self, targets, voice, gen):
         stop = self._playall_stop
         pause = self._playall_pause
         played = 0
@@ -2749,7 +3521,7 @@ class App(_Base):
                     if stop.is_set():
                         break
                     self.q.put(("playall_line", lineno, ln, sid,
-                                played, len(targets)))
+                                played, len(targets), gen))
                     wb = nxt.result()
                     if k + 1 < len(targets):
                         nxt = ex.submit(synth, targets[k + 1])
@@ -2760,7 +3532,7 @@ class App(_Base):
                             # 連続3失敗＝エンジンが落ちている。全行を無言スキップ
                             # して「読み終わったよ」と誤報しないため従来のエラーへ
                             raise RuntimeError(last_tb[0] or "連続して合成に失敗")
-                        self.q.put(("playall_skip", lineno))
+                        self.q.put(("playall_skip", lineno, gen))
                         continue
                     consec = 0
                     while True:
@@ -2777,10 +3549,11 @@ class App(_Base):
                     if stop.is_set():
                         break
                     played += 1
-            self.q.put(("playall_done", True, stop.is_set(), played, skipped))
+            self.q.put(("playall_done", True, stop.is_set(), played,
+                        skipped, gen))
         except Exception:
             self.q.put(("playall_done", False, traceback.format_exc(),
-                        played, skipped))
+                        played, skipped, gen))
         finally:
             core.synth_cache_protect(0.0)
 
@@ -2905,6 +3678,7 @@ class App(_Base):
             self.text.delete("1.0", "end")
             self.text.insert("1.0", restored)
         self._edit_body(_do)
+        self._cursor_to_top()
         self._cleared_text = None
         self.restore_btn.config(text="本文を全消去", command=self.clear_text)
         self._update_step_highlight()
@@ -2935,12 +3709,52 @@ class App(_Base):
         (r"MemoryError",
          "メモリが足りませんでした。\n"
          "解像度(DPI)を下げるか、ファイルを分けて試してみてね。"),
+        # 以下は「つながってはいるのに失敗した」系。原因も対処もまったく違うので分ける
+        (r"Failed to play sound|PlaySound|winsound",
+         "音を鳴らせませんでした。\n"
+         "音声そのものは作れているので、ヘッドホン／スピーカーの接続と、\n"
+         "Windowsの音量ミキサー（アプリごとの音量）を確認してみてね。"),
+        (r"wave\.Error|does not start with RIFF|unknown format",
+         "音声データが壊れていました。\n"
+         "4. の「キャッシュ…」から削除して、もう一度お試しください。"),
+        (r"HTTPError|Client Error|Server Error|422|500 Server",
+         "VOICEVOXが読み上げを断りました。\n"
+         "記号だけの行や、極端に長い行で起きることがあるよ。\n"
+         "その行を短く区切るか、記号を減らして試してみてね。"),
     ]
 
-    def _show_friendly_error(self, tb):
+    ERROR_LOG_PATH = os.path.join(APP_DIR, "エラー.log")
+    _ERROR_LOG_MAX = 200 * 1024   # これを超えたら古い半分を捨てる
+
+    def _log_error(self, tb, where=""):
+        """エラーの詳細をファイルにも残す。ダイアログの「詳細を表示」は閉じると
+        消えてしまい、後から「あのとき何が起きたのか」を追えなかった。
+        ログのせいでアプリが止まっては本末転倒なので、失敗しても黙って諦める。"""
+        try:
+            path = self.ERROR_LOG_PATH
+            old = ""
+            try:
+                if os.path.getsize(path) > self._ERROR_LOG_MAX:
+                    # 肥大化させない。古い半分を捨てて、最近のぶんだけ残す
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        old = f.read()[-self._ERROR_LOG_MAX // 2:]
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write("（ここより前の古い記録は容量のため削除しました）\n")
+                        f.write(old)
+            except OSError:
+                pass   # まだファイルが無い等
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            head = f"\n==== {stamp}  {where or '不明な処理'} ====\n"
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(head + str(tb).rstrip() + "\n")
+        except Exception:
+            pass
+
+    def _show_friendly_error(self, tb, where=""):
         """エラーを人間の言葉で伝える。原因のヒントと次の一手を提案し、
         技術的な詳細（traceback）は「詳細を表示」を押したときだけ見せる
         （従来は生のtracebackがいきなり表示されて不親切だった）。"""
+        self._log_error(tb, where)
         friendly = ("うまくいきませんでした…ごめんなさい！\n"
                     "もう一度試しても続くようなら「詳細を表示」の内容を添えて教えてね。")
         for pat, msg in self._ERROR_HINTS:
@@ -2954,6 +3768,9 @@ class App(_Base):
         frm.pack(fill="both", expand=True, padx=12, pady=12)
         ttk.Label(frm, text="⚠️ " + friendly, wraplength=480,
                   justify="left").pack(anchor="w")
+        ttk.Label(frm, style="Credit.TLabel", wraplength=480, justify="left",
+                  text="詳しい内容はアプリのフォルダの「エラー.log」にも保存したよ。"
+                  ).pack(anchor="w", pady=(6, 0))
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(10, 0), side="bottom")
         ttk.Button(btns, text="閉じる", command=win.destroy).pack(side="right")
@@ -2978,6 +3795,98 @@ class App(_Base):
         ttk.Button(btns, text="詳細を表示",
                    command=_toggle_detail).pack(side="right", padx=6)
         win.bind("<Escape>", lambda e: (win.destroy(), "break")[1])
+
+    # ---------------- 英語の画像を読むための案内 ----------------
+    def open_english_ocr_help(self, reason=False):
+        """英文の画像が崩れて読まれる理由と、読めるようにする2つの方法を出す。
+        reason=True のときは「いま読んだ画像が英文だった」という前置きを添える。
+        この窓自体は何もインストールしない。実行するかどうかは本人が決める。"""
+        if (getattr(self, "_en_help_win", None) is not None
+                and self._en_help_win.winfo_exists()):
+            self._en_help_win.lift()
+            return
+        installed = core.rapidocr_available()
+        bat = os.path.join(core.APP_DIR, "英語OCRを入れる.bat")
+        win = tk.Toplevel(self)
+        self._en_help_win = win
+        win.title("英語の画像を読むには")
+        win.transient(self)
+        frm = ttk.Frame(win)
+        frm.pack(fill="both", expand=True, padx=12, pady=12)
+        W = 520
+
+        if reason:
+            ttk.Label(frm, text="いま読み取った画像に、英語の文が多くありました。",
+                      wraplength=W, justify="left").pack(anchor="w", pady=(0, 6))
+        if core.IS_MAC:
+            ttk.Label(frm, wraplength=W, justify="left",
+                      text="Macは日本語と英語を一緒に読めるので、"
+                           "そのままで大丈夫です。").pack(anchor="w")
+        else:
+            state = ("● 英語の読み取り部品が入っています（英文は自動で読み直します）"
+                     if installed else
+                     "― 英語の読み取り部品は入っていません")
+            ttk.Label(frm, text=state, wraplength=W,
+                      justify="left").pack(anchor="w")
+            ttk.Label(frm, wraplength=W, justify="left",
+                      text="英文の画像が漢字まじりに崩れて読まれることがあります"
+                           "（NOT→NO丁 / files→創es）。Windowsに入っている文字の"
+                           "読み取りが、日本語だけのことが多いためです。\n"
+                           "読めるようにする方法は2つあります。どちらも、英文の多い"
+                           "画像だけを自動で英語で読み直します。日本語の画像は"
+                           "これまでどおりで、ネットにはつながりません。"
+                      ).pack(anchor="w", pady=6)
+            ttk.Label(frm, wraplength=W, justify="left", style="Credit.TLabel",
+                      text="① Windows に「英語（米国）」を追加する"
+                           "（アプリは大きくなりません）\n"
+                           "② 「英語OCRを入れる.bat」を実行する"
+                           "（約88MBのダウンロード・アプリが約240MB大きくなります。"
+                           "64bit の Windows・Python 3.12 まで）"
+                      ).pack(anchor="w", pady=(0, 4))
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(10, 0), side="bottom")
+        ttk.Button(btns, text="閉じる", command=win.destroy).pack(side="right")
+        self._en_help_buttons = {}
+        if core.IS_WIN:
+            def open_settings():
+                try:
+                    os.startfile("ms-settings:regionlanguage")
+                except Exception:
+                    messagebox.showinfo(
+                        "情報", "設定アプリを開けませんでした。\n"
+                        "［設定］→［時刻と言語］→［言語と地域］から"
+                        "「英語（米国）」を追加してください。")
+            b1 = ttk.Button(btns, text="① Windowsの言語設定を開く",
+                            command=open_settings)
+            b1.pack(side="right", padx=6)
+            self._en_help_buttons["settings"] = b1
+
+            if not installed and os.path.exists(bat):
+                def open_bat():
+                    try:
+                        os.startfile(bat)
+                        self.status_var.set(
+                            "英語OCRのインストールを始めました"
+                            "（黒い画面の指示に従ってね）。")
+                    except Exception:
+                        messagebox.showinfo(
+                            "情報", "開けませんでした。アプリのフォルダの"
+                            "「英語OCRを入れる.bat」をダブルクリックしてください。")
+                b2 = ttk.Button(btns, text="② 英語OCRを入れる.bat を開く",
+                                command=open_bat)
+                b2.pack(side="right", padx=6)
+                self._en_help_buttons["install"] = b2
+        win.bind("<Escape>", lambda e: (win.destroy(), "break")[1])
+
+    def _warn_with_english(self, warnings):
+        """警告を出す。英語OCRの案内が混ざっていたら、文章を読ませて終わりに
+        せず、「どうすれば読めるか」まで案内する小窓に回す。"""
+        rest = [w for w in warnings if w != core.OCR_ENGLISH_MISSING_MSG]
+        if rest:
+            messagebox.showwarning("注意", "\n".join(rest))
+        if len(rest) != len(warnings):
+            self.open_english_ocr_help(reason=True)
 
     # ---------------- 音声キャッシュの管理ダイアログ ----------------
     def open_cache_dialog(self):
@@ -3290,9 +4199,12 @@ class App(_Base):
         style.configure("Credit.TLabel", background=p["bg"],
                         foreground=p["subtle"], font=self._credit_font)
         # 通常ボタン（フラット・少し余白）
+        # padding類はDPI倍率で補正（宣言だけだと高DPIでボタンだけ窮屈になる）
+        btn_pad = tuple(_px(v) for v in p.get("btn_pad", (7, 3)))
+        primary_pad = tuple(_px(v) for v in p.get("primary_pad", (14, 8)))
         style.configure("TButton", background=p["btn"], foreground=p["fg"],
-                        bordercolor=p["border"], relief="flat", padding=(7, 3),
-                        focuscolor=p["btn"])
+                        bordercolor=p["border"], relief="flat",
+                        padding=btn_pad, focuscolor=p["btn"])
         style.map("TButton",
                   background=[("pressed", p["btn_hi"]), ("active", p["btn_hi"]),
                               ("disabled", p["bg"])],
@@ -3300,7 +4212,8 @@ class App(_Base):
         # 主要ボタン（アクセント＝落ち葉オレンジ・太字）
         style.configure("Primary.TButton", background=p["accent"],
                         foreground=p["accent_fg"], bordercolor=p["accent"],
-                        font=self._primary_font, relief="flat", padding=(14, 8))
+                        font=self._primary_font, relief="flat",
+                        padding=primary_pad)
         style.map("Primary.TButton",
                   background=[("pressed", p["accent_hi"]), ("active", p["accent_hi"]),
                               ("disabled", p["btn"])],
@@ -3309,15 +4222,16 @@ class App(_Base):
         # Primaryと同一にし、Primary⇄Secondary切替でボタン寸法が変わらないようにする
         style.configure("Secondary.TButton", background=p["btn"],
                         foreground=p["fg"], bordercolor=p["border"],
-                        font=self._primary_font, relief="flat", padding=(14, 8))
+                        font=self._primary_font, relief="flat",
+                        padding=primary_pad)
         style.map("Secondary.TButton",
                   background=[("pressed", p["btn_hi"]), ("active", p["btn_hi"]),
                               ("disabled", p["bg"])],
                   foreground=[("disabled", p["disabled"])])
         # ルール操作のMenubutton（TButtonと同じ見た目に揃える）
         style.configure("TMenubutton", background=p["btn"], foreground=p["fg"],
-                        bordercolor=p["border"], relief="flat", padding=(7, 3),
-                        arrowcolor=p["fg"])
+                        bordercolor=p["border"], relief="flat",
+                        padding=btn_pad, arrowcolor=p["fg"])
         style.map("TMenubutton",
                   background=[("pressed", p["btn_hi"]), ("active", p["btn_hi"]),
                               ("disabled", p["bg"])],
@@ -3334,6 +4248,15 @@ class App(_Base):
                   selectforeground=[("readonly", p["fg"])],
                   arrowcolor=[("disabled", p["disabled"])])
         style.map("TSpinbox", arrowcolor=[("disabled", p["disabled"])])
+        # 高DPIのみ: clamの固定サイズ部品（矢印・チェック箱・スクロールバー幅）を
+        # 倍率補正する。100%表示とMacは既定サイズのまま触らない
+        if UI_SCALE > 1.0:
+            style.configure("TSpinbox", arrowsize=_px(12))
+            style.configure("TCombobox", arrowsize=_px(12))
+            style.configure("TMenubutton", arrowsize=_px(12))
+            style.configure("TScrollbar", arrowsize=_px(13), width=_px(13))
+            for w in ("TCheckbutton", "TRadiobutton"):
+                style.configure(w, indicatorsize=_px(10))
         # チェック/ラジオ（選択インジケータをアクセント色に）
         for w in ("TCheckbutton", "TRadiobutton"):
             style.configure(w, background=p["bg"], foreground=p["fg"],
@@ -3372,9 +4295,23 @@ class App(_Base):
 
     # ---------------- 起動時のエンジン自動接続 ----------------
     def _auto_connect(self):
-        """起動直後に保存済みURLへ接続を試みる。失敗しても静かに未接続表示のまま。"""
-        if not self.busy:
-            self.check_engine(quiet=True)
+        """起動直後にエンジンを探す。見つからなければ少しの間だけ静かに待つ
+        （アプリとVOICEVOXを同時に起動したとき、VOICEVOX側の準備が間に合わずに
+        「未接続」で固まってしまうのを防ぐ）。窓が閉じたら完全に諦め、以後は
+        裏で通信しない＝エンジンを使わない人の邪魔をしない。"""
+        if self.busy:
+            return
+        # VOICEVOXが入っていて、しかも今まさに起動した気配があるなら長めに待つ
+        seconds = 20
+        try:
+            p = core.vv_runtime_info_path()
+            just_started = bool(p) and (time.time() - os.path.getmtime(p)) < 60
+            if just_started and core.find_voicevox():
+                seconds = 60
+        except Exception:
+            pass
+        self._start_connect_retry(seconds, interval=2000)
+        self.check_engine(quiet=True)
 
     # ---------------- テキスト検索（Ctrl/Cmd+F） ----------------
     def open_search(self):
@@ -3480,9 +4417,21 @@ class App(_Base):
         編集が丸ごと消えていた。次回起動時の復元は従来と同じ仕組み）。"""
         try:
             self._save_text_cache()
-            self.after(60000, self._autosave_tick)
+            self._tick("autosave", 60000, self._autosave_tick)
         except tk.TclError:
             pass   # 終了中
+
+    def _cursor_to_top(self):
+        """本文を入れ替えたあと、カーソルを先頭に戻す。
+        Tkは「1.0に挿入」すると入力位置マークを入れた文字列の末尾まで押し出すので、
+        放っておくとカーソルが最終行に居座る。連続再生は「カーソル行から最後まで」
+        なので、そのままだと最後の1行しか読まれない。"""
+        try:
+            self.text.mark_set("insert", "1.0")
+            self.text.see("1.0")
+        except tk.TclError:
+            pass
+        self._schedule_prefetch()   # 先頭行を裏で合成しておく
 
     def _restore_text_cache(self):
         try:
@@ -3492,6 +4441,7 @@ class App(_Base):
             return
         if cached.strip() and not self.text.get("1.0", "end").strip():
             self.text.insert("1.0", cached)
+            self._cursor_to_top()   # 連続再生が最後の1行だけにならないように
             self._mark_bookmark()   # 前回のしおり位置を淡色でマーク
             self.status_var.set(f"{self._hello} 前回のテキストを復元したよ"
                                 "（しおりの「⏵ 続きから」も使えます）")
@@ -3591,7 +4541,12 @@ class App(_Base):
                             or (self._saved_dlg_speaker or "")),
             "bookmark": self._bookmark,
             "base_url": self.url_var.get().strip() or self.base_url,
+            "engine_url_mode": self._engine_url_mode,
+            "voicevox_path": self._voicevox_path,
+            "engine_use_gpu": bool(self._engine_use_gpu),
             "geometry": self.geometry(),
+            "zoomed": self._is_zoomed(),
+            "vvproj_query": bool(self.vvproj_query_var.get()),
             "adv_open": bool(self._adv_open),
             "voice_detail_open": bool(self._vdetail_open),
             "synth_cache_mb": core._SYNTH_CACHE_MAX_BYTES // (1024 * 1024),
@@ -3610,6 +4565,9 @@ class App(_Base):
             except OSError:
                 pass
             return
+        # 復元は小分けにして try で囲む。ひとまとめにすると、値が1つ壊れて
+        # いるだけで以降の復元が全部飛び、置換ルールや声プリセットが黙って
+        # 消えたまま、終了時に空で上書き保存されてしまう
         try:
             self.mode_var.set(s.get("mode", self.mode_var.get()))
             self.pdf_var.set(s.get("pdf", self.pdf_var.get()))
@@ -3624,6 +4582,9 @@ class App(_Base):
             self.denoise_var.set(bool(s.get("denoise", True)))
             self.fixconf_var.set(bool(s.get("fix_confusables", True)))
             self.urlskip_var.set(bool(s.get("remove_urls", True)))
+        except Exception:
+            pass
+        try:
             self.dark_var.set(bool(s.get("dark", False)))
             # テーマ：新キー "theme" を優先。無い旧設定は "dark": true → ダーク で引き継ぐ
             theme = s.get("theme")
@@ -3632,6 +4593,10 @@ class App(_Base):
             if theme in {k for k, _l, _p in self.THEMES}:
                 self.theme_var.set(theme)
             self._set_advanced(bool(s.get("adv_open", False)))
+            self.vvproj_query_var.set(bool(s.get("vvproj_query", True)))
+        except Exception:
+            pass
+        try:
             unit = s.get("unit")
             if unit is None and s.get("combine"):
                 unit = "combine"  # 旧設定(combine: true)からの引き継ぎ
@@ -3643,6 +4608,9 @@ class App(_Base):
             fs = s.get("font_size")
             if isinstance(fs, (int, float)) and 8 <= int(fs) <= 40:
                 self.text_font.config(size=int(fs))
+        except Exception:
+            pass
+        try:
             self.speed_var.set(float(s.get("speed", 1.0)))
             self.pitch_var.set(float(s.get("pitch", 0.0)))
             self.into_var.set(float(s.get("intonation", 1.0)))
@@ -3652,16 +4620,25 @@ class App(_Base):
                 self.fmt_cb.set(fmt)
                 self._on_format_selected()   # M4B復元時は「まとめ方」無効化も反映
             self.gap_var.set(float(s.get("gap", 0.4)))
+        except Exception:
+            pass
+        try:
             rules = s.get("replace_rules", [])
             if isinstance(rules, list):
                 self.replace_rules = [[str(x[0]), str(x[1])] for x in rules
                                       if isinstance(x, (list, tuple)) and len(x) == 2]
                 self._refresh_rules()
+        except Exception:
+            pass
+        try:
             presets = s.get("presets", [])
             if isinstance(presets, list):
                 self.presets = [p for p in presets
                                 if isinstance(p, dict) and p.get("name")]
                 self._refresh_presets()
+        except Exception:
+            pass
+        try:
             self.dlg_var.set(bool(s.get("dlg_enabled", False)))
             # プリセット/セリフ行：保存した開閉状態を復元。セリフ別話者ONなら
             # 設定が隠れて見えないままにならないよう自動で開く
@@ -3671,15 +4648,37 @@ class App(_Base):
             bm = s.get("bookmark")
             self._bookmark = int(bm) if isinstance(bm, (int, float)) else None
             self._saved_speaker = s.get("speaker") or None
+        except Exception:
+            pass
+        try:
             # 上限を設定し、前回セッションからの超過分を起動時に一度掃除する
             # （上限を下げた設定で終了した場合の持ち越し解消。別スレッドで）
             core.set_synth_cache_limit(s.get("synth_cache_mb", 500))
-            threading.Thread(target=core._synth_cache_evict, daemon=True).start()
+            threading.Thread(target=self._housekeeping, daemon=True).start()
+        except Exception:
+            pass
+        try:
             if s.get("base_url"):
-                self.base_url = s["base_url"]
+                saved = core.vv_normalize_url(s["base_url"])
+                self.base_url = saved or VOICEVOX_DEFAULT
                 self.url_var.set(self.base_url)
+            # 設定にモードが無い古いファイルからの移行:
+            # URLを既定のままにしている人は auto、自分で変えていた人は
+            # manual とみなす（意図して変えた設定を勝手に奪わないため）
+            mode = s.get("engine_url_mode")
+            if mode not in ("auto", "manual"):
+                mode = "auto" if self.base_url == VOICEVOX_DEFAULT else "manual"
+            self._engine_url_mode = mode
+            self._voicevox_path = s.get("voicevox_path") or None
+            self._engine_use_gpu = bool(s.get("engine_use_gpu", False))
+        except Exception:
+            pass
+        try:
             if s.get("geometry"):
                 self._apply_saved_geometry(s["geometry"])
+            # 最大化はここでは当てない（本体はまだ隠れている。今 zoomed に
+            # すると構築途中の窓が見えてしまう）。表示する直前に当てる
+            self._want_zoomed = bool(s.get("zoomed", False))
         except Exception:
             pass
 
@@ -3687,7 +4686,10 @@ class App(_Base):
         """保存したウィンドウ位置を復元する。ただしサブモニタ切断などで画面外に
         なる座標はプライマリ画面内へ寄せ、必ず一部が見えるようにする
         （そのまま適用すると『起動しても窓が出ない』と誤解される）。"""
-        m = re.match(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)$", geo)
+        # Tk の geometry() は左/上のモニタだと "980x880+-1500+120" のように
+        # 「+」のあとに負の数を書く。以前の正規表現はこれに合わず、補正を
+        # 素通りしていた（外したモニタの座標がそのまま当たる＝窓が見えない）
+        m = re.match(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)$", geo)
         if not m:
             try:
                 self.geometry(geo)
@@ -3695,12 +4697,42 @@ class App(_Base):
                 pass
             return
         w, h, x, y = int(m[1]), int(m[2]), int(m[3]), int(m[4])
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        # 大部分が画面外なら収まる位置へ補正（少しでも見えているならそのまま尊重）
-        if x < 0 or y < 0 or x > sw - 100 or y > sh - 60:
+        vx, vy, vw, vh = self._virtual_screen()
+        # 仮想デスクトップ（つながっている全モニタを合わせた範囲）に
+        # 100x60 以上見えていれば、サブモニタの位置でもそのまま尊重する。
+        # ほとんど見えないときだけ、プライマリ画面に収まる位置へ寄せる
+        visible_w = min(x + w, vx + vw) - max(x, vx)
+        visible_h = min(y + h, vy + vh) - max(y, vy)
+        if visible_w < 100 or visible_h < 60:
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
             x = max(0, min(x, max(0, sw - w)))
             y = max(0, min(y, max(0, sh - h)))
         self.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _virtual_screen(self):
+        """全モニタを合わせた範囲 (x, y, 幅, 高さ)。左や上のモニタは x, y が負になる。
+        Windows は GetSystemMetrics で本当の仮想デスクトップを取る
+        （Tk の winfo_vroot* は Windows ではプライマリの大きさしか返さない）。
+        取れない環境ではプライマリ画面を返す＝従来と同じ判定になる。"""
+        if core.IS_WIN:
+            try:
+                import ctypes
+                gsm = ctypes.windll.user32.GetSystemMetrics
+                # SM_XVIRTUALSCREEN=76 / SM_YVIRTUALSCREEN=77 /
+                # SM_CXVIRTUALSCREEN=78 / SM_CYVIRTUALSCREEN=79
+                vw, vh = gsm(78), gsm(79)
+                if vw > 0 and vh > 0:
+                    return gsm(76), gsm(77), vw, vh
+            except Exception:
+                pass
+        return 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
+
+    def _is_zoomed(self):
+        """最大化しているか（保存用）。取れなければ False。"""
+        try:
+            return self.state() == "zoomed"
+        except tk.TclError:
+            return False
 
     def _save_settings(self):
         try:
@@ -3721,11 +4753,25 @@ class App(_Base):
                     "（書き出し途中のファイルは不完全なまま残ることがあります）"):
                 return
             for ev in (self._synth_cancel, self._extract_cancel,
-                       self._preview_stop):
+                       self._preview_stop, self._vvproj_cancel):
                 if ev is not None:
                     ev.set()
         if self._playall_stop is not None:
             self._playall_stop.set()  # 連続再生中でも即終了できるように
+        # 中断を伝えたあと、ワーカーが finally で後片づけ（一時フォルダの削除・
+        # 書きかけファイルの始末）を終えるのを数秒だけ待つ
+        if any(t.is_alive() for t in self._workers):
+            try:
+                self.status_var.set("後片づけをしています… もう少しだけ待ってね")
+                self.update_idletasks()
+            except tk.TclError:
+                pass
+            self._wait_workers(4.0)
+        # 自分で起動したエンジンだけを終わらせる。ユーザーが自分で開いた
+        # VOICEVOXには絶対に触らない（_engine_proc が None ならここは素通り）
+        if self._engine_proc is not None:
+            core.stop_process(self._engine_proc)
+            self._engine_proc = None
         for attr in ("_blink_after", "_mouth_after"):  # 立ち絵アニメの後始末
             h = getattr(self, attr, None)
             if h:
@@ -3733,6 +4779,8 @@ class App(_Base):
                     self.after_cancel(h)
                 except tk.TclError:
                     pass
+        core.sweep_play_tmp_on_exit()   # 最後に鳴らした音の一時ファイルを片づける
+        self._stop_ticks()   # 窓を閉じた後にコールバックが動かないように
         self._save_settings()
         self._save_text_cache()
         self.destroy()
@@ -3751,12 +4799,13 @@ class App(_Base):
                     traceback.print_exc()
                     self._synth_restore_button()
                     self._extract_restore_button()
+                    self._vvproj_restore_button()
                     self._set_busy(False)
         except queue.Empty:
             pass
         finally:
             try:
-                self.after(120, self._poll_queue)
+                self._tick("poll", 120, self._poll_queue)
             except tk.TclError:
                 pass   # destroy後に残ったafterは無視
 
@@ -3772,6 +4821,7 @@ class App(_Base):
             self._extract_restore_button()
             self.text.delete("1.0", "end")
             self.text.insert("1.0", cleaned)
+            self._cursor_to_top()   # 抽出直後に連続再生しても頭から読まれるように
             # 本文が変わったので復元ポイントは _on_text_modified が自動で無効化する
             self.progress.config(value=self.progress["maximum"])
             self._shape_report = {}   # 新しい抽出でレポートを作り直す
@@ -3790,51 +4840,102 @@ class App(_Base):
                                 f"（3.で直したら「🔊 音声を生成」へ🍂）{shaped}")
             self._set_busy(False)
             if warnings:
-                messagebox.showwarning("注意", "\n".join(warnings))
+                self._warn_with_english(warnings)
         elif kind == "engine":
-            _, ver, speakers, quiet = msg
+            _, ver, speakers, quiet = msg[:4]
+            status = msg[4] if len(msg) > 4 else ("ok" if ver else "refused")
+            used = msg[5] if len(msg) > 5 else self.base_url
+            if used and used != self.url_var.get().strip():
+                # 別のポートで見つけたときは黙って繋がず、必ず画面に出す
+                self.url_var.set(used)
+                if ver and used != VOICEVOX_DEFAULT:
+                    self.status_var.set(
+                        f"VOICEVOXが別のポートで動いていたので、{used} につないだよ🍂")
             if ver:
-                self._engine_ver = ver
+                # 話者コンボの作り直しは、初回・エンジン更新・話者構成が変わった
+                # ときだけ。毎回作り直すと再接続のたびに保存済み話者へ巻き戻り、
+                # セッション中に選び直した声が黙って変わってしまう
+                rebuild = (not self.speakers or ver != self._engine_ver
+                           or speakers != self.speakers)
                 self.speakers = speakers
-                labels = [s[0] for s in speakers]
-                # 2段選択（キャラ→スタイル）を構築し、保存済み話者を復元
-                self._build_char_map()
-                if not (self._saved_speaker and
-                        self._select_speaker_label(self._saved_speaker)):
-                    if self._char_map:
-                        self.char_cb.current(0)
-                        self._char_selected()
-                self.dlg_speaker_cb.config(values=labels, state="readonly")
-                if labels:
-                    didx = 0
-                    if (self._saved_dlg_speaker
-                            and self._saved_dlg_speaker in labels):
-                        didx = labels.index(self._saved_dlg_speaker)
-                    self.dlg_speaker_cb.current(didx)
-                self.engine_var.set(f"● 接続OK (v{ver})")
-                self.engine_lbl.config(style="EngineOK.TLabel")
-                self._set_conn_compact(True)
-                self.dict_btn.config(state="normal")
-                self.vvproj_btn.config(state="normal")
-                self.sample_btn.config(state="normal")
-                if self._bookmark is not None:
-                    self.resume_btn.config(state="normal")
+                if rebuild:
+                    cur = self._current_speaker_label()   # 今の選択を退避
+                    labels = [s[0] for s in speakers]
+                    self._build_char_map()
+                    # 退避した選択 → 保存済み → 先頭、の順に復元を試みる
+                    if not ((cur and self._select_speaker_label(cur))
+                            or (self._saved_speaker and
+                                self._select_speaker_label(self._saved_speaker))):
+                        if self._char_map:
+                            self.char_cb.current(0)
+                            self._char_selected()
+                    dcur = self.dlg_speaker_cb.get()
+                    self.dlg_speaker_cb.config(values=labels, state="readonly")
+                    if labels:
+                        want = dcur or self._saved_dlg_speaker
+                        self.dlg_speaker_cb.current(
+                            labels.index(want) if want in labels else 0)
+                self._set_conn_state("ok", ver)
+                self._warm_speaker()   # 最初の1回だけ遅い、をなくす
             else:
-                # 起動直後の自動リトライ中は「未接続」と脅かさず待ちを伝える
+                # 起動直後の自動リトライ中は「未接続」と脅かさず待ちを伝える。
+                # 一度つながった後に失われたときは、その事実が伝わる文言にする
                 if time.monotonic() < self._conn_retry_until:
-                    self.engine_var.set("エンジン: 起動を待っています…（自動で再接続）")
+                    self._set_conn_state("waiting")
+                elif self.conn_state == "ok":
+                    self._set_conn_state("lost")
                 else:
-                    self.engine_var.set("エンジン: 未接続（VOICEVOXを起動してください）")
-                self.engine_lbl.config(style="TLabel")
-                self._set_conn_compact(False)
+                    # 「未接続」で一括りにせず、理由が分かる文言を出す
+                    self._set_conn_state(status if status in self._CONN_TEXT
+                                         else "refused")
             self._conn_checking = False
             if not quiet:
                 self._set_busy(False)
             elif ver and not self.busy and not self._previewing:
                 # quiet成功時もボタン有効化は必要（実処理は走っていないので安全）
                 self._set_busy(False)
+        elif kind == "vvproj_progress":
+            _, done, total = msg
+            self.progress.config(value=done)
+            self.status_var.set(f"調整値を取得中… {done}/{total}行")
+        elif kind == "vvproj_done":
+            _, out, payload, nfail, entries, default = msg
+            self._vvproj_restore_button()
+            self._set_busy(False)
+            self.progress.config(value=0)
+            self.status_var.set("プロジェクトを書き出しました。")
+            self._finish_vvproj(out, payload, nfail, entries, default)
+        elif kind == "vvproj_cancelled":
+            self._vvproj_restore_button()
+            self._set_busy(False)
+            self.progress.config(value=0)
+            self.status_var.set("書き出しをキャンセルしました（ファイルは作っていません）。")
+        elif kind == "vvproj_error":
+            _, tb = msg
+            self._vvproj_restore_button()
+            self._set_busy(False)
+            self.progress.config(value=0)
+            self.status_var.set("うまくいきませんでした…（内容を確認してね）")
+            self._show_friendly_error(tb, "プロジェクト保存(.vvproj)")
+        elif kind == "health":
+            _, ver = msg
+            self._health_checking = False
+            if ver:
+                self._conn_fail = 0
+            elif self.conn_state == "ok":
+                # 1回の取りこぼしでは切らない（瞬間的な失敗で脅かさないため）。
+                # ただし本番の間隔まで待つと気づくのが遅いので、すぐ確かめ直す
+                self._conn_fail += 1
+                if self._conn_fail >= 2:
+                    self._conn_fail = 0
+                    self._set_conn_state("lost")
+                else:
+                    try:
+                        self.after(3000, self._health_probe_now)
+                    except tk.TclError:
+                        pass   # 終了中
         elif kind == "clip_done":
-            _, cleaned, report = msg
+            _, cleaned, report, warnings = msg
             self._set_busy(False)
             self._merge_report(report)  # 追記なのでレポートは累積する
             if not cleaned:
@@ -3845,9 +4946,15 @@ class App(_Base):
                     self.text.insert("end", "\n" + cleaned)
                 else:
                     self.text.insert("1.0", cleaned)
+                self._cursor_to_top()
                 self.status_var.set(f"クリップボード画像をOCRしました（{len(cleaned)}文字を追記）")
+            if warnings:
+                # 英文が崩れて読まれたときは、直し方まで案内する小窓に回す
+                self._warn_with_english(warnings)
         elif kind == "preview_playing":
-            _, line, sid, lineno = msg
+            _, line, sid, lineno, gen = msg
+            if gen != self._play_gen:
+                return   # 前の再生から遅れて届いた通知
             self._start_mouth(sid)  # 立ち絵の口パク（喋る話者のキャラに切替）
             if lineno:
                 # 連続再生と同じく、いま読んでいる行をハイライト表示
@@ -3855,13 +4962,18 @@ class App(_Base):
                 self.text.tag_add("playing", f"{lineno}.0", f"{lineno}.end")
             self.status_var.set(f"試聴 再生中: {line[:30]}")
         elif kind == "preview_done":
-            _, ok, info = msg
+            _, ok, info, gen = msg
+            # 停止後の強制復帰（_recover_if_stuck）を挟んで次の再生が始まって
+            # いると、この通知はもう古い。ここで処理すると新しい再生の停止
+            # ボタンを消してしまい、鳴っている音を止められなくなる
+            if gen != self._play_gen:
+                return
             self._previewing = False
             self._preview_stop = None
             self._stop_mouth()
             self.text.tag_remove("playing", "1.0", "end")
             self.stop_btn.config(state="disabled")
-            if self.speakers and not self.busy:
+            if self._engine_ready() and not self.busy:
                 self.preview_btn.config(state="normal")
                 self.playall_btn.config(state="normal")
                 self.sample_btn.config(state="normal")
@@ -3874,9 +4986,11 @@ class App(_Base):
                 self.status_var.set(f"試聴 おわり🍂{note}")
             else:
                 self.status_var.set("試聴がうまくいきませんでした…")
-                self._show_friendly_error(info)
+                self._show_friendly_error(info, "試聴")
         elif kind == "playall_line":
-            _, lineno, line, sid, done, total = msg
+            _, lineno, line, sid, done, total, gen = msg
+            if gen != self._play_gen:
+                return   # 前の再生から遅れて届いた通知
             # 再生中の行にカーソルを移してハイライト表示。しおりも更新
             self._bookmark = lineno
             self._start_mouth(sid)  # 行の話者に合わせてキャラ切替＋口パク
@@ -3886,11 +5000,15 @@ class App(_Base):
             self.text.see(f"{lineno}.0")
             self.status_var.set(f"連続再生中 {done+1}/{total}: {line[:30]}")
         elif kind == "playall_skip":
-            _, lineno = msg
+            _, lineno, gen = msg
+            if gen != self._play_gen:
+                return
             self.status_var.set(f"⚠ {lineno}行目は合成できなかったので"
                                 "スキップしたよ（続きは読むね）")
         elif kind == "playall_done":
-            _, ok, info, played, skipped = msg
+            _, ok, info, played, skipped, gen = msg
+            if gen != self._play_gen:
+                return   # 上の preview_done と同じ理由で、古い通知は捨てる
             self._previewing = False
             self._playall_stop = None
             self._playall_pause = None
@@ -3899,7 +5017,7 @@ class App(_Base):
             self._mark_bookmark()   # 次に「⏵続きから」で再開する行を可視化
             self.stop_btn.config(state="disabled")
             self.pause_btn.config(text="⏸ 一時停止", state="disabled")
-            if self.speakers and not self.busy:
+            if self._engine_ready() and not self.busy:
                 self.preview_btn.config(state="normal")
                 self.playall_btn.config(state="normal")
                 self.sample_btn.config(state="normal")
@@ -3913,15 +5031,23 @@ class App(_Base):
                          "おつかれさま！")
             else:
                 self.status_var.set("連続再生がうまくいきませんでした…")
-                self._show_friendly_error(info)
+                self._show_friendly_error(info, "連続再生")
         elif kind == "dict_list":
             _, rows = msg
             if self._dict_win is not None and self._dict_win.winfo_exists():
                 tree = self._dict_tree
                 tree.delete(*tree.get_children())
-                for word_uuid, surface, pron, accent in rows:
-                    tree.insert("", "end", iid=word_uuid,
-                                values=(surface, pron, accent))
+                labels = dict(core.WORD_TYPE_LABELS)
+                for w in rows:
+                    tree.insert("", "end", iid=w["uuid"],
+                                values=(w["surface"], w["pronunciation"],
+                                        w["accent_type"],
+                                        labels.get(w["word_type"], "—"),
+                                        "—" if w["priority"] is None
+                                        else w["priority"]))
+                # 一覧は後から届く。単語欄が先に埋まっていた場合（本文を
+                # 右クリックして登録する経路）に備えて、ここでも合わせ直す
+                self._dict_sync_form_to_word()
         elif kind == "dict_status":
             _, info = msg
             self.status_var.set(info)
@@ -3957,8 +5083,7 @@ class App(_Base):
                     f"キャンセルしました（{info['done']}/{info['total']}行まで"
                     "合成済み）。\nここまでの音声を保存しますか？"):
                 self.status_var.set("ここまでの音声を保存中…")
-                threading.Thread(target=self._partial_save_worker,
-                                 args=(info,), daemon=True).start()
+                self._spawn(self._partial_save_worker, (info,))
             else:
                 try:
                     os.remove(info["part"])
@@ -3983,7 +5108,44 @@ class App(_Base):
             self._extract_restore_button()  # 抽出エラー時も同様
             self._set_busy(False)
             self.status_var.set("うまくいきませんでした…（内容を確認してね）")
-            self._show_friendly_error(tb)
+            self._show_friendly_error(tb, "テキスト抽出／音声生成")
+
+    def _tick(self, name, ms, func):
+        """定期ループの予約を名前つきで持っておく（終了時にまとめて止めるため）。"""
+        try:
+            self._ticks[name] = self.after(ms, func)
+        except tk.TclError:
+            self._ticks.pop(name, None)   # 終了中
+
+    def _stop_ticks(self):
+        """予約してある定期ループをすべて止める。"""
+        for h in list(self._ticks.values()):
+            try:
+                self.after_cancel(h)
+            except tk.TclError:
+                pass
+        self._ticks.clear()
+
+    def _spawn(self, target, args=()):
+        """ファイルや一時フォルダを触るワーカーを、控えを取ってから起動する。
+        窓を閉じるときに「終わったかどうか」を見られるようにするため。"""
+        self._workers = [t for t in self._workers if t.is_alive()]
+        t = threading.Thread(target=target, args=args, daemon=True)
+        self._workers.append(t)
+        t.start()
+        return t
+
+    def _wait_workers(self, sec=4.0):
+        """中断を知らせたワーカーが後始末を終えるのを、短いあいだだけ待つ。
+        待たずに destroy() するとプロセスごと消えて finally が動かず、
+        書きかけのファイルと数GB級の一時フォルダがそのまま残る。
+        待つのは数秒だけ（応答しないワーカーのために閉じられなくしない）。"""
+        end = time.monotonic() + sec
+        while any(t.is_alive() for t in self._workers):
+            if time.monotonic() >= end:
+                return False
+            time.sleep(0.05)
+        return True
 
     def _set_busy(self, busy):
         self.busy = busy
@@ -4001,7 +5163,7 @@ class App(_Base):
             self.resume_btn.config(state="disabled")
             self.sample_btn.config(state="disabled")
             self.pause_btn.config(state="disabled")
-        elif self.speakers:
+        elif self._engine_ready():
             self.synth_btn.config(state="normal")
             if not self._previewing:
                 self.preview_btn.config(state="normal")
@@ -4021,6 +5183,13 @@ def _report_startup_error(err_text):
     try:
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(err_text)
+    except Exception:
+        pass
+    # 構築途中で落ちた場合、スプラッシュ（起動中の小窓）が凍ったまま残るので、
+    # エラーダイアログを出す前に元のTkごと巻き込んで確実に消す
+    try:
+        if tk._default_root is not None:
+            tk._default_root.destroy()
     except Exception:
         pass
     msg = ("起動に失敗しました。\n\n"
