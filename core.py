@@ -24,7 +24,7 @@ from urllib.parse import unquote
 
 # アプリのバージョン（タイトルバー・CLI --version・不具合報告の目印に使う）。
 # リリースごとにここだけ更新する。
-APP_VERSION = "1.21.0"
+APP_VERSION = "1.22.0"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
@@ -1385,6 +1385,41 @@ def extract_epub(path: str) -> str:
         # 全章取りこぼした＝ほぼ確実に構造の読み違い。呼び出し側が気づけるよう例外に。
         raise RuntimeError(f"EPUBの本文を取り出せませんでした（{missing}章が見つからず）。")
     return "\n\n".join(chapters)
+
+
+# ============================================================
+#  画面の範囲選択（「📷 画面から読む」）
+# ============================================================
+SCREEN_MIN_DRAG = 6   # これより小さい囲み（ほぼクリック）は選択とみなさない（Tkの画面座標）
+
+
+def screen_selection_box(p0, p1, region, image_size, min_drag=SCREEN_MIN_DRAG):
+    """画面上でドラッグした2点を、スクリーンショット画像の切り抜き範囲へ直す。
+
+    p0, p1 はTkの画面座標（event.x_root/y_root）。region はスクショが写している
+    画面の範囲 (x, y, 幅, 高さ)（同じくTkの画面座標。左や上のモニタは負になる）。
+    image_size はスクショ画像の (幅, 高さ)。Macの高解像度画面では画像のほうが
+    2倍大きいなど、座標と画素が一致しないので比で直す。
+    返り値は PIL の crop に渡せる (左, 上, 右, 下)。小さすぎる・画面の外なら None。"""
+    (x0, y0), (x1, y1) = p0, p1
+    left, right = sorted((x0, x1))
+    top, bottom = sorted((y0, y1))
+    if right - left < min_drag or bottom - top < min_drag:
+        return None
+    rx, ry, rw, rh = region
+    iw, ih = image_size
+    if rw <= 0 or rh <= 0 or iw <= 0 or ih <= 0:
+        return None
+    import math
+    sx, sy = iw / rw, ih / rh
+    # 端は外側へ丸める（文字の端を1画素でも削らないため）
+    box = (max(0, math.floor((left - rx) * sx)),
+           max(0, math.floor((top - ry) * sy)),
+           min(iw, math.ceil((right - rx) * sx)),
+           min(ih, math.ceil((bottom - ry) * sy)))
+    if box[2] - box[0] < 1 or box[3] - box[1] < 1:
+        return None
+    return box
 
 
 # ============================================================

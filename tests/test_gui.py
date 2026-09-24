@@ -20,7 +20,7 @@ import tkinter as tk
 
 # 他メソッドが参照する（改名・削除不可の）保持必須ウィジェット属性
 REQUIRED_WIDGETS = [
-    "listbox", "clip_btn", "extract_btn", "progress", "text", "text_font",
+    "listbox", "clip_btn", "screen_btn", "extract_btn", "progress", "text", "text_font",
     "vvproj_btn", "speaker_cb", "dlg_speaker_cb", "preset_cb", "fmt_cb",
     "unit_cb", "preview_btn", "playall_btn", "resume_btn", "stop_btn",
     "synth_btn", "dict_btn", "rule_cb", "restore_btn", "theme_cb",
@@ -90,9 +90,11 @@ def test_set_busy_toggles(app):
     app._set_busy(True)
     assert str(app.extract_btn["state"]) == "disabled"
     assert str(app.clip_btn["state"]) == "disabled"
+    assert str(app.screen_btn["state"]) == "disabled"
     app._set_busy(False)
     assert str(app.extract_btn["state"]) == "normal"
     assert str(app.clip_btn["state"]) == "normal"
+    assert str(app.screen_btn["state"]) == "normal"
 
 
 def test_theme_roundtrip_restores_text_colors(app):
@@ -725,3 +727,199 @@ def test_preview_no_engine_shows_dialog(app, monkeypatch):
     app.busy = False
     app.preview_selected()
     assert shown   # ダイアログが出た
+
+
+# ---------------- 📷 画面から読む ----------------
+class _Ev:
+    """範囲選択のドラッグを再現する最小のイベント。"""
+    def __init__(self, x, y):
+        self.x = self.x_root = x
+        self.y = self.y_root = y
+
+
+def _grab_now(app):
+    """撮影の待ち時間（予約）を取り消して、すぐ撮る。"""
+    h = app._ticks.pop("screen", None)
+    if h is not None:
+        app.after_cancel(h)
+    app._screen_grab()
+
+
+def _screen_canvas(app):
+    win = app._screen_win
+    assert isinstance(win, tk.Toplevel), "範囲選択の窓が開いていません"
+    return win.winfo_children()[0]
+
+
+@pytest.fixture
+def fake_screen(app, monkeypatch):
+    """実画面の代わりに 400x300 の画像を“撮れた”ことにする。"""
+    from PIL import Image, ImageGrab
+    shot = Image.new("RGB", (400, 300), "white")
+    monkeypatch.setattr(ImageGrab, "grab", lambda *a, **k: shot)
+    monkeypatch.setattr(app, "_screen_region",
+                        lambda: ((0, 0, 400, 300), False))
+    spawned = []
+    monkeypatch.setattr(app, "_spawn",
+                        lambda target, args=(): spawned.append((target, args)))
+    return shot, spawned
+
+
+def test_screen_read_selects_region_and_starts_ocr(app, fake_screen):
+    """囲んだ所だけを切り抜いてOCRへ回し、隠した窓は元に戻る。"""
+    shot, spawned = fake_screen
+    app.screen_read()
+    assert app.state() == "withdrawn"      # 撮り込まないよう自分は隠れる
+    _grab_now(app)                          # 待ち時間を飛ばして撮る
+    cv = _screen_canvas(app)
+    app.update()
+    ox, oy = cv.winfo_rootx(), cv.winfo_rooty()
+    # 画面座標 (50,40)-(250,140) を囲む（Canvas内座標は窓の位置を引いたもの）
+    cv.event_generate("<ButtonPress-1>", x=50 - ox, y=40 - oy,
+                      rootx=50, rooty=40)
+    cv.event_generate("<B1-Motion>", x=250 - ox, y=140 - oy,
+                      rootx=250, rooty=140)
+    cv.event_generate("<ButtonRelease-1>", x=250 - ox, y=140 - oy,
+                      rootx=250, rooty=140)
+    app.update()
+    assert app._screen_win is None
+    assert app.state() != "withdrawn"
+    assert len(spawned) == 1
+    target, args = spawned[0]
+    assert target == app._clipboard_worker
+    assert args[0].size == (200, 100)      # 囲んだ大きさで切り抜かれている
+    assert args[-1] == "screen"
+    assert app.busy is True
+    app._set_busy(False)
+
+
+def test_screen_read_escape_cancels(app, fake_screen):
+    """Esc でやめると、何も読まずに窓だけ戻る。"""
+    _, spawned = fake_screen
+    app.screen_read()
+    _grab_now(app)
+    cv = _screen_canvas(app)
+    cv.focus_force()
+    app.update()
+    cv.event_generate("<Escape>")
+    app.update()
+    assert app._screen_win is None
+    assert app.state() != "withdrawn"
+    assert not spawned
+    assert "やめました" in app.status_var.get()
+
+
+def test_screen_read_right_click_cancels(app, fake_screen):
+    """右クリックでもやめられる（Macの枠なし窓はEscが届かないことがあるため）。"""
+    _, spawned = fake_screen
+    app.screen_read()
+    _grab_now(app)
+    cv = _screen_canvas(app)
+    app.update()
+    cv.event_generate("<Button-3>", x=20, y=20)
+    app.update()
+    assert app._screen_win is None
+    assert app.state() != "withdrawn"
+    assert not spawned
+
+
+def test_screen_read_click_only_keeps_picking(app, fake_screen):
+    """クリックだけ（囲めていない）ではやめずに、選び直せるまま待つ。"""
+    _, spawned = fake_screen
+    app.screen_read()
+    _grab_now(app)
+    cv = _screen_canvas(app)
+    app.update()
+    cv.event_generate("<ButtonPress-1>", x=10, y=10, rootx=10, rooty=10)
+    cv.event_generate("<ButtonRelease-1>", x=11, y=11, rootx=11, rooty=11)
+    app.update()
+    assert isinstance(app._screen_win, tk.Toplevel)
+    assert not spawned
+    app._screen_selected(None)
+
+
+def test_screen_grab_twice_opens_one_picker(app, fake_screen):
+    """撮影の予約と連打が重なっても、選択の窓は1枚だけ。"""
+    app.screen_read()
+    _grab_now(app)
+    first = app._screen_win
+    app._screen_grab()
+    assert app._screen_win is first
+    assert sum(isinstance(w, tk.Toplevel) and w.winfo_exists()
+               and w.overrideredirect() for w in app.winfo_children()) == 1
+    app._screen_selected(None)
+
+
+def test_screen_read_blocked_while_busy(app, fake_screen):
+    """処理中は窓を隠さず、理由を状態欄に出す。"""
+    app.busy = True
+    app.status_var.set("")
+    app.screen_read()
+    assert app._screen_win is None
+    assert app.state() != "withdrawn"
+    assert app.status_var.get() != ""
+    app.busy = False
+
+
+def test_screen_grab_failure_restores_window(app, monkeypatch):
+    """画面を撮れなかったら、隠した窓を必ず戻してから知らせる。"""
+    from PIL import ImageGrab
+    from tkinter import messagebox
+    shown = []
+
+    def boom(*a, **k):
+        raise OSError("no permission")
+    monkeypatch.setattr(ImageGrab, "grab", boom)
+    monkeypatch.setattr(messagebox, "showerror", lambda *a, **k: shown.append(a))
+    app.screen_read()
+    _grab_now(app)
+    assert app._screen_win is None
+    assert app.state() != "withdrawn"
+    assert shown
+
+
+def test_screen_done_appends_and_starts_from_new_text(app, monkeypatch):
+    """画面から読んだ文章は本文の最後に足し、足した1行目から読み上げる。"""
+    played = []
+    monkeypatch.setattr(app, "_engine_ready", lambda: True)
+    monkeypatch.setattr(app, "_current_speaker", lambda: ("ずんだもん", 3, "u"))
+    monkeypatch.setattr(main_mod().core, "can_play", lambda: True)
+    monkeypatch.setattr(app, "play_from_cursor",
+                        lambda: played.append(app.text.index("insert")))
+    app.text.delete("1.0", "end")
+    app.text.insert("1.0", "前からある一行目\n前からある二行目")
+    app.q.put(("clip_done", "画面の文章です。\n二行目です。", {}, [], "screen"))
+    app._poll_queue()
+    assert app.text.get("3.0", "3.end") == "画面の文章です。"
+    assert played == ["3.0"]                # 足した所から読む（前の本文は読まない）
+
+
+def test_screen_done_without_engine_just_inserts(app, monkeypatch):
+    """VOICEVOX未接続なら、ダイアログで止めずに本文へ入れて案内だけ出す。"""
+    from tkinter import messagebox
+    shown = []
+    monkeypatch.setattr(messagebox, "showinfo", lambda *a, **k: shown.append(a))
+    monkeypatch.setattr(app, "_engine_ready", lambda: False)
+    app.text.delete("1.0", "end")
+    app.q.put(("clip_done", "画面の文章です。", {}, [], "screen"))
+    app._poll_queue()
+    assert app.text.get("1.0", "1.end") == "画面の文章です。"
+    assert app.text.index("insert") == "1.0"
+    assert not shown
+    assert "VOICEVOX" in app.status_var.get()
+
+
+def test_clipboard_done_still_goes_to_top(app):
+    """クリップボードOCRの結果の受け取り方は従来どおり（カーソルは先頭へ）。"""
+    app.text.delete("1.0", "end")
+    app.text.insert("1.0", "既存")
+    app.q.put(("clip_done", "追記分", {}, [], "clip"))
+    app._poll_queue()
+    assert app.text.get("2.0", "2.end") == "追記分"
+    assert app.text.index("insert") == "1.0"
+    assert "クリップボード" in app.status_var.get()
+
+
+def main_mod():
+    import main
+    return main
