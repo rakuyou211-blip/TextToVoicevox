@@ -49,7 +49,10 @@ import time
 import pytest
 
 import core
-import main
+
+# 画面（tkinter）が無い環境では、この1本ごと飛ばす。CI の Linux には python3-tk が
+# 入っていないので、ここで素の import をすると「集める」段階でCIごと倒れる（2026-09-24 実測）。
+main = pytest.importorskip("main")
 
 # 4行あることに意味がある。「先頭から4行」「しおりから残り何行」を数えるため。
 TEXT = "一行目です。\n二行目です。\n三行目です。\n四行目です。"

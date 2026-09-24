@@ -35,7 +35,9 @@ import os
 import pytest
 
 import core
-import main
+# 画面（tkinter）が無い環境では、この1本ごと飛ばす。CI の Linux には python3-tk が
+# 入っていないので、ここで素の import をすると「集める」段階でCIごと倒れる（2026-09-24 実測）。
+main = pytest.importorskip("main")
 from _seed import EN_LINES
 
 
