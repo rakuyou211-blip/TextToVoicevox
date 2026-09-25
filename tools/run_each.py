@@ -26,7 +26,9 @@ def main(argv):
     failed = []
     for n, t in enumerate(ids, 1):
         try:
-            r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", t],
+            # 固まったら60秒で全スレッドの今いる行を書き出させる（どこで止まったかを残す）
+            r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                                "-o", f"faulthandler_timeout={max(10, timeout - 30)}", t],
                                capture_output=True, text=True, timeout=timeout)
             ok = r.returncode in (0, 5)
             if not ok:
@@ -34,7 +36,10 @@ def main(argv):
         except subprocess.TimeoutExpired as e:
             ok = False
             print(f"TIMEOUT ({timeout}s): {t}")
-            print((e.stdout or b"")[-4000:] if isinstance(e.stdout, bytes) else (e.stdout or "")[-4000:])
+            for part in (e.stdout, e.stderr):
+                if isinstance(part, bytes):
+                    part = part.decode("utf-8", "replace")
+                print((part or "")[-8000:])
         print(f"[{n}/{len(ids)}] {'ok' if ok else 'FAILED'} {t}", flush=True)
         if not ok:
             failed.append(t)
