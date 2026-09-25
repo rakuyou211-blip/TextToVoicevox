@@ -239,3 +239,17 @@ def test_download_links_match_release_zip_names():
             assert f"releases/latest/download/{z}" in body, f"{name} に {z} のリンクがありません"
     body = _read(os.path.join(".github", "workflows", "release.yml"))
     assert "TextToVoicevox_Windows.zip" in body and "TextToVoicevox_Mac.zip" in body
+
+
+def test_shell_vars_are_braced_before_multibyte():
+    """Mac 標準の bash 3.2 は、日本語（UTF-8）のターミナルだと "$vv（" の全角文字の
+    1バイト目まで変数名に数えてしまい、set -u で「vv?: unbound variable」と落ちる
+    （v1.20.0 の1行導入が、完了表示の直後に止まった実績あり）。直後が日本語なら ${vv} と括る。"""
+    names = subprocess.run(["git", "ls-files", "-z", "--", "*.sh", "*.command"],
+                           cwd=ROOT, capture_output=True, check=True).stdout
+    bad = []
+    for name in filter(None, names.decode("utf-8").split("\0")):
+        for no, line in enumerate(_read(name).splitlines(), 1):
+            if re.search(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]", line):
+                bad.append(f"{name}:{no}: {line.strip()}")
+    assert not bad, "変数の直後に日本語があります（${名前} と括る）:\n" + "\n".join(bad)
