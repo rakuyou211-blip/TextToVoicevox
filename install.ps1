@@ -112,6 +112,20 @@
         return "https://github.com/$Repo/archive/refs/heads/main.zip"
     }
 
+    function Get-RunningApp {
+        # この場所に入れた TextToVoicevox が起動中か（更新中に部品を入れ替えると失敗するため）
+        try {
+            @(Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction Stop |
+                Where-Object {
+                    $_.CommandLine -and
+                    $_.CommandLine.IndexOf($Dest, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                    $_.CommandLine -match 'main\.py'
+                })
+        } catch {
+            @()
+        }
+    }
+
     function Invoke-Native($what, $exe, [string[]]$argv) {
         $old = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
@@ -154,6 +168,17 @@
 
         # ---- 2. 本体を置く ----
         Step '2/4 アプリ本体を置いています'
+        if (@(Get-RunningApp).Count -gt 0) {
+            # 開いたまま部品を入れ替えると失敗したり、書きかけの本文を失ったりする
+            Say '  TextToVoicevox が起動中です。新しい版に入れ替えるので、アプリを閉じてください。'
+            if (-not $env:T2V_YES) { [void](Read-Host '  閉じたら Enter を押してください') }
+            if (@(Get-RunningApp).Count -gt 0) {
+                Say ''
+                Say '  [!] まだ起動中なので、入れ替えをやめました（何も変えていません）。'
+                Say '      アプリを閉じてから、もう一度この1行を貼り付けてください。'
+                return
+            }
+        }
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ("t2v_install_" + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $tmp | Out-Null
         try {
@@ -212,21 +237,35 @@
         } catch {
             $ico = $null   # アイコンが作れなくても起動はできる
         }
-        $shell = New-Object -ComObject WScript.Shell
         $made = @()
-        foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
-            if (-not $folder -or -not (Test-Path -LiteralPath $folder)) { continue }
-            $lnkPath = Join-Path $folder "$AppName.lnk"
-            $lnk = $shell.CreateShortcut($lnkPath)
-            $lnk.TargetPath = $vpyw
-            $lnk.Arguments = '"' + (Join-Path $Dest 'main.py') + '"'
-            $lnk.WorkingDirectory = $Dest
-            $lnk.Description = 'PDF・画像・画面の文字を VOICEVOX で読み上げ'
-            if ($ico -and (Test-Path -LiteralPath $ico)) { $lnk.IconLocation = "$ico,0" }
-            $lnk.Save()
-            $made += $lnkPath
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+            foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+                if (-not $folder -or -not (Test-Path -LiteralPath $folder)) { continue }
+                try {
+                    $lnkPath = Join-Path $folder "$AppName.lnk"
+                    $lnk = $shell.CreateShortcut($lnkPath)
+                    $lnk.TargetPath = $vpyw
+                    $lnk.Arguments = '"' + (Join-Path $Dest 'main.py') + '"'
+                    $lnk.WorkingDirectory = $Dest
+                    $lnk.Description = 'PDF・画像・画面の文字を VOICEVOX で読み上げ'
+                    if ($ico -and (Test-Path -LiteralPath $ico)) { $lnk.IconLocation = "$ico,0" }
+                    $lnk.Save()
+                    $made += $lnkPath
+                } catch {
+                    # 会社のPCなどで、デスクトップへの書き込みが制限されていることがある
+                }
+            }
+        } catch {
+            # アイコンの仕組み（COM）自体が使えない制限つきの環境。本体は入っているので続ける
         }
         foreach ($m in $made) { Say "  作成: $m" }
+        if ($made.Count -eq 0) {
+            Say '  （このPCの設定でアイコンを作れませんでした。アプリは入っています）'
+            Say "  起動するときは、次のフォルダの「起動.bat」をダブルクリックしてください:"
+            Say "    $Dest"
+            try { Start-Process explorer.exe -ArgumentList ('"' + $Dest + '"') } catch {}
+        }
 
         Write-Host ''
         Write-Host '  できました！' -ForegroundColor Green

@@ -28,10 +28,23 @@ PDF・画像・txt・docx・epub から文字を取り出して、あなたの�
 
 ## ⬇ ダウンロード（最新版）
 
+### Windows の人（おすすめ・「PCが保護されました」が出ません）
+
+スタートボタンを右クリック →「**ターミナル**」を開いて、次の1行を貼り付けて Enter。
+
+```powershell
+irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.ps1 | iex
+```
+
+Python が無ければ入れるかを聞き、アプリを入れて、**デスクトップに「TextToVoicevox」のアイコン**を作ります。以後はアイコンから起動するだけ。更新も同じ1行です（くわしくは下の「③ このアプリを入れる」）。
+
+### Mac の人・zip で入れたい人
+
 **→ [GitHub Releases から最新版をダウンロード](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest)**
 
 最新は **v1.22.0**、ファイルは **`TextToVoicevox_v1.22.0.zip`**（数百KB）です。
 中身は Python のスクリプト一式です。EXE（ダブルクリックですぐ動く形）はまだありません。下の手順のとおり、Python を入れてから使ってください。
+Windows で zip から入れると、最初の1回だけ「WindowsによってPCが保護されました」が出ます（下の「はじめての人へ」参照）。
 
 変更の履歴は [CHANGELOG.md](CHANGELOG.md) にまとめています。
 

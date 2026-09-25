@@ -834,6 +834,24 @@ def test_screen_read_right_click_cancels(app, fake_screen):
     assert not spawned
 
 
+def test_screen_picker_closed_by_window_manager_restores_app(app, fake_screen):
+    """Alt+F4 などで範囲選択の窓が閉じられても、隠した本体の窓は戻る。"""
+    _, spawned = fake_screen
+    app.screen_read()
+    _grab_now(app)
+    win = app._screen_win
+    assert isinstance(win, tk.Toplevel)
+    win.destroy()                      # ウィンドウマネージャに壊された想定
+    app.update()
+    assert app._screen_win is None
+    assert app.state() != "withdrawn"
+    assert not spawned
+    app.screen_read()                  # 次もちゃんと開ける（固まった状態が残らない）
+    assert app._screen_win is True
+    _grab_now(app)
+    app._screen_selected(None)
+
+
 def test_screen_read_click_only_keeps_picking(app, fake_screen):
     """クリックだけ（囲めていない）ではやめずに、選び直せるまま待つ。"""
     _, spawned = fake_screen

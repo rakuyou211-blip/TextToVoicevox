@@ -2954,8 +2954,8 @@ class App(_Base):
 
     def _screen_grab_again(self):
         self._ticks.pop("screen", None)
-        region, all_screens = self._screen_region()
         try:
+            region, all_screens = self._screen_region()
             from PIL import ImageGrab
             shot = (ImageGrab.grab(all_screens=True) if all_screens
                     else ImageGrab.grab())
@@ -2986,8 +2986,8 @@ class App(_Base):
         self._ticks.pop("screen", None)
         if isinstance(self._screen_win, tk.Toplevel):
             return   # もう選択中（二重に開くと下の窓が操作できないまま残る）
-        region, all_screens = self._screen_region()
         try:
+            region, all_screens = self._screen_region()
             # PILは重いので起動時に読まず、初めて使うここで読み込む（起動短縮）
             from PIL import ImageGrab
             shot = (ImageGrab.grab(all_screens=True) if all_screens
@@ -3004,7 +3004,8 @@ class App(_Base):
         """撮った画面を全面に暗めに映し、ドラッグで範囲を選ばせる窓を出す。"""
         from PIL import Image, ImageEnhance, ImageTk
         rx, ry, rw, rh = region
-        view = shot.convert("RGB")
+        # 画像のコピーは最小限に（多画面・4Kでは1枚で数十MBになる。古いPCでも軽く）
+        view = shot if shot.mode == "RGB" else shot.convert("RGB")
         if view.size != (rw, rh):
             view = view.resize((rw, rh), Image.BILINEAR)   # 高解像度画面は縮めて映す
         # 暗くして「いまは選ぶ時間」と分かるようにする。選んだ所だけ元の明るさで見せる
@@ -3028,7 +3029,8 @@ class App(_Base):
         rect = cv.create_rectangle(0, 0, 0, 0, outline="#ffcc33", width=2,
                                    state="hidden")
         tip = ("読みたい所をドラッグで囲んでください　"
-               "（やめる：Esc か 右クリック）")
+               + ("（やめる：右クリック か Ctrl+クリック）" if core.IS_MAC
+                  else "（やめる：Esc か 右クリック）"))
         tip_bg = cv.create_rectangle(0, 0, 0, 0, fill="#222222",
                                      outline="#ffcc33")
         tip_item = cv.create_text(0, 0, text=tip, fill="white",
@@ -3096,10 +3098,17 @@ class App(_Base):
                 cv.itemconfigure(rect, state="hidden")
                 cv.itemconfigure(lit_item, image="")
                 return
+            try:
+                img = shot.crop(box)
+            except Exception:
+                # 切り出しに失敗しても（メモリ不足など）隠した窓は必ず戻す
+                self._screen_selected(None)
+                self.status_var.set("囲んだ所を切り出せませんでした。もう一度お試しください。")
+                return
             # 「↻ 同じ範囲を読む」用に、画像の画素ではなく画面の座標で覚えておく
             # （次に撮る画像の大きさが変わっても、同じ場所を切り出せるように）
             self._screen_last = ((xr0, yr0), (e.x_root, e.y_root))
-            self._screen_selected(shot.crop(box))
+            self._screen_selected(img)
             # ボタンは窓を元に戻したあとで作る。隠した窓にウィジェットを足してから
             # deiconify すると、macOS の Tk が落ちる（CI で Bus error を確認）
             self.after_idle(self._ensure_again_btn)
@@ -3117,6 +3126,14 @@ class App(_Base):
             cv.bind(seq, cancel)
         win.bind("<Escape>", cancel)
         cv.bind("<Escape>", cancel)
+        # Alt+F4 などで閉じられたときも「やめた」扱いにする。何もしないと窓だけが
+        # 壊れ、隠した本体の窓が戻らない（アプリが画面から消えたように見える）
+        win.protocol("WM_DELETE_WINDOW", cancel)
+
+        def on_destroy(e):
+            if e.widget is win and self._screen_win is win:
+                self._close_screen_picker()
+        win.bind("<Destroy>", on_destroy, add="+")
         win.bind("<Configure>", layout)
         layout()
 

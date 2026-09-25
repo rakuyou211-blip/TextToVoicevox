@@ -98,3 +98,21 @@ jobs:
           if (-not (Select-String -LiteralPath (Join-Path $d 'settings.json') -Pattern 'keep' -Quiet)) { throw 'settings.json was lost' }
           Write-Host 'update kept settings.json'
 
+      # 利用者と同じ道：GitHub の最新リリースの zip を取ってきて入れる（T2V_SRC なし）。
+      # zip の展開で日本語のファイル名（起動.bat）が崩れないことも確かめる。
+      - name: One-line installer from the latest release
+        shell: powershell
+        env:
+          T2V_DIR: ${{ runner.temp }}\t2v_release
+          T2V_NO_LAUNCH: "1"
+          T2V_YES: "1"
+        run: |
+          irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex
+          $d = $env:T2V_DIR
+          foreach ($f in @('main.py', 'core.py', 'venv\Scripts\pythonw.exe')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $d $f))) { throw "missing: $f" }
+          }
+          # \u8d77\u52d5.bat is the launcher .bat (checked from Python to keep this script ASCII-only)
+          & (Join-Path $d 'venv\Scripts\python.exe') -c "import os,sys; sys.exit(0 if '\u8d77\u52d5.bat' in os.listdir(sys.argv[1]) else 1)" $d
+          if ($LASTEXITCODE) { throw 'Japanese file names were broken when extracting the release zip' }
+          Write-Host 'release install ok'
