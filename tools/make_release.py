@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """配布用の zip を、Windows 用と Mac 用に分けて作る。
 
-    python tools/make_release.py [出力フォルダ]   （既定: dist/）
+    python tools/make_release.py [出力フォルダ] [--win-exe 署名済みの TextToVoicevox.exe]
 
 できるもの（名前に版数を入れないので、ダウンロードのリンクが版をまたいで変わらない）:
     TextToVoicevox_Windows.zip … .bat・ocr_win.ps1 など Windows で使うものだけ
@@ -25,7 +25,7 @@ TOP = "TextToVoicevox"   # zip を開いたときのフォルダ名（これま�
 NAMES = {"windows": "TextToVoicevox_Windows.zip", "mac": "TextToVoicevox_Mac.zip"}
 
 # どちらにも入れないもの
-_SKIP_DIRS = ("tests/", "tools/", ".github/", ".claude/")
+_SKIP_DIRS = ("tests/", "tools/", ".github/", ".claude/", "launcher/")
 _SKIP_FILES = {".gitattributes", ".gitignore", "install.ps1", "install.sh"}
 
 
@@ -54,8 +54,9 @@ def tracked_files(root=ROOT):
     return [f for f in out.decode("utf-8").split("\0") if f]
 
 
-def build(target, out_dir, root=ROOT):
-    """target 用の zip を out_dir に作り、そのパスを返す。"""
+def build(target, out_dir, root=ROOT, extra=None):
+    """target 用の zip を out_dir に作り、そのパスを返す。
+    extra: zip の一番上に足すファイルのパス（署名済みの起動用 .exe など）。"""
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, NAMES[target])
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
@@ -68,13 +69,26 @@ def build(target, out_dir, root=ROOT):
             info.compress_type = zipfile.ZIP_DEFLATED
             with open(src, "rb") as fh:
                 z.writestr(info, fh.read())
+        for src in extra or ():
+            info = zipfile.ZipInfo(f"{TOP}/{os.path.basename(src)}",
+                                   time.localtime(os.path.getmtime(src))[:6])
+            info.external_attr = (0o100000 | 0o755) << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            with open(src, "rb") as fh:
+                z.writestr(info, fh.read())
     return path
 
 
 def main(argv):
-    out_dir = argv[1] if len(argv) > 1 else os.path.join(ROOT, "dist")
+    args = list(argv[1:])
+    win_extra = []
+    if "--win-exe" in args:
+        i = args.index("--win-exe")
+        win_extra.append(args[i + 1])
+        del args[i:i + 2]
+    out_dir = args[0] if args else os.path.join(ROOT, "dist")
     for target in ("windows", "mac"):
-        path = build(target, out_dir)
+        path = build(target, out_dir, extra=win_extra if target == "windows" else None)
         with zipfile.ZipFile(path) as z:
             n = len(z.infolist())
         print(f"{path}  ({n} files, {os.path.getsize(path) // 1024} KB)")

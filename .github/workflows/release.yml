@@ -6,6 +6,13 @@ name: Release zips
 # は、版が変わっても同じまま最新版を指す。
 # Actions の画面から手動でも動かせる（タグ名を入れる）。その Release がまだ無ければ、
 # CHANGELOG.md のその版の節を本文にして Release ごと作る（付け忘れ・作り直しにも使える）。
+#
+# 起動用 .exe（launcher/）: ソースから作り、SignPath の設定があれば署名して Windows 用 zip に入れる。
+# 署名の設定（リポジトリの Settings → Secrets and variables → Actions）:
+#   変数   SIGNPATH_ORGANIZATION_ID … SignPath の組織 ID
+#   秘密   SIGNPATH_API_TOKEN       … SignPath の API トークン
+# 設定が無いあいだは .exe を入れない（署名の無い .exe は、.bat と同じく止められるため）。
+# 方針は docs/CODE_SIGNING.md。
 on:
   release:
     types: [published]
@@ -19,7 +26,63 @@ permissions:
   contents: write
 
 jobs:
+  launcher:
+    runs-on: windows-latest
+    outputs:
+      signed: ${{ steps.sign.outcome == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || '' }}
+          fetch-depth: 0
+
+      - name: Use the tagged source if the tag exists
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ inputs.tag }}" >/dev/null; then
+            git checkout -q "${{ inputs.tag }}"
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the launcher
+        shell: powershell
+        run: |
+          pip install pillow
+          powershell -NoProfile -ExecutionPolicy Bypass -File launcher\build.ps1 -Out unsigned\TextToVoicevox.exe
+
+      - name: Upload the unsigned launcher
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-unsigned
+          path: unsigned/TextToVoicevox.exe
+
+      - name: Sign with SignPath
+        id: sign
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: TextToVoicevox
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Upload the signed launcher
+        if: steps.sign.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-signed
+          path: signed/TextToVoicevox.exe
+
   zips:
+    needs: launcher
     runs-on: ubuntu-latest
     steps:
       # Release を出したとき: そのタグ。手動のとき: 動かしたブランチ（main）で、
@@ -36,8 +99,20 @@ jobs:
             git checkout -q "${{ inputs.tag }}"
           fi
 
+      - name: Download the signed launcher
+        if: needs.launcher.outputs.signed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: launcher-signed
+          path: signed
+
       - name: Build the zips
-        run: python tools/make_release.py dist
+        run: |
+          if [ -f signed/TextToVoicevox.exe ]; then
+            python tools/make_release.py dist --win-exe signed/TextToVoicevox.exe
+          else
+            python tools/make_release.py dist
+          fi
 
       # 手動実行で、まだその Release が無ければ作る（本文は CHANGELOG.md のその版の節）
       - name: Create the release if missing
