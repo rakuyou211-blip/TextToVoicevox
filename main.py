@@ -439,9 +439,14 @@ class App(_Base):
             _Tooltip(b, "選択したファイルの順序を入れ替えます\n"
                         "（上から順に抽出・結合されます）。")
         mod = "⌘" if core.IS_MAC else "Ctrl+"
-        self.screen_btn = ttk.Button(btns, text="📷 画面から読む",
+        # 「画面から読む」と「同じ範囲を読む」は1行に並べる（縦に1段増やすと
+        # 左の列が伸びて窓全体の必要な高さが変わる。macOS の CI ではそれだけで
+        # 起動時の窓表示が不安定になった）
+        srow = ttk.Frame(btns)
+        srow.pack(fill="x", pady=(8, 2))
+        self.screen_btn = ttk.Button(srow, text="📷 画面から読む",
                                      command=self.screen_read)
-        self.screen_btn.pack(fill="x", pady=(8, 2))
+        self.screen_btn.pack(side="left", fill="x", expand=True)
         _Tooltip(self.screen_btn,
                  "画面の読みたい所をドラッグで囲むと、その文字を読み取って\n"
                  f"すぐ読み上げます（{mod}R）。電子書籍・PDF・Webページなどに。\n"
@@ -449,12 +454,12 @@ class App(_Base):
                  + ("\n※初回は「システム設定 → プライバシーとセキュリティ\n"
                     "　→ 画面収録」でこのアプリ（ターミナル/Python）の許可が要ります。"
                     if core.IS_MAC else ""))
-        self.screen_again_btn = ttk.Button(btns, text="↻ 同じ範囲を読む",
-                                           command=self.screen_read_again,
-                                           state="disabled")
-        self.screen_again_btn.pack(fill="x", pady=2)
+        self.screen_again_btn = ttk.Button(srow, text="↻", width=3,
+                                           command=self.screen_read_again)
+        self.screen_again_btn.config(state="disabled")   # 一度囲むまでは押せない
+        self.screen_again_btn.pack(side="left", padx=(2, 0))
         _Tooltip(self.screen_again_btn,
-                 "前に囲んだのと同じ場所を、囲み直さずにもう一度読みます"
+                 "同じ範囲を読む：前に囲んだのと同じ場所を、囲み直さずにもう一度読みます"
                  f"（{mod}Shift+R）。\n電子書籍でページをめくったあとに押すと、"
                  "次のページをそのまま読み上げます。")
         self.clip_btn = ttk.Button(btns, text="クリップボードOCR", command=self.clipboard_ocr)
@@ -1039,6 +1044,8 @@ class App(_Base):
                 self.bind_all(f"<{mod}-s>", self._kb_save_txt)
                 self.bind_all(f"<{mod}-p>", lambda e: self._kb_invoke(self.preview_btn))
                 self.bind_all(f"<{mod}-r>", lambda e: self._kb_invoke(self.screen_btn))
+                self.bind_all(f"<{mod}-R>",
+                              lambda e: self._kb_invoke(self.screen_again_btn))
             except tk.TclError:
                 pass  # Command修飾子はmacOS以外に無い
         self.bind_all("<Escape>", self._kb_escape)
