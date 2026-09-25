@@ -439,9 +439,7 @@ class App(_Base):
             _Tooltip(b, "選択したファイルの順序を入れ替えます\n"
                         "（上から順に抽出・結合されます）。")
         mod = "⌘" if core.IS_MAC else "Ctrl+"
-        # 「画面から読む」と「同じ範囲を読む」は1行に並べる（縦に1段増やすと
-        # 左の列が伸びて窓全体の必要な高さが変わる。macOS の CI ではそれだけで
-        # 起動時の窓表示が不安定になった）
+        # 「画面から読む」と「同じ範囲を読む」は1行に並べる（左の列を縦に伸ばさない）
         srow = ttk.Frame(btns)
         srow.pack(fill="x", pady=(8, 2))
         self.screen_btn = ttk.Button(srow, text="📷 画面から読む",
