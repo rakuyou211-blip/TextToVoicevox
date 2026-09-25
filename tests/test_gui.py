@@ -46,7 +46,10 @@ REQUIRED_METHODS = [
 
 
 def _make_app():
-    """App を生成する。表示不可・依存不足なら skip。"""
+    """App を生成する。表示不可・依存不足なら skip。
+    起動中の小窓（スプラッシュ）は出さない（テストでは見た目だけの機能で、
+    macOS の Tk が何十回目かの App でこの窓の update 中に落ちることがあるため）。"""
+    os.environ["T2V_NO_SPLASH"] = "1"
     try:
         import main
     except Exception as e:  # PIL 等の依存が無いCI

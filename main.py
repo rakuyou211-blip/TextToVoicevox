@@ -332,7 +332,11 @@ class App(_Base):
     def _show_splash(self):
         """起動中だけ出す小窓。失敗したら None（見た目だけの機能なので起動は続行）。
         文言に絵文字を使わないこと：Windowsでは初回の絵文字描画がフォント探索で
-        数百ms固まるため、この窓だけは必ず一瞬で出す必要がある。"""
+        数百ms固まるため、この窓だけは必ず一瞬で出す必要がある。
+        T2V_NO_SPLASH=1 なら出さない（GUIテスト用。macOS の CI では、App を何十回も
+        作るうちに、この枠なし窓の update で Tk が落ちる／固まることがあった）。"""
+        if os.environ.get("T2V_NO_SPLASH"):
+            return None
         try:
             sp = tk.Toplevel(self)
             sp.overrideredirect(True)
