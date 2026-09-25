@@ -3012,8 +3012,17 @@ class App(_Base):
 
         win = tk.Toplevel(self)
         self._screen_win = win
-        win.overrideredirect(True)
-        win.geometry(f"{rw}x{rh}+{rx}+{ry}")
+        if core.IS_MAC:
+            # macOS の Tk は枠なし窓（overrideredirect）を出す瞬間に落ちることがある
+            # （CI で Bus error / Segmentation fault を何度も確認）。Mac では標準の
+            # フルスクリーン表示で全面を覆う。写真の位置は layout() が窓の実位置に合わせる
+            try:
+                win.attributes("-fullscreen", True)
+            except tk.TclError:
+                win.geometry(f"{rw}x{rh}+{rx}+{ry}")
+        else:
+            win.overrideredirect(True)
+            win.geometry(f"{rw}x{rh}+{rx}+{ry}")
         try:
             win.attributes("-topmost", True)
         except tk.TclError:
