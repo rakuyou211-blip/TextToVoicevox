@@ -439,12 +439,9 @@ class App(_Base):
             _Tooltip(b, "選択したファイルの順序を入れ替えます\n"
                         "（上から順に抽出・結合されます）。")
         mod = "⌘" if core.IS_MAC else "Ctrl+"
-        # 「画面から読む」と「同じ範囲を読む」は1行に並べる（左の列を縦に伸ばさない）
-        srow = ttk.Frame(btns)
-        srow.pack(fill="x", pady=(8, 2))
-        self.screen_btn = ttk.Button(srow, text="📷 画面から読む",
+        self.screen_btn = ttk.Button(btns, text="📷 画面から読む",
                                      command=self.screen_read)
-        self.screen_btn.pack(side="left", fill="x", expand=True)
+        self.screen_btn.pack(fill="x", pady=(8, 2))
         _Tooltip(self.screen_btn,
                  "画面の読みたい所をドラッグで囲むと、その文字を読み取って\n"
                  f"すぐ読み上げます（{mod}R）。電子書籍・PDF・Webページなどに。\n"
@@ -452,14 +449,11 @@ class App(_Base):
                  + ("\n※初回は「システム設定 → プライバシーとセキュリティ\n"
                     "　→ 画面収録」でこのアプリ（ターミナル/Python）の許可が要ります。"
                     if core.IS_MAC else ""))
-        self.screen_again_btn = ttk.Button(srow, text="↻", width=3,
-                                           command=self.screen_read_again)
-        self.screen_again_btn.config(state="disabled")   # 一度囲むまでは押せない
-        self.screen_again_btn.pack(side="left", padx=(2, 0))
-        _Tooltip(self.screen_again_btn,
-                 "同じ範囲を読む：前に囲んだのと同じ場所を、囲み直さずにもう一度読みます"
-                 f"（{mod}Shift+R）。\n電子書籍でページをめくったあとに押すと、"
-                 "次のページをそのまま読み上げます。")
+        # 「↻ 同じ範囲を読む」は、初めて範囲を囲んだときに作る（_ensure_again_btn）。
+        # 起動時の画面を増やさない（macOS の CI で、起動時にボタンを1つ足しただけで
+        # Tk が窓を出す瞬間に落ちるようになったため、起動時の構成は変えない）
+        self._screen_btns = btns
+        self.screen_again_btn = None
         self.clip_btn = ttk.Button(btns, text="クリップボードOCR", command=self.clipboard_ocr)
         self.clip_btn.pack(fill="x", pady=2)
 
@@ -1042,8 +1036,7 @@ class App(_Base):
                 self.bind_all(f"<{mod}-s>", self._kb_save_txt)
                 self.bind_all(f"<{mod}-p>", lambda e: self._kb_invoke(self.preview_btn))
                 self.bind_all(f"<{mod}-r>", lambda e: self._kb_invoke(self.screen_btn))
-                self.bind_all(f"<{mod}-R>",
-                              lambda e: self._kb_invoke(self.screen_again_btn))
+                self.bind_all(f"<{mod}-R>", lambda e: self._kb_screen_again())
             except tk.TclError:
                 pass  # Command修飾子はmacOS以外に無い
         self.bind_all("<Escape>", self._kb_escape)
@@ -1080,6 +1073,12 @@ class App(_Base):
         except tk.TclError:
             pass
         return "break"
+
+    def _kb_screen_again(self, event=None):
+        """Ctrl/Cmd+Shift+R：同じ範囲を読む（まだ囲んでいなければ囲むところから）。"""
+        if self.screen_again_btn is not None:
+            return self._kb_invoke(self.screen_again_btn)
+        return self._kb_invoke(self.screen_btn)
 
     def _kb_extract(self, event=None):
         """Ctrl/Cmd+Return で抽出実行。一括置換・検索欄の<Return>バインドと
@@ -2918,6 +2917,21 @@ class App(_Base):
         self.withdraw()
         self._tick("screen", self.SCREEN_HIDE_MS, self._screen_grab)
 
+    def _ensure_again_btn(self):
+        """「↻ 同じ範囲を読む」ボタンを、はじめて範囲を囲んだときに出す。"""
+        if self.screen_again_btn is not None:
+            return
+        mod = "⌘" if core.IS_MAC else "Ctrl+"
+        b = ttk.Button(self._screen_btns, text="↻ 同じ範囲を読む",
+                       command=self.screen_read_again)
+        b.pack(fill="x", pady=2, after=self.screen_btn)
+        _Tooltip(b, "前に囲んだのと同じ場所を、囲み直さずにもう一度読みます"
+                    f"（{mod}Shift+R）。\n電子書籍でページをめくったあとに押すと、"
+                    "次のページをそのまま読み上げます。")
+        self.screen_again_btn = b
+        if self.busy:
+            b.config(state="disabled")
+
     def screen_read_again(self):
         """「↻ 同じ範囲を読む」。前に囲んだ場所を、選び直さずに撮って読む。
         電子書籍でページをめくるたびに押す使い方を想定（囲む手間を毎回かけない）。"""
@@ -3081,6 +3095,7 @@ class App(_Base):
             # 「↻ 同じ範囲を読む」用に、画像の画素ではなく画面の座標で覚えておく
             # （次に撮る画像の大きさが変わっても、同じ場所を切り出せるように）
             self._screen_last = ((xr0, yr0), (e.x_root, e.y_root))
+            self._ensure_again_btn()
             self._screen_selected(shot.crop(box))
 
         def cancel(_e=None):
@@ -5451,8 +5466,8 @@ class App(_Base):
             self.extract_btn.config(state=state)
         self.clip_btn.config(state=state)
         self.screen_btn.config(state=state)
-        self.screen_again_btn.config(
-            state="normal" if not busy and self._screen_last else "disabled")
+        if self.screen_again_btn is not None:
+            self.screen_again_btn.config(state=state)
         if busy:
             # 音声生成中は synth_btn が「キャンセル」に切り替わるため無効化しない
             if self._synth_cancel is None:

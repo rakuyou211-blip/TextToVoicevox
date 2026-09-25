@@ -20,7 +20,7 @@ import tkinter as tk
 
 # 他メソッドが参照する（改名・削除不可の）保持必須ウィジェット属性
 REQUIRED_WIDGETS = [
-    "listbox", "clip_btn", "screen_btn", "screen_again_btn", "extract_btn", "progress", "text", "text_font",
+    "listbox", "clip_btn", "screen_btn", "extract_btn", "progress", "text", "text_font",
     "vvproj_btn", "speaker_cb", "dlg_speaker_cb", "preset_cb", "fmt_cb",
     "unit_cb", "preview_btn", "playall_btn", "resume_btn", "stop_btn",
     "synth_btn", "dict_btn", "rule_cb", "restore_btn", "theme_cb",
@@ -930,7 +930,7 @@ def test_screen_read_again_reuses_region(app, fake_screen, monkeypatch):
     """一度囲んだら、「同じ範囲を読む」は選び直さずに同じ場所を切り出して読む。"""
     from PIL import Image, ImageGrab
     shot, spawned = fake_screen
-    assert str(app.screen_again_btn["state"]) == "disabled"   # まだ囲んでいない
+    assert app.screen_again_btn is None     # まだ囲んでいない＝ボタンも出さない
     app.screen_read()
     _grab_now(app)
     cv = _screen_canvas(app)
@@ -940,6 +940,7 @@ def test_screen_read_again_reuses_region(app, fake_screen, monkeypatch):
     cv.event_generate("<ButtonRelease-1>", x=130 - ox, y=70 - oy, rootx=130, rooty=70)
     app.update()
     app._set_busy(False)
+    assert app.screen_again_btn is not None  # 一度囲んだらボタンが出る
     assert str(app.screen_again_btn["state"]) == "normal"
     # ページをめくった＝別の画面。範囲選択の窓は出ずに、同じ場所だけ読む
     page2 = Image.new("RGB", (400, 300), "gray")
