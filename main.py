@@ -449,7 +449,7 @@ class App(_Base):
                  + ("\n※初回は「システム設定 → プライバシーとセキュリティ\n"
                     "　→ 画面収録」でこのアプリ（ターミナル/Python）の許可が要ります。"
                     if core.IS_MAC else ""))
-        self.screen_again_btn = ttk.Button(btns, text="🔁 同じ範囲を読む",
+        self.screen_again_btn = ttk.Button(btns, text="↻ 同じ範囲を読む",
                                            command=self.screen_read_again,
                                            state="disabled")
         self.screen_again_btn.pack(fill="x", pady=2)
@@ -2916,7 +2916,7 @@ class App(_Base):
         self._tick("screen", self.SCREEN_HIDE_MS, self._screen_grab)
 
     def screen_read_again(self):
-        """「🔁 同じ範囲を読む」。前に囲んだ場所を、選び直さずに撮って読む。
+        """「↻ 同じ範囲を読む」。前に囲んだ場所を、選び直さずに撮って読む。
         電子書籍でページをめくるたびに押す使い方を想定（囲む手間を毎回かけない）。"""
         if self._screen_last is None:
             self.screen_read()   # まだ一度も囲んでいない → 囲むところから
@@ -3075,7 +3075,7 @@ class App(_Base):
                 cv.itemconfigure(rect, state="hidden")
                 cv.itemconfigure(lit_item, image="")
                 return
-            # 「🔁 同じ範囲を読む」用に、画像の画素ではなく画面の座標で覚えておく
+            # 「↻ 同じ範囲を読む」用に、画像の画素ではなく画面の座標で覚えておく
             # （次に撮る画像の大きさが変わっても、同じ場所を切り出せるように）
             self._screen_last = ((xr0, yr0), (e.x_root, e.y_root))
             self._screen_selected(shot.crop(box))
