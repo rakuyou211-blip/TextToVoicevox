@@ -51,7 +51,8 @@ Python が無ければ入れるかを聞き（パスワード不要）、アプ�
 ### zip で入れたい人
 
 - **⬇ [Windows 用をダウンロード](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip)**（`TextToVoicevox_Windows.zip`）
-- **⬇ [Mac 用をダウンロード](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip)**（`TextToVoicevox_Mac.zip`）
+- **Mac の人は、zip ではなく、上の「Mac の人」のターミナルの1行を使ってください**（警告が出ません）。
+  zip が欲しい人は → [Mac 用 zip](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip)（`TextToVoicevox_Mac.zip`）。ただし、ブラウザで落とした zip の中身を**ダブルクリックすると、Mac が必ず「開いていません」と止めます**（Apple の有料の審査を受けていないアプリには、どれも出ます）。zip で入れるときは、下の「zip で入れる」の Mac の手順どおり、ダブルクリックではなくターミナルから始めてください。そうすれば出ません
 
 どちらも最新版（いまは **v1.22.0**・数百KB）です。自分の OS の方だけ落とせば大丈夫です（v1.22.0 から分けました。ほかの版は [Releases](https://github.com/rakuyou211-blip/TextToVoicevox/releases) から）。
 中身は Python のスクリプト一式です。EXE（ダブルクリックですぐ動く形）はまだありません。下の手順のとおり、Python を入れてから使ってください。
@@ -186,7 +187,7 @@ curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main
 
 1. 上の「⬇ ダウンロード」から、自分の OS 用の zip（`TextToVoicevox_Windows.zip` / `TextToVoicevox_Mac.zip`）を落として、**解凍**する（Windows は右クリック→「すべて展開」、Mac はダブルクリック。OS標準の解凍がおすすめです）
 2. **Windows** → **`起動.bat`** をダブルクリック（「保護されました」と出たら下の「はじめての人へ」へ。通すのは初回1回だけです）
-3. **Mac** → **`起動.command`** をダブルクリック（「開けません」と出たら下の「Macで警告が出たとき」へ。通すのは初回1回だけです）
+3. **Mac** → **ダブルクリックはしないで**、ターミナルを開いて `bash ` と打ち（最後に半角スペース）、フォルダの中の **`setup_mac.sh`** をターミナルへドラッグして return。これで警告を出さずに、準備から起動まで進みます（2回目からは `起動.command` のダブルクリックで開けます）
 
 どちらも**これだけ**です。初回は自動でセットアップが走ります（venvを作って部品を入れるので、初回だけネットが要ります・数分）。
 
@@ -227,7 +228,7 @@ curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main
 
 ### Mac で警告が出たとき
 
-- `起動.command` を**普通にダブルクリックすると「開けません」**と出ることがあります。通し方は2つ（**どちらも初回1回だけ**。あとは残りのファイルの検疫フラグと実行権限を自動で直します）:
+- `起動.command` を**普通にダブルクリックすると「"起動.command"は開いていません」「開けません」**と出ます。**「ゴミ箱に入れる」は押さずに「完了」**を押してください。通し方は2つ（**どちらも初回1回だけ**。あとは残りのファイルの検疫フラグと実行権限を自動で直します）:
 - **確実な道（どのmacOSでも・おすすめ）**
   → ターミナルを開いて `bash ` と打ち（半角スペースまで）、フォルダ内の **`setup_mac.sh`** をターミナルへドラッグして return
   → ターミナル経由なら Gatekeeper に止められず、「アクセス権がありません」（実行権限の喪失）でも動きます。修復から起動（初回は自動セットアップ）までこれ1本で終わります
