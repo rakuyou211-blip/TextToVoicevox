@@ -39,16 +39,10 @@ jobs:
       # テストは1件も飛ばさない。
       - name: Run tests (macOS)
         if: runner.os == 'macOS'
+        timeout-minutes: 30
         run: |
           pytest tests/ -v --ignore=tests/test_gui.py
-          ids=$(pytest tests/test_gui.py --collect-only -q | grep '::')
-          test -n "$ids"
-          n=0
-          for t in $ids; do
-            pytest -q -p no:cacheprovider "$t" || exit 1
-            n=$((n+1))
-          done
-          echo "GUI tests passed one by one: $n"
+          python tools/run_each.py tests/test_gui.py --timeout 90
 
   # Windows の「1行でかんたん導入」を、この commit の install.ps1 で実際に流す。
   # 利用者と同じく raw.githubusercontent から irm | iex で読む（文字コードの扱いも本番と同じ）。
