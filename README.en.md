@@ -48,7 +48,7 @@ You give it a file. It pulls the text out, cleans it up, and reads it aloud in a
 - **On-screen label removal** — for news image OCR it also removes short Japanese labels that plain text can't tell from the article (station logo, program name, timestamp, category — e.g. "MBSニュース", "国内"), using each line's position and font size to judge that it isn't body text. macOS only, sharing the same on/off as noise removal above; conservative (it never drops article body).
 - **Command line** — there's a CLI too, if you'd rather script it than click.
 
-The current release is **v1.22.0**. It adds **📷 画面から読む (read from screen)**: press the button (or Ctrl+R / ⌘R), the app steps aside and dims a snapshot of your screen, you drag a box around the text you want — an e-book page, a PDF viewer, a web page — and it reads that text aloud right away. The text is appended to the editor and reading starts from the new part, so paging through a book and boxing each page builds up a transcript as you go. It uses the same offline OCR as before and adds no new dependencies. On Windows you can pick from any monitor; on macOS it covers the main display and needs the one-time *Screen Recording* permission. The character art still isn't bundled with the app; you drop your own PNGs into `assets/立ち絵/` (see [`assets/立ち絵/README.md`](assets/立ち絵/README.md)), and everything works the same if you don't. The full history is in [CHANGELOG.md](CHANGELOG.md).
+The current release is **v1.22.1** (screen layout fixes on top of v1.22.0). v1.22.0 added **📷 画面から読む (read from screen)**: press the button (or Ctrl+R / ⌘R), the app steps aside and dims a snapshot of your screen, you drag a box around the text you want — an e-book page, a PDF viewer, a web page — and it reads that text aloud right away. The text is appended to the editor and reading starts from the new part, so paging through a book and boxing each page builds up a transcript as you go. It uses the same offline OCR as before and adds no new dependencies. On Windows you can pick from any monitor; on macOS it covers the main display and needs the one-time *Screen Recording* permission. The character art still isn't bundled with the app; you drop your own PNGs into `assets/立ち絵/` (see [`assets/立ち絵/README.md`](assets/立ち絵/README.md)), and everything works the same if you don't. The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -89,7 +89,7 @@ If it won't start, run `デバッグ起動.bat` / `デバッグ起動.command` i
 
 > Heads up: right now this is distributed as a **script zip**, not a ready-made `.exe` or `.app`. There is no packaged executable yet. That's on my list, but it isn't here today, and I'd rather say so than pretend otherwise.
 
-**Download (latest, v1.22.0):** [Windows](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip) (`TextToVoicevox_Windows.zip`) · [macOS](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip) (`TextToVoicevox_Mac.zip`). Older versions are on the [Releases page](https://github.com/rakuyou211-blip/TextToVoicevox/releases).
+**Download (latest, v1.22.1):** [Windows](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip) (`TextToVoicevox_Windows.zip`) · [macOS](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip) (`TextToVoicevox_Mac.zip`). Older versions are on the [Releases page](https://github.com/rakuyou211-blip/TextToVoicevox/releases).
 
 ---
 
