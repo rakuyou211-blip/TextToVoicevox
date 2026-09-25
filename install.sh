@@ -117,10 +117,11 @@ t2v_install() {
         u="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | "$PY" -c '
 import json, sys
 rel = json.load(sys.stdin)
-for a in rel.get("assets", []):
-    if a.get("name", "").endswith(".zip"):
-        print(a["browser_download_url"])
-        break
+# Mac 用の zip（TextToVoicevox_Mac.zip）を選ぶ。分ける前の版は zip が1つだけ
+zips = [a for a in rel.get("assets", []) if a.get("name", "").endswith(".zip")]
+mac = [a for a in zips if "Mac" in a["name"]] or [a for a in zips if "Windows" not in a["name"]]
+if mac:
+    print(mac[0]["browser_download_url"])
 ' 2>/dev/null || true)"
         if [ -n "$u" ]; then echo "$u"; return; fi
         say '  （最新版の情報を取れなかったので、main ブランチを使います）' >&2
@@ -211,62 +212,68 @@ for a in rel.get("assets", []):
         rm -rf "$VENV"
         "$PY" -m venv "$VENV" || { fail '仮想環境（venv）の作成に失敗しました。'; return 1; }
     fi
-    "$VPY" -m pip install --disable-pip-version-check -q -r "$DEST/requirements.txt" \
+    "$VPY" -m pip install --disable-pip-version-check --progress-bar on -r "$DEST/requirements.txt" \
         || { fail '部品のインストールに失敗しました。'; return 1; }
 
     # ---- 4. アプリ ----
     step '4/4 アプリ（TextToVoicevox.app）を作っています'
-    local tmpapp="$APPS/.$APP_NAME.app.new"
-    rm -rf "$tmpapp"
-    if mkdir -p "$tmpapp/Contents/MacOS" "$tmpapp/Contents/Resources"; then
-        # 中身は「入れた場所の Python で main.py を開く」だけの小さな起動スクリプト
-        {
-            printf '#!/bin/bash\n'
-            printf '# TextToVoicevox の起動（install.sh が作成）\n'
-            printf 'DIR=%q\n' "$DEST"
-            printf 'cd "$DIR" || exit 1\n'
-            printf 'if [ ! -x venv_mac/bin/python ] || ! venv_mac/bin/python -c "" 2>/dev/null; then\n'
-            printf '    osascript -e %q >/dev/null 2>&1\n' \
-                'display alert "TextToVoicevox を起動できませんでした" message "部品が壊れているようです。ターミナルで、入れたときの1行をもう一度貼り付けてください。"'
-            printf '    exit 1\n'
-            printf 'fi\n'
-            printf 'exec "$DIR/venv_mac/bin/python" "$DIR/main.py"\n'
-        } >"$tmpapp/Contents/MacOS/$APP_NAME"
-        chmod +x "$tmpapp/Contents/MacOS/$APP_NAME"
-        cat >"$tmpapp/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key><string>$APP_NAME</string>
-    <key>CFBundleDisplayName</key><string>$APP_NAME</string>
-    <key>CFBundleIdentifier</key><string>io.github.rakuyou211-blip.texttovoicevox</string>
-    <key>CFBundleExecutable</key><string>$APP_NAME</string>
-    <key>CFBundleIconFile</key><string>AppIcon</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>LSMinimumSystemVersion</key><string>10.13</string>
-    <key>NSHighResolutionCapable</key><true/>
-    <key>NSScreenCaptureUsageDescription</key><string>「画面から読む」で、囲んだ所の文字を読み取るために使います。</string>
-</dict>
-</plist>
-PLIST
+    # Mac 標準の AppleScript でアプリを作り、その中から Python を起動する。
+    # 起動スクリプトから Python に切り替える作りだと、Mac は「python3.12 が画面を撮っている」
+    # と見なし、「画面収録」の許可の一覧に python3.12 と出てしまう。この作りなら
+    # Python はアプリの子として動くので、許可の一覧にも「TextToVoicevox」と出る。
+    local tmpdir="$APPS/.t2v_app_new"
+    local tmpapp="$tmpdir/$APP_NAME.app"
+    local esc_dest
+    esc_dest="$(printf '%s' "$DEST" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+    rm -rf "$tmpdir"
+    if mkdir -p "$tmpdir" && osacompile -o "$tmpapp" >/dev/null 2>&1 <<APPLESCRIPT
+-- TextToVoicevox の起動（install.sh が作成）
+on run
+	set appDir to "$esc_dest"
+	set py to appDir & "/venv_mac/bin/python"
+	try
+		do shell script "test -x " & quoted form of py
+	on error
+		activate
+		display alert "TextToVoicevox を起動できませんでした" message "部品が見つかりません。ターミナルで、入れたときの1行をもう一度貼り付けてください。" as critical
+		return
+	end try
+	try
+		do shell script "cd " & quoted form of appDir & " && " & quoted form of py & " " & quoted form of (appDir & "/main.py") & " >/dev/null 2>&1"
+	on error
+		activate
+		display alert "TextToVoicevox が途中で終了しました" message "直らないときは、ターミナルで、入れたときの1行をもう一度貼り付けてください。くわしい記録はアプリのフォルダの「起動エラー.log」「エラー.log」にあります。" as warning
+	end try
+end run
+APPLESCRIPT
+    then
+        local plist="$tmpapp/Contents/Info.plist"
+        plutil -replace CFBundleIdentifier -string 'io.github.rakuyou211-blip.texttovoicevox' "$plist"
+        # 起動役のアプリは Dock に出さない（Dock には本体の窓のアイコンだけが出る）
+        plutil -replace LSUIElement -bool YES "$plist"
+        plutil -replace NSHighResolutionCapable -bool YES "$plist"
+        plutil -replace NSScreenCaptureUsageDescription -string '「画面から読む」で、囲んだ所の文字を読み取るために使います。' "$plist"
         # アイコン（作れなくても起動はできる）。sips と iconutil は Mac に最初から入っている
-        local iconset="$tmpapp/AppIcon.iconset" s
+        local iconset="$tmpdir/AppIcon.iconset" s
         if mkdir -p "$iconset" 2>/dev/null; then
             for s in 16 32 128 256; do
                 sips -z "$s" "$s" "$DEST/assets/app-icon.png" --out "$iconset/icon_${s}x${s}.png" >/dev/null 2>&1
                 sips -z $((s * 2)) $((s * 2)) "$DEST/assets/app-icon.png" --out "$iconset/icon_${s}x${s}@2x.png" >/dev/null 2>&1
             done
-            iconutil -c icns "$iconset" -o "$tmpapp/Contents/Resources/AppIcon.icns" >/dev/null 2>&1
-            rm -rf "$iconset"
+            if iconutil -c icns "$iconset" -o "$tmpapp/Contents/Resources/applet.icns" >/dev/null 2>&1; then
+                # 新しい macOS の osacompile は Assets.car の絵を優先するので、そちらを外す
+                rm -f "$tmpapp/Contents/Resources/Assets.car"
+                plutil -remove CFBundleIconName "$plist" >/dev/null 2>&1
+            fi
         fi
-        # 手元で作った印（アドホック署名）。「画面収録」の許可を、更新しても覚えておきやすくする
+        # 中身を書き換えたので、手元で署名し直す（アドホック署名）
         codesign --force --deep -s - "$tmpapp" >/dev/null 2>&1
         rm -rf "$APP" && mv "$tmpapp" "$APP"
+        rm -rf "$tmpdir"
         touch "$APP"   # Finder・Launchpad にアイコンを読み直させる
         say "  作成: $APP"
     else
+        rm -rf "$tmpdir"
         say '  （アプリを作れませんでした。本体は入っています）'
         say "  起動するときは、次のフォルダの「起動.command」をダブルクリックしてください:"
         say "    $DEST"

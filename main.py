@@ -18,22 +18,24 @@ import unicodedata
 
 
 
-def _fix_tcl_library():
+def _fix_tcl_library(environ=None):
     """venv から、自分用 Python（python-build-standalone。install.sh が入れる）を使うと、
     Tcl/Tk が自分の部品（init.tcl・tk.tcl）を venv の中に探しに行って見つけられず、
     窓を1枚も開けずに落ちる。元の Python の lib/tcl8.x・lib/tk8.x に本物があれば、
     そこを教える。すでに指定がある・見つからないときは何もしない（ほかの Python は元から動く）。"""
+    if environ is None:
+        environ = os.environ
     if sys.platform != "darwin" or sys.prefix == sys.base_prefix:
         return
     import glob
     lib = os.path.join(sys.base_prefix, "lib")
     for var, pattern, marker in (("TCL_LIBRARY", "tcl8.*", "init.tcl"),
                                  ("TK_LIBRARY", "tk8.*", "tk.tcl")):
-        if os.environ.get(var):
+        if environ.get(var):
             continue
         for d in sorted(glob.glob(os.path.join(lib, pattern)), reverse=True):
             if os.path.isfile(os.path.join(d, marker)):
-                os.environ[var] = d
+                environ[var] = d
                 break
 
 
@@ -356,6 +358,7 @@ class App(_Base):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._tick("poll", 120, self._poll_queue)
         self.after(600, self._auto_connect)  # 起動時にエンジンへ自動接続
+        self.after(2500, self._prewarm_ocr)
         self._tick("autosave", 60000, self._autosave_tick)
         self._tick("health", self._HEALTH_INTERVAL_MS, self._health_tick)
 
@@ -1641,6 +1644,24 @@ class App(_Base):
         return dict(speed=self.speed_var.get(), pitch=self.pitch_var.get(),
                     intonation=self.into_var.get(), volume=self.vol_var.get())
 
+    def _prewarm_ocr(self):
+        """画面から読む・画像の読み取りで使う部品を、起動のあと裏で読み込んでおく。
+        とくに Mac の Apple Vision は初回の読み込みだけで1秒以上かかり、
+        何もしないと「初めて 📷 を使ったときだけ遅い」になる。失敗しても何もしない
+        （そのときは、これまでどおり使う時に読み込まれる）。テスト中はしない。"""
+        if "pytest" in sys.modules:
+            return
+
+        def load():
+            try:
+                from PIL import Image, ImageGrab  # noqa: F401
+                if core.IS_MAC:
+                    import Vision  # noqa: F401
+                    import Foundation  # noqa: F401
+            except Exception:
+                pass
+        threading.Thread(target=load, daemon=True).start()
+
     def _warm_speaker(self, style_id=None):
         """選ばれている話者のモデルを、裏でエンジンに読み込ませておく。
         押してから最初の音が出るまでの待ちを縮めるための先回り。
@@ -2910,12 +2931,17 @@ class App(_Base):
             # OCRが済めばPNG（＝クリップボード画像のコピー）は不要。%TEMP%に残さない
             with tempfile.TemporaryDirectory(prefix="t2v_clip_") as tmpdir:
                 png = os.path.join(tmpdir, "clip.png")
-                core.preprocess_image(img, enable=preprocess).save(png)
+                # すぐ OCR に渡して消す一時ファイルなので、圧縮は最小（Retina の
+                # 大きな画面だと、既定の圧縮だけで待ちが目に見えて延びる）
+                core.preprocess_image(img, enable=preprocess).save(png, compress_level=1)
                 notices = []
                 res = core.run_ocr([png], strip_labels=denoise, notices=notices)
                 raw = res.get(png, "")
-                # 低品質（写真の影・ムラ）なら照明平坦化で再OCR（macのみ・自動）
-                raw = core.ocr_retry_if_poor(raw, img, tmpdir, strip_labels=denoise)
+                # 低品質（写真の影・ムラ・横倒し）なら前処理を変えて再OCR（macのみ・自動）。
+                # 画面から読んだ文字は影も横倒しも無く、短い範囲だと「低品質」と見なされて
+                # 最大3回読み直すだけ（待ちが最大4倍）になるので、写真のときだけ行う
+                if not source.startswith("screen"):
+                    raw = core.ocr_retry_if_poor(raw, img, tmpdir, strip_labels=denoise)
             if fix_confusables and raw:
                 fixed = core.fix_ocr_confusables(raw)
                 if fixed != raw:
