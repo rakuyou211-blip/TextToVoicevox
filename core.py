@@ -24,7 +24,7 @@ from urllib.parse import unquote
 
 # アプリのバージョン（タイトルバー・CLI --version・不具合報告の目印に使う）。
 # リリースごとにここだけ更新する。
-APP_VERSION = "1.21.0"
+APP_VERSION = "1.22.0"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
@@ -1385,6 +1385,74 @@ def extract_epub(path: str) -> str:
         # 全章取りこぼした＝ほぼ確実に構造の読み違い。呼び出し側が気づけるよう例外に。
         raise RuntimeError(f"EPUBの本文を取り出せませんでした（{missing}章が見つからず）。")
     return "\n\n".join(chapters)
+
+
+# ============================================================
+#  画面の範囲選択（「📷 画面から読む」）
+# ============================================================
+SCREEN_MIN_DRAG = 6   # これより小さい囲み（ほぼクリック）は選択とみなさない（Tkの画面座標）
+
+
+def screen_selection_box(p0, p1, region, image_size, min_drag=SCREEN_MIN_DRAG):
+    """画面上でドラッグした2点を、スクリーンショット画像の切り抜き範囲へ直す。
+
+    p0, p1 はTkの画面座標（event.x_root/y_root）。region はスクショが写している
+    画面の範囲 (x, y, 幅, 高さ)（同じくTkの画面座標。左や上のモニタは負になる）。
+    image_size はスクショ画像の (幅, 高さ)。Macの高解像度画面では画像のほうが
+    2倍大きいなど、座標と画素が一致しないので比で直す。
+    返り値は PIL の crop に渡せる (左, 上, 右, 下)。小さすぎる・画面の外なら None。"""
+    (x0, y0), (x1, y1) = p0, p1
+    left, right = sorted((x0, x1))
+    top, bottom = sorted((y0, y1))
+    if right - left < min_drag or bottom - top < min_drag:
+        return None
+    rx, ry, rw, rh = region
+    iw, ih = image_size
+    if rw <= 0 or rh <= 0 or iw <= 0 or ih <= 0:
+        return None
+    import math
+    sx, sy = iw / rw, ih / rh
+    # 端は外側へ丸める（文字の端を1画素でも削らないため）
+    box = (max(0, math.floor((left - rx) * sx)),
+           max(0, math.floor((top - ry) * sy)),
+           min(iw, math.ceil((right - rx) * sx)),
+           min(ih, math.ceil((bottom - ry) * sy)))
+    if box[2] - box[0] < 1 or box[3] - box[1] < 1:
+        return None
+    return box
+
+
+# 「自動めくり読み」：囲んだ範囲のページが変わったかを、縮めた白黒画像の差で見る。
+# 差は「ページの文字（地の色から離れた濃さ）の量」に対する割合で測る。ただの平均差だと、
+# 広い範囲に小さな文字が少しだけ、という場面で差が薄まってページ替えを見逃すため。
+# 実測（96x96）：ページ替え 0.43〜0.68／1文字違い 0.009〜0.020／
+# めくりの途中（前後のページが半々）と次のページ 0.22〜0.34（白地・ダーク・小さい英字）。
+PAGE_SIG_SIZE = 96
+PAGE_CHANGE_DIFF = 0.15   # 前に読んだページとの差がこれ以上なら「ページが変わった」
+PAGE_STABLE_DIFF = 0.05   # 続けて撮った2枚の差がこれ未満なら「めくり終わって止まった」
+
+
+def page_signature(img, size=PAGE_SIG_SIZE):
+    """ページ替えの判定に使う、縮めた白黒画像のバイト列。"""
+    from PIL import Image
+    return img.convert("L").resize((size, size), Image.BILINEAR).tobytes()
+
+
+def _page_ink(sig):
+    """地の色（いちばん多い明るさ）から離れた濃さの平均＝ページの文字の量。"""
+    hist = [0] * 256
+    for v in sig:
+        hist[v] += 1
+    bg = hist.index(max(hist))
+    return sum(abs(v - bg) for v in sig) / len(sig)
+
+
+def signature_diff(a, b):
+    """page_signature どうしの差（ページの文字の量に対する割合）。比べられなければ大きい値。"""
+    if not a or not b or len(a) != len(b):
+        return 255.0
+    mad = sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+    return mad / max(_page_ink(a), _page_ink(b), 1.0)
 
 
 # ============================================================

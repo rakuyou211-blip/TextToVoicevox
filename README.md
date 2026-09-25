@@ -28,10 +28,33 @@ PDF・画像・txt・docx・epub から文字を取り出して、あなたの�
 
 ## ⬇ ダウンロード（最新版）
 
+### Windows の人（おすすめ・「PCが保護されました」が出ません）
+
+スタートボタンを右クリック →「**ターミナル**」を開いて、次の1行を貼り付けて Enter。
+
+```powershell
+irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.ps1 | iex
+```
+
+Python が無ければ入れるかを聞き、アプリを入れて、**デスクトップに「TextToVoicevox」のアイコン**を作ります。以後はアイコンから起動するだけ。更新も同じ1行です（くわしくは下の「③ このアプリを入れる」）。
+
+### Mac の人（おすすめ・「開けません」が出ません）
+
+「ターミナル」（Launchpad で「ターミナル」と検索）を開いて、次の1行を貼り付けて return。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.sh | bash
+```
+
+Python が無ければ入れるかを聞き（パスワード不要）、アプリを入れて、**Launchpad に「TextToVoicevox」**を作ります。以後は Launchpad か Spotlight（⌘+スペース）から起動するだけ。更新も同じ1行です（くわしくは下の「③ このアプリを入れる」）。
+
+### zip で入れたい人
+
 **→ [GitHub Releases から最新版をダウンロード](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest)**
 
-最新は **v1.21.0**、ファイルは **`TextToVoicevox_v1.21.0.zip`**（数百KB）です。
+最新は **v1.22.0**、ファイルは **`TextToVoicevox_v1.22.0.zip`**（数百KB）です。
 中身は Python のスクリプト一式です。EXE（ダブルクリックですぐ動く形）はまだありません。下の手順のとおり、Python を入れてから使ってください。
+Windows で zip から入れると、最初の1回だけ「WindowsによってPCが保護されました」が出ます（下の「はじめての人へ」参照）。
 
 変更の履歴は [CHANGELOG.md](CHANGELOG.md) にまとめています。
 
@@ -55,6 +78,7 @@ PDF・画像・txt・docx・epub から文字を取り出して、あなたの�
 
 ## できること
 
+- **📷 画面から読む**：電子書籍・PDF・Webページなど、画面の読みたい所を**ドラッグで囲むだけで、すぐ読み上げ**（Ctrl/⌘+R）。読んだ文字は本文にたまっていきます。ページをめくったら **↻ 同じ範囲を読む**（一度囲むと出るボタン・Ctrl/⌘+Shift+R）で囲み直さずに次のページへ。**「めくったら自動で読む」**をオンにすれば、ページをめくるだけで読み進められます（Macは初回だけ「画面収録」の許可が必要）
 - **文字の取り出し**：PDF・画像（PNG/JPEG等）・txt・docx・epub に対応
 - **オフラインOCR**：画像やスキャンPDFの文字を、OSの標準エンジンで読み取り
   （Windows = Windows.Media.Ocr / Mac = Apple Vision。ネットに送りません）
@@ -83,7 +107,7 @@ PDF・画像・txt・docx・epub から文字を取り出して、あなたの�
 - **映像内ラベルの除去**：ニュース画像OCRに残る局ロゴ・番組名・日時・カテゴリ表示などの短い日本語ラベル（例「MBSニュース」「国内」）を、行の座標・文字サイズから本文でないと判定して除きます（Windows/Mac両対応・上のノイズ除去と共通ON/OFF・本文は必ず残す保守的判定）
 - **OCR誤字の自動補正**：OCRが取り違えやすい同形文字（`サ一ビス`→`サービス`・`卜ヨタ`→`トヨタ`・`2O26`→`2026` など）を前後の文脈で確定できるときだけ直します（既定ON・OCR結果のみ対象。テキストファイルには触れません）
 - **読めない記号の展開**：`①`→`1`・`㈱`→`株式会社`・`50㎡`→`50平方メートル` など、VOICEVOXが読み飛ばす記号を読みに展開（「全角英数→半角」オプションと連動）
-- **ダークモード・文字サイズ変更・本文検索・主要操作のショートカット**（抽出=Ctrl/⌘+Return・生成=Ctrl/⌘+G・試聴=Ctrl/⌘+P・停止=Esc など）
+- **ダークモード・文字サイズ変更・本文検索・主要操作のショートカット**（画面から読む=Ctrl/⌘+R・抽出=Ctrl/⌘+Return・生成=Ctrl/⌘+G・試聴=Ctrl/⌘+P・停止=Esc など）
 - **CLI（コマンド）モード**：GUIなしで一括変換（自動化・上級者向け）
 
 ---
@@ -124,7 +148,42 @@ PDF・画像・txt・docx・epub から文字を取り出して、あなたの�
 
 ### ③ このアプリを入れる
 
-1. 上の「⬇ ダウンロード」から `TextToVoicevox_v1.21.0.zip` を落として、**解凍**する（Windows は右クリック→「すべて展開」、Mac はダブルクリック。OS標準の解凍がおすすめです）
+#### Windows：1行でかんたん導入（おすすめ・警告が出ません）
+
+1. スタートボタンを右クリック →「**ターミナル**」（または「Windows PowerShell」）を開く
+2. 次の1行をコピーして、貼り付けて Enter
+
+```powershell
+irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.ps1 | iex
+```
+
+これだけで、**Pythonが無ければ入れるかを聞いて**（winget で公式版を入れます）、アプリを `%LOCALAPPDATA%\TextToVoicevox` に置き、部品を入れ、**デスクトップとスタートメニューに「TextToVoicevox」のアイコン**を作って起動します。以後はアイコンから起動するだけです。
+
+- **「PCが保護されました」が出ません**。あの警告は「ブラウザで落としたファイル」に付く印が原因で、この方法はPowerShell自身が取ってくるので印が付かないからです
+- 新しい版にするときも**同じ1行**を貼るだけ（設定・辞書・自動保存・立ち絵はそのまま残ります）
+- 中身は [`install.ps1`](install.ps1) で全部読めます。管理者権限は使いません
+- やめるときは `%LOCALAPPDATA%\TextToVoicevox` フォルダと、2つのアイコンを消すだけです
+
+#### Mac：1行でかんたん導入（おすすめ・警告が出ません）
+
+1. Launchpad で「**ターミナル**」と検索して開く
+2. 次の1行をコピーして、貼り付けて return
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.sh | bash
+```
+
+これだけで、**使える Python が無ければ入れるかを聞いて**（このアプリ専用の Python 3.12 を `~/.local/python3.12` に入れます。パスワード不要）、アプリを `~/Library/Application Support/TextToVoicevox` に置き、部品を入れ、**`~/Applications` に「TextToVoicevox」アプリ**を作って起動します。Launchpad と Spotlight から開けます。
+
+- **「開けません」が出ません**。あの警告は「ブラウザで落としたファイル」に付く検疫フラグが原因で、この方法は curl が取ってくるので印が付かないからです
+- 新しい版にするときも**同じ1行**を貼るだけ（設定・辞書・自動保存・立ち絵はそのまま残ります）
+- 「📷 画面から読む」を初めて使うときだけ、Mac が「画面収録」の許可を聞いてきます（システム設定で「TextToVoicevox」をオンに）
+- 中身は [`install.sh`](install.sh) で全部読めます。管理者権限は使いません
+- やめるときは `~/Library/Application Support/TextToVoicevox` と `~/Applications/TextToVoicevox.app`（ここで Python を入れた場合は `~/.local/python3.12` も）をゴミ箱へ
+
+#### zip で入れる（従来の方法）
+
+1. 上の「⬇ ダウンロード」から `TextToVoicevox_v1.22.0.zip` を落として、**解凍**する（Windows は右クリック→「すべて展開」、Mac はダブルクリック。OS標準の解凍がおすすめです）
 2. **Windows** → **`起動.bat`** をダブルクリック（「保護されました」と出たら下の「はじめての人へ」へ。通すのは初回1回だけです）
 3. **Mac** → **`起動.command`** をダブルクリック（「開けません」と出たら下の「Macで警告が出たとき」へ。通すのは初回1回だけです）
 

@@ -2731,3 +2731,95 @@ class TestReviewFixesV117:
         sp = [("ずんだもん（ノーマル）", 3, "u")]
         text = "\n\n@すんだもん: タイプミス\n地の文"
         assert core.unresolved_speaker_tags(text, sp) == [(3, "すんだもん")]
+
+
+# ============================================================
+#  screen_selection_box（「📷 画面から読む」の範囲 → 画像の切り抜き）
+# ============================================================
+def test_screen_selection_box_same_scale():
+    """座標と画素が同じ（Windowsの高DPI対応済み・普通の画面）ならそのまま。"""
+    box = core.screen_selection_box((100, 50), (300, 150), (0, 0, 1920, 1080),
+                                    (1920, 1080))
+    assert box == (100, 50, 300, 150)
+
+
+def test_screen_selection_box_reverse_drag():
+    """右下から左上へ囲んでも同じ範囲になる。"""
+    box = core.screen_selection_box((300, 150), (100, 50), (0, 0, 1920, 1080),
+                                    (1920, 1080))
+    assert box == (100, 50, 300, 150)
+
+
+def test_screen_selection_box_retina_scale():
+    """Macの高解像度画面：画像は座標の2倍。切り抜きも2倍の画素で取る。"""
+    box = core.screen_selection_box((10, 20), (110, 70), (0, 0, 1440, 900),
+                                    (2880, 1800))
+    assert box == (20, 40, 220, 140)
+
+
+def test_screen_selection_box_rounds_outward():
+    """端数は外側へ丸める（文字の端を削らない）。"""
+    box = core.screen_selection_box((10, 10), (21, 21), (0, 0, 100, 100),
+                                    (150, 150))
+    assert box == (15, 15, 32, 32)
+
+
+def test_screen_selection_box_left_monitor():
+    """左にサブモニタがある（仮想画面の原点が負）ときも画像の左上基準に直す。"""
+    region = (-1920, 0, 3840, 1080)
+    box = core.screen_selection_box((-1900, 100), (-1700, 200), region,
+                                    (3840, 1080))
+    assert box == (20, 100, 220, 200)
+
+
+def test_screen_selection_box_click_is_not_selection():
+    """ほぼクリックだけ（小さすぎる囲み）は選択とみなさない。"""
+    assert core.screen_selection_box((100, 100), (103, 140), (0, 0, 800, 600),
+                                     (800, 600)) is None
+    assert core.screen_selection_box((100, 100), (140, 102), (0, 0, 800, 600),
+                                     (800, 600)) is None
+
+
+def test_screen_selection_box_clamped_to_image():
+    """画面の外へはみ出した分は切り詰める。完全に外なら None。"""
+    box = core.screen_selection_box((700, 500), (900, 700), (0, 0, 800, 600),
+                                    (800, 600))
+    assert box == (700, 500, 800, 600)
+    assert core.screen_selection_box((900, 700), (1000, 800), (0, 0, 800, 600),
+                                     (800, 600)) is None
+
+
+# ============================================================
+#  自動めくり読み：ページが変わったかの判定
+# ============================================================
+def _text_page(lines):
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (600, 200), (250, 247, 240))
+    d = ImageDraw.Draw(img)
+    for i, line in enumerate(lines):
+        d.text((20, 20 + i * 40), line, fill=(30, 30, 30))
+    return img
+
+
+def test_page_signature_same_page_is_zero():
+    a = _text_page(["The quick brown fox", "jumps over the lazy dog"])
+    assert core.signature_diff(core.page_signature(a), core.page_signature(a)) == 0
+
+
+def test_page_signature_detects_page_change():
+    a = _text_page(["The quick brown fox", "jumps over the lazy dog", "again and again"])
+    b = _text_page(["Lorem ipsum dolor sit", "amet consectetur", "adipiscing elit sed do"])
+    assert core.signature_diff(core.page_signature(a), core.page_signature(b)) \
+        >= core.PAGE_CHANGE_DIFF
+
+
+def test_page_signature_ignores_tiny_change():
+    a = _text_page(["The quick brown fox", "jumps over the lazy dog"])
+    b = _text_page(["The quick brown fox", "jumps over the lazy dot"])
+    assert core.signature_diff(core.page_signature(a), core.page_signature(b)) \
+        < core.PAGE_CHANGE_DIFF
+
+
+def test_signature_diff_mismatch_is_max():
+    assert core.signature_diff(b"", b"abc") == 255.0
+    assert core.signature_diff(b"ab", b"abc") == 255.0
