@@ -176,6 +176,30 @@ def test_install_one_liner_is_documented():
     assert INSTALL_ONE_LINER in _read("install.ps1")
 
 
+MAC_INSTALL_ONE_LINER = ("curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/"
+                         "TextToVoicevox/main/install.sh | bash")
+
+
+def test_mac_install_one_liner_is_documented():
+    """Macの1行導入が、READMEと同梱の案内の両方に正しく載っている。"""
+    for name in ("README.md", "README.en.md", "はじめにお読みください.txt"):
+        assert MAC_INSTALL_ONE_LINER in _read(name), f"{name} にMacの1行導入の案内がありません"
+    assert MAC_INSTALL_ONE_LINER in _read("install.sh")
+
+
+def test_install_sh_runs_only_after_full_download():
+    """curl | bash は届いた所から順に実行する。途中で切れても書きかけの行が走らないよう、
+    全体を関数に包み、最後の行でだけ呼ぶ。改行は LF（CRLF だと bash が壊れる）。"""
+    with open(os.path.join(ROOT, "install.sh"), "rb") as f:
+        raw = f.read()
+    assert b"\r\n" not in raw
+    lines = [l for l in raw.decode("utf-8").splitlines() if l.strip()]
+    assert lines[0] == "#!/bin/bash"
+    assert lines[-1] == 't2v_install "$@"'
+    body = [l for l in lines if not l.startswith("#")]
+    assert body[0].startswith("t2v_install()")
+
+
 def test_install_ps1_has_no_bom():
     """install.ps1 は irm | iex で読まれる。先頭のBOMは文字列に混ざって
     最初の行を壊しうるので付けない（ocr_win.ps1 はファイル実行なのでBOM付きで正しい）。"""

@@ -42,7 +42,13 @@
     Get-ChildItem -LiteralPath "$HOME\Downloads\TextToVoicevox" -Recurse -File | Unblock-File
 
 ■ Mac の人
-  「起動.command」をダブルクリック。これだけです。
+  ★ 警告を出さずに入れる方法（おすすめ）:
+    Launchpad で「ターミナル」を開き、次の1行を貼り付けて return。
+      curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.sh | bash
+    Python が無ければ入れるかを聞き（パスワード不要）、アプリを入れて、
+    Launchpad に「TextToVoicevox」を作ります。更新も同じ1行です。
+
+  zip から使う場合は「起動.command」をダブルクリック。
   （初回の自動セットアップは Windows と同じ）
 
   「開けません」と出たら（いちばん確実な道・どの macOS でも）:

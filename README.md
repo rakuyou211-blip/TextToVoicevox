@@ -38,7 +38,17 @@ irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/instal
 
 Python が無ければ入れるかを聞き、アプリを入れて、**デスクトップに「TextToVoicevox」のアイコン**を作ります。以後はアイコンから起動するだけ。更新も同じ1行です（くわしくは下の「③ このアプリを入れる」）。
 
-### Mac の人・zip で入れたい人
+### Mac の人（おすすめ・「開けません」が出ません）
+
+「ターミナル」（Launchpad で「ターミナル」と検索）を開いて、次の1行を貼り付けて return。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.sh | bash
+```
+
+Python が無ければ入れるかを聞き（パスワード不要）、アプリを入れて、**Launchpad に「TextToVoicevox」**を作ります。以後は Launchpad か Spotlight（⌘+スペース）から起動するだけ。更新も同じ1行です（くわしくは下の「③ このアプリを入れる」）。
+
+### zip で入れたい人
 
 **→ [GitHub Releases から最新版をダウンロード](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest)**
 
@@ -154,7 +164,24 @@ irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/instal
 - 中身は [`install.ps1`](install.ps1) で全部読めます。管理者権限は使いません
 - やめるときは `%LOCALAPPDATA%\TextToVoicevox` フォルダと、2つのアイコンを消すだけです
 
-#### zip で入れる（Mac・従来の方法）
+#### Mac：1行でかんたん導入（おすすめ・警告が出ません）
+
+1. Launchpad で「**ターミナル**」と検索して開く
+2. 次の1行をコピーして、貼り付けて return
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.sh | bash
+```
+
+これだけで、**使える Python が無ければ入れるかを聞いて**（このアプリ専用の Python 3.12 を `~/.local/python3.12` に入れます。パスワード不要）、アプリを `~/Library/Application Support/TextToVoicevox` に置き、部品を入れ、**`~/Applications` に「TextToVoicevox」アプリ**を作って起動します。Launchpad と Spotlight から開けます。
+
+- **「開けません」が出ません**。あの警告は「ブラウザで落としたファイル」に付く検疫フラグが原因で、この方法は curl が取ってくるので印が付かないからです
+- 新しい版にするときも**同じ1行**を貼るだけ（設定・辞書・自動保存・立ち絵はそのまま残ります）
+- 「📷 画面から読む」を初めて使うときだけ、Mac が「画面収録」の許可を聞いてきます（システム設定で「TextToVoicevox」をオンに）
+- 中身は [`install.sh`](install.sh) で全部読めます。管理者権限は使いません
+- やめるときは `~/Library/Application Support/TextToVoicevox` と `~/Applications/TextToVoicevox.app`（ここで Python を入れた場合は `~/.local/python3.12` も）をゴミ箱へ
+
+#### zip で入れる（従来の方法）
 
 1. 上の「⬇ ダウンロード」から `TextToVoicevox_v1.22.0.zip` を落として、**解凍**する（Windows は右クリック→「すべて展開」、Mac はダブルクリック。OS標準の解凍がおすすめです）
 2. **Windows** → **`起動.bat`** をダブルクリック（「保護されました」と出たら下の「はじめての人へ」へ。通すのは初回1回だけです）

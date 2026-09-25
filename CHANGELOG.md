@@ -27,6 +27,20 @@ irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/instal
 - 会社のPCなどでアイコンを作れない環境でも、途中で止めずに入れ終えて、代わりに「起動.bat」の場所を開いて案内します
 - CI では、手元の中身を入れる試しに加えて、**GitHub の最新リリースを取ってきて入れる（利用者と同じ道）**試しも流します。zip の日本語のファイル名が崩れないことも確かめます
 
+### Mac：1行でかんたん導入（「開けません」が出ない）
+
+Mac も同じく、zip の `起動.command` を開くと **「開けません」**（Gatekeeper）で止まっていました。「ターミナル」に1行貼るだけで入る方法を作りました。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.sh | bash
+```
+
+- **警告が出ません。** curl が取ってくるので、ブラウザで落としたファイルに付く検疫フラグが付きません
+- **Python が無くても大丈夫。** 使える Python（3.9以降・画面表示の Tk 8.6 つき）が無ければ、入れるかを聞いてから、このアプリ専用の Python 3.12 を `~/.local/python3.12` に入れます（パスワード不要）。Apple の開発ツール付属の Python（Tk 8.5 で画面が真っ白になる）は使いません
+- アプリは `~/Library/Application Support/TextToVoicevox` に置き、**`~/Applications` に「TextToVoicevox」アプリ**を作ります（Launchpad・Spotlight から開ける）。「画面収録」の許可も「TextToVoicevox」として出ます
+- 更新も同じ1行。起動中なら閉じてもらうのを待ち、VOICEVOX が入っているかも確かめます（Windows 版と同じ）
+- CI（GitHub Actions の macOS）で、この1行を実際に流して「専用 Python が入る・部品が揃う・アプリが起動し続ける・検疫フラグが無い・更新で設定が残る・最新リリースから入る」を毎回確かめています
+
 ### 📷 画面から読む（新機能）
 
 電子書籍・PDFビューア・Webページなど、**いま画面に出ている文字を、囲むだけで読み上げ**られるようになりました。これまでは「スクリーンショットを撮る → クリップボードOCR → 連続再生」と3手かかっていたのが、1手になります。

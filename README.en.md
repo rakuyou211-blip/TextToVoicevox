@@ -103,6 +103,16 @@ irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/instal
 
 It finds Python (and offers to install the official 3.12 via winget if it's missing), puts the app in `%LOCALAPPDATA%\TextToVoicevox`, installs its libraries, creates a **TextToVoicevox** icon on the desktop and in the Start menu, and launches it. Because PowerShell downloads the files itself, they never get the "downloaded from the internet" mark, so Windows doesn't show the *"Windows protected your PC"* warning. Run the same line again to update (your settings, dictionary and autosaved text are kept). No admin rights; to uninstall, delete that folder and the two icons. The script is [`install.ps1`](install.ps1).
 
+## macOS: one-line install (recommended — no Gatekeeper warning)
+
+Open **Terminal** (search "Terminal" in Launchpad), paste this line and press Return:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.sh | bash
+```
+
+It looks for a usable Python (3.9+ with Tk 8.6) and, if there isn't one, offers to install a private Python 3.12 into `~/.local/python3.12` (no password needed). It puts the app in `~/Library/Application Support/TextToVoicevox`, installs its libraries, creates **TextToVoicevox.app** in `~/Applications` (so it shows up in Launchpad and Spotlight) and launches it. Because curl downloads the files, they never get the quarantine flag, so macOS doesn't say the app *"cannot be opened"*. Run the same line again to update. The first time you use 📷 *read from screen*, macOS asks for Screen Recording permission. To uninstall, trash that folder and the app. The script is [`install.sh`](install.sh).
+
 ## First run — if Windows or macOS warns you
 
 This app is **not code-signed** (signing certificates cost money I don't have yet, and I'm one person). Because of that, your computer may show a scary-looking warning the first time. That warning is about the *lack of a signature*, not about anything malicious — but you should never just trust a stranger's word on that, so here's what's actually happening and how to check.
