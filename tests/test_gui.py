@@ -1078,3 +1078,25 @@ def test_next_page_hint_after_screen_reading(app):
     app._poll_queue()
     assert "↻" in app.status_var.get()
     assert app._screen_reading is False
+
+
+def test_fix_tcl_library_points_venv_to_base_python(tmp_path, monkeypatch):
+    """Mac で、自分用 Python から作った venv でも Tcl/Tk の部品を見つけられるよう、
+    元の Python の lib/tcl8.x・lib/tk8.x を教える。既に指定があれば触らない。"""
+    base = tmp_path / "py"
+    for d, marker in (("tcl8.6", "init.tcl"), ("tk8.6", "tk.tcl")):
+        (base / "lib" / d).mkdir(parents=True)
+        (base / "lib" / d / marker).write_text("")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "base_prefix", str(base))
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+    monkeypatch.delenv("TCL_LIBRARY", raising=False)
+    monkeypatch.setenv("TK_LIBRARY", "/keep")
+    main_mod()._fix_tcl_library()
+    assert os.environ["TCL_LIBRARY"] == str(base / "lib" / "tcl8.6")
+    assert os.environ["TK_LIBRARY"] == "/keep"
+    # venv でなければ何もしない
+    monkeypatch.delenv("TCL_LIBRARY")
+    monkeypatch.setattr(sys, "prefix", str(base))
+    main_mod()._fix_tcl_library()
+    assert "TCL_LIBRARY" not in os.environ
