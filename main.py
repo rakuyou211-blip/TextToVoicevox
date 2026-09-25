@@ -1040,7 +1040,6 @@ class App(_Base):
                 self.bind_all(f"<{mod}-s>", self._kb_save_txt)
                 self.bind_all(f"<{mod}-p>", lambda e: self._kb_invoke(self.preview_btn))
                 self.bind_all(f"<{mod}-r>", lambda e: self._kb_invoke(self.screen_btn))
-                self.bind_all(f"<{mod}-R>", lambda e: self._kb_screen_again())
             except tk.TclError:
                 pass  # Command修飾子はmacOS以外に無い
         self.bind_all("<Escape>", self._kb_escape)
