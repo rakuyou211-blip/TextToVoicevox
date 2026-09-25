@@ -115,7 +115,7 @@ It looks for a usable Python (3.9+ with Tk 8.6) and, if there isn't one, offers 
 
 ## First run — if Windows or macOS warns you
 
-This app is **not code-signed** (signing certificates cost money I don't have yet, and I'm one person). Because of that, your computer may show a scary-looking warning the first time. That warning is about the *lack of a signature*, not about anything malicious — but you should never just trust a stranger's word on that, so here's what's actually happening and how to check.
+The Windows launcher (`TextToVoicevox.exe`) is signed with a certificate from the [SignPath Foundation](https://signpath.org/); free code signing is provided by [SignPath.io](https://about.signpath.io/). The signing policy is in [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md). The application is still in progress, so for now the app ships unsigned — which is why your computer may show a scary-looking warning the first time. That warning is about the *lack of a signature*, not about anything malicious — but you should never just trust a stranger's word on that, so here's what's actually happening and how to check.
 
 **Since v1.20.0, you only need to get past the warning once.** Let it through that first time and the launcher (`起動.bat` / `起動.command`) — together with the setup scripts it calls — clears the download flags (Windows' Mark of the Web / macOS' quarantine flag and lost execute permissions) from the rest of the files, so everything opens without warnings afterwards.
 

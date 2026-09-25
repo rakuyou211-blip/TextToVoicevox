@@ -48,6 +48,8 @@ curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main
 
 Python が無ければ入れるかを聞き（パスワード不要）、アプリを入れて、**Launchpad に「TextToVoicevox」**を作ります。以後は Launchpad か Spotlight（⌘+スペース）から起動するだけ。更新も同じ1行です（くわしくは下の「③ このアプリを入れる」）。
 
+**コード署名について**：Windows 用の起動用 `TextToVoicevox.exe` は、[SignPath Foundation](https://signpath.org/) の証明書で署名します（無料のコード署名は [SignPath.io](https://about.signpath.io/) の提供）。方針は [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) に書いています。いまは申し込み中で、通るまでは署名なしのまま配ります。
+
 ### zip で入れたい人
 
 - **⬇ [Windows 用をダウンロード](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip)**（`TextToVoicevox_Windows.zip`）
