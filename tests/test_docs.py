@@ -100,7 +100,11 @@ def test_zip_ships_expected_files():
     if out.returncode != 0:
         pytest.skip("git リポジトリではない（zip展開などで実行された）")
     files = [f for f in out.stdout.decode("utf-8").split("\0") if f]
-    pngs = sorted(f for f in files if f.lower().endswith(".png"))
+    # OCRベンチの画像は tools/ocr_bench/make_fixtures.py で自前生成したもの
+    # （立ち絵ではない）。tests/ は配布zipにも入らないので、ここだけ別枠で認める
+    bench_dir = "tests/fixtures/screen_ocr/"
+    pngs = sorted(f for f in files if f.lower().endswith(".png")
+                  and not f.startswith(bench_dir))
     assert pngs == ["assets/app-icon.png",
                     "docs/screenshot-dark.png",
                     "docs/screenshot-light.png"], \
