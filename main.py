@@ -3095,11 +3095,12 @@ class App(_Base):
         clean_opts = self._gather_clean_opts()
         self._set_busy(True)
         self.status_var.set("囲んだ所の文字を読み取っています…")
-        # 画面の文字は全面キャプチャ由来なので、クリップボードOCRと同じく
-        # 映像内ラベル・時刻などのノイズ除去（denoise）の設定に従う
+        # 自分で囲んだ範囲は「ここを読んで」という指定なので、映像内ラベル・時刻などの
+        # ノイズ除去（denoise）はかけない。全面スクショ向けの除去をかけると、正しく
+        # 読めた短い行（「html」「2026-09-24」など）まで捨ててしまう（OCRベンチで確認）
         self._spawn(self._clipboard_worker,
                     (img, self.pre_var.get(), clean_opts,
-                     self.fixconf_var.get(), self.denoise_var.get(), "screen"))
+                     self.fixconf_var.get(), False, "screen"))
 
     # ---------------- ユーザー辞書（読み方の登録） ----------------
     def open_dict_dialog(self):

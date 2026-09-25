@@ -180,13 +180,19 @@ def main():
         for c, p in zip(names, paths):
             got = core.denoise_capture(core.fix_ocr_confusables(res.get(p, "")))
             table[(c, "app_now")] = (accuracy(cases[c]["truth"], got), got)
+        # 「📷 画面から読む」の流れ（囲んだ範囲なのでラベル・ノイズ除去はしない）
+        res, sec, _ = ocr_all(paths, strip_labels=False)
+        timing["screen_app"] = sec
+        for c, p in zip(names, paths):
+            got = core.fix_ocr_confusables(res.get(p, ""))
+            table[(c, "screen_app")] = (accuracy(cases[c]["truth"], got), got)
         # 普通 と 反転 を両方読んで、日本語らしさのスコアが高いほうを採る（正解は見ない）
         for c in names:
             table[(c, "best_of_2")] = max(
                 [table[(c, "x3")], table[(c, "inv_x3")]],
                 key=lambda r: core._ocr_text_score(r[1]))
 
-    vnames = ["app_now"] + [v for v, _ in VARIANTS] + ["best_of_2"]
+    vnames = ["app_now", "screen_app"] + [v for v, _ in VARIANTS] + ["best_of_2"]
     plat = "Windows" if core.IS_WIN else ("macOS" if core.IS_MAC else sys.platform)
     lines = [f"### 画面の文字のOCR 正解率（{plat}）", "",
              "| 画像 | " + " | ".join(vnames) + " |",

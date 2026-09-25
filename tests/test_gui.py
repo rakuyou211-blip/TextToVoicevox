@@ -789,6 +789,7 @@ def test_screen_read_selects_region_and_starts_ocr(app, fake_screen):
     assert target == app._clipboard_worker
     assert args[0].size == (200, 100)      # 囲んだ大きさで切り抜かれている
     assert args[-1] == "screen"
+    assert args[4] is False                # 囲んだ範囲の行はノイズ扱いで捨てない
     assert app.busy is True
     app._set_busy(False)
 
