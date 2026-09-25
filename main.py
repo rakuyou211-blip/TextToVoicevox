@@ -3119,9 +3119,12 @@ class App(_Base):
         layout()
 
         def grab_keys(_e=None):
-            # Esc を受け取れるよう、枠なし窓にも入力を向ける（映った後でないと効かない）
+            # Esc を受け取れるよう、枠なし窓にも入力を向ける（映った後でないと効かない）。
+            # macOS の Tk は枠なし窓への focus_force で落ちることがある（CI で再現）ので、
+            # Mac では強制しない（やめるのは右クリック／Ctrl+クリックでもできる）
             try:
-                win.focus_force()
+                if not core.IS_MAC:
+                    win.focus_force()
                 cv.focus_set()
             except tk.TclError:
                 pass
