@@ -116,3 +116,79 @@ jobs:
           & (Join-Path $d 'venv\Scripts\python.exe') -c "import os,sys; sys.exit(0 if '\u8d77\u52d5.bat' in os.listdir(sys.argv[1]) else 1)" $d
           if ($LASTEXITCODE) { throw 'Japanese file names were broken when extracting the release zip' }
           Write-Host 'release install ok'
+
+  # Mac の「1行でかんたん導入」を、この commit の install.sh で実際に流す。
+  # 利用者と同じく raw.githubusercontent から curl | bash で読む。
+  # 1回目は「Python が無い Mac」を想定して、自分用 Python（python-build-standalone）を入れる道を通す。
+  install-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: One-line installer (own Python)
+        env:
+          T2V_SRC: ${{ github.workspace }}
+          T2V_DIR: ${{ runner.temp }}/t2v
+          T2V_APPS: ${{ runner.temp }}/apps
+          T2V_PY_DIR: ${{ runner.temp }}/py312
+          T2V_OWN_PYTHON: "1"
+          T2V_NO_LAUNCH: "1"
+          T2V_YES: "1"
+        run: curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.sh" | bash
+
+      - name: Check the installed app
+        run: |
+          set -e
+          d="$RUNNER_TEMP/t2v"
+          app="$RUNNER_TEMP/apps/TextToVoicevox.app"
+          for f in main.py core.py venv_mac/bin/python; do test -e "$d/$f" || { echo "missing: $f"; exit 1; }; done
+          "$d/venv_mac/bin/python" -c "import sys, tkinter, PIL, pypdfium2, requests, Vision; print(sys.executable, sys.version, 'Tk', tkinter.TkVersion); assert tkinter.TkVersion >= 8.6"
+          "$d/venv_mac/bin/python" -c "import os, sys; assert os.path.realpath(sys.executable).startswith(os.path.realpath(sys.argv[1])), sys.executable" "$RUNNER_TEMP/py312"
+          test -x "$app/Contents/MacOS/TextToVoicevox"
+          test -s "$app/Contents/Resources/AppIcon.icns"
+          plutil -lint "$app/Contents/Info.plist"
+          cat "$app/Contents/MacOS/TextToVoicevox"
+          if xattr -r "$d" "$app" | grep -q com.apple.quarantine; then echo "quarantine flag left"; exit 1; fi
+          # アプリの中の起動スクリプトで、実際に窓が開いて動き続けるか
+          "$app/Contents/MacOS/TextToVoicevox" &
+          pid=$!
+          sleep 15
+          kill -0 "$pid" || { echo "the app exited early"; cat "$d/起動エラー.log" 2>/dev/null; exit 1; }
+          kill "$pid"
+          echo "app ok"
+
+      - name: Re-run keeps user data (update)
+        env:
+          T2V_SRC: ${{ github.workspace }}
+          T2V_DIR: ${{ runner.temp }}/t2v
+          T2V_APPS: ${{ runner.temp }}/apps
+          T2V_PY_DIR: ${{ runner.temp }}/py312
+          T2V_OWN_PYTHON: "1"
+          T2V_NO_LAUNCH: "1"
+          T2V_YES: "1"
+        run: |
+          echo '{"keep": true}' > "$T2V_DIR/settings.json"
+          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.sh" | bash
+          grep -q keep "$T2V_DIR/settings.json" || { echo "settings.json was lost"; exit 1; }
+          echo "update kept settings.json"
+
+      # 利用者と同じ道：GitHub の最新リリースの zip を取ってきて入れる（T2V_SRC なし）。
+      # Python は、この Mac に入っているものを探して使う。
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: One-line installer from the latest release
+        env:
+          T2V_DIR: ${{ runner.temp }}/t2v_release
+          T2V_APPS: ${{ runner.temp }}/apps_release
+          T2V_NO_LAUNCH: "1"
+          T2V_YES: "1"
+        run: |
+          set -e
+          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.sh" | bash
+          test -x "$T2V_DIR/venv_mac/bin/python"
+          test -x "$T2V_APPS/TextToVoicevox.app/Contents/MacOS/TextToVoicevox"
+          test -f "$T2V_DIR/起動.command" || { echo "Japanese file names were broken"; ls "$T2V_DIR"; exit 1; }
+          echo "release install ok"
