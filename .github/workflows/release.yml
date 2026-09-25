@@ -4,7 +4,8 @@ name: Release zips
 # 名前に版数を入れないので、README のダウンロードのリンク
 #   https://github.com/<repo>/releases/latest/download/TextToVoicevox_Mac.zip
 # は、版が変わっても同じまま最新版を指す。
-# 付け忘れ・作り直しのときは、Actions の画面から手動でも動かせる（タグ名を入れる）。
+# Actions の画面から手動でも動かせる（タグ名を入れる）。その Release がまだ無ければ、
+# CHANGELOG.md のその版の節を本文にして Release ごと作る（付け忘れ・作り直しにも使える）。
 on:
   release:
     types: [published]
@@ -21,12 +22,44 @@ jobs:
   zips:
     runs-on: ubuntu-latest
     steps:
+      # Release を出したとき: そのタグ。手動のとき: 動かしたブランチ（main）で、
+      # タグがもうあればそのタグの中身（作り直し）
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ github.event.release.tag_name || '' }}
+          fetch-depth: 0
+
+      - name: Use the tagged source if the tag exists
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ inputs.tag }}" >/dev/null; then
+            git checkout -q "${{ inputs.tag }}"
+          fi
 
       - name: Build the zips
         run: python tools/make_release.py dist
+
+      # 手動実行で、まだその Release が無ければ作る（本文は CHANGELOG.md のその版の節）
+      - name: Create the release if missing
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "release $TAG exists"
+            exit 0
+          fi
+          python - "$TAG" > notes.md <<'PY'
+          import re, sys
+          tag = sys.argv[1]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(r"^## " + re.escape(tag) + r"\b.*?$(.*?)(?=^## v|\Z)", text, re.M | re.S)
+          body = m.group(1).strip() if m else ""
+          print(body + "\n\nくわしい変更は [CHANGELOG](https://github.com/rakuyou211-blip/TextToVoicevox/blob/main/CHANGELOG.md) に。")
+          PY
+          title="$(python -c "import re,sys; t=open('CHANGELOG.md',encoding='utf-8').read(); m=re.search(r'^## ' + re.escape(sys.argv[1]) + r'\b.*（(.*)）\s*$', t, re.M); print(sys.argv[1] + (' ' + m.group(1) + ' 🍂' if m else ''))" "$TAG")"
+          gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "$title" --notes-file notes.md
 
       - name: Attach to the release
         env:
