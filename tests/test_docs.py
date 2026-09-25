@@ -205,3 +205,17 @@ def test_install_ps1_has_no_bom():
     最初の行を壊しうるので付けない（ocr_win.ps1 はファイル実行なのでBOM付きで正しい）。"""
     with open(os.path.join(ROOT, "install.ps1"), "rb") as f:
         assert not f.read(3).startswith(b"\xef\xbb\xbf")
+
+
+def test_shell_vars_are_braced_before_multibyte():
+    """Mac 標準の bash 3.2 は、日本語（UTF-8）のターミナルだと "$vv（" の全角文字の
+    1バイト目まで変数名に数えてしまい、set -u で「vv?: unbound variable」と落ちる
+    （v1.20.0 の1行導入が、完了表示の直後に止まった実績あり）。直後が日本語なら ${vv} と括る。"""
+    names = subprocess.run(["git", "ls-files", "-z", "--", "*.sh", "*.command"],
+                           cwd=ROOT, capture_output=True, check=True).stdout
+    bad = []
+    for name in filter(None, names.decode("utf-8").split("\0")):
+        for no, line in enumerate(_read(name).splitlines(), 1):
+            if re.search(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]", line):
+                bad.append(f"{name}:{no}: {line.strip()}")
+    assert not bad, "変数の直後に日本語があります（${名前} と括る）:\n" + "\n".join(bad)
