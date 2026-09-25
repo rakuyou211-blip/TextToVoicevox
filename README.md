@@ -214,6 +214,8 @@ curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main
 
 **なぜ安全と言えるのか**：このアプリは中身を**全部ソースで公開（MIT）**しています。`setup.bat` も `main.py` も `core.py` も、このリポジトリで一行ずつ読めます。何をしているか隠していません。不安なら、詳しい人に中身を見てもらってから使っても大丈夫です。
 
+**署名について**：Windows 用の起動用 `TextToVoicevox.exe` は、オープンソース向けの無料のコード署名（SignPath Foundation）で署名する準備をしています。方針は [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) に書いています。
+
 **v1.20.0 から、警告を通すのは「最初の1回」だけにしてあります。** 最初に一度だけ通してもらえれば、`起動.bat` / `起動.command`（と setup）が残りのファイルの警告ブロック（Windows の Mark of the Web / Mac の検疫フラグと実行権限）を自動で外すからです。手でコマンドを打つ必要は、基本的になくなりました。
 
 やっていることは、OSごとに少しだけ違います。

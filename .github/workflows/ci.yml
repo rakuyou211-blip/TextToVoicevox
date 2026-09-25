@@ -200,3 +200,43 @@ jobs:
           test -x "$T2V_APPS/TextToVoicevox.app/Contents/MacOS/applet"
           test -f "$T2V_DIR/起動.command" || { echo "Japanese file names were broken"; ls "$T2V_DIR"; exit 1; }
           echo "release install ok"
+
+  # 起動用 .exe（launcher/）をソースから作り、ダウンロードの印を外してから 起動.bat を
+  # 動かすことを確かめる。Release ではこれを SignPath で署名して Windows 用 zip に入れる。
+  launcher-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        shell: powershell
+        run: |
+          pip install pillow
+          powershell -NoProfile -ExecutionPolicy Bypass -File launcher\build.ps1 -Out "$env:RUNNER_TEMP\TextToVoicevox.exe"
+
+      - name: The exe removes the download mark and runs the launcher .bat
+        shell: powershell
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 'fakeapp'
+          New-Item -ItemType Directory -Force -Path (Join-Path $d 'assets') | Out-Null
+          Copy-Item (Join-Path $env:RUNNER_TEMP 'TextToVoicevox.exe') $d
+          # main.py / core.py stubs and a fake launcher .bat (named with \u8d77\u52d5.bat via Python)
+          python -c "import os,sys; d=sys.argv[1]; open(os.path.join(d,'main.py'),'w').close(); open(os.path.join(d,'core.py'),'w').close(); open(os.path.join(d,'assets','x.txt'),'w').close(); open(os.path.join(d,'\u8d77\u52d5.bat'),'w').write('@echo off\r\necho ok> %~dp0ran.txt\r\n')" $d
+          foreach ($f in Get-ChildItem -LiteralPath $d -Recurse -File) {
+            Set-Content -LiteralPath $f.FullName -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
+          }
+          $marked = @(Get-ChildItem -LiteralPath $d -Recurse -File | Where-Object { Get-Item -LiteralPath $_.FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue })
+          Write-Host "marked before: $($marked.Count)"
+          # The exe itself is marked too, so run it through a copy without the mark (like a signed exe that the user allowed)
+          Remove-Item -LiteralPath (Join-Path $d 'TextToVoicevox.exe') -Stream Zone.Identifier
+          Start-Process -FilePath (Join-Path $d 'TextToVoicevox.exe') -WorkingDirectory $d -Wait
+          for ($i = 0; $i -lt 40 -and -not (Test-Path (Join-Path $d 'ran.txt')); $i++) { Start-Sleep -Milliseconds 250 }
+          if (-not (Test-Path (Join-Path $d 'ran.txt'))) { throw 'the launcher .bat did not run' }
+          $left = @(Get-ChildItem -LiteralPath $d -Recurse -File | Where-Object { Get-Item -LiteralPath $_.FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue })
+          if ($left.Count) { throw "download marks left: $($left.FullName -join ', ')" }
+          Write-Host 'launcher ok'
