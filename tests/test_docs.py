@@ -205,3 +205,37 @@ def test_install_ps1_has_no_bom():
     最初の行を壊しうるので付けない（ocr_win.ps1 はファイル実行なのでBOM付きで正しい）。"""
     with open(os.path.join(ROOT, "install.ps1"), "rb") as f:
         assert not f.read(3).startswith(b"\xef\xbb\xbf")
+
+
+def test_release_zips_are_split_by_os():
+    """配布 zip は Windows 用と Mac 用に分かれ、相手の OS のファイルが混ざらない。"""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    try:
+        import make_release
+    finally:
+        sys.path.pop(0)
+    try:
+        tracked = make_release.tracked_files(ROOT)
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("git が使えない環境")
+    win = make_release.files_for("windows", tracked)
+    mac = make_release.files_for("mac", tracked)
+    for files in (win, mac):
+        for need in ("main.py", "core.py", "requirements.txt", "はじめにお読みください.txt"):
+            assert need in files
+        assert not any(f.startswith(("tests/", "tools/", ".github/")) for f in files)
+        assert "install.ps1" not in files and "install.sh" not in files
+    assert "起動.bat" in win and "ocr_win.ps1" in win
+    assert not any(f.endswith((".command", ".sh")) for f in win) and "ocr_mac.py" not in win
+    assert "起動.command" in mac and "ocr_mac.py" in mac and "setup_mac.sh" in mac
+    assert not any(f.endswith((".bat", ".ps1")) for f in mac)
+
+
+def test_download_links_match_release_zip_names():
+    """README のダウンロードのリンクが、Release に添付する zip の名前と一致する。"""
+    for name in ("README.md", "README.en.md"):
+        body = _read(name)
+        for z in ("TextToVoicevox_Windows.zip", "TextToVoicevox_Mac.zip"):
+            assert f"releases/latest/download/{z}" in body, f"{name} に {z} のリンクがありません"
+    body = _read(os.path.join(".github", "workflows", "release.yml"))
+    assert "TextToVoicevox_Windows.zip" in body and "TextToVoicevox_Mac.zip" in body

@@ -18,22 +18,24 @@ import unicodedata
 
 
 
-def _fix_tcl_library():
+def _fix_tcl_library(environ=None):
     """venv から、自分用 Python（python-build-standalone。install.sh が入れる）を使うと、
     Tcl/Tk が自分の部品（init.tcl・tk.tcl）を venv の中に探しに行って見つけられず、
     窓を1枚も開けずに落ちる。元の Python の lib/tcl8.x・lib/tk8.x に本物があれば、
     そこを教える。すでに指定がある・見つからないときは何もしない（ほかの Python は元から動く）。"""
+    if environ is None:
+        environ = os.environ
     if sys.platform != "darwin" or sys.prefix == sys.base_prefix:
         return
     import glob
     lib = os.path.join(sys.base_prefix, "lib")
     for var, pattern, marker in (("TCL_LIBRARY", "tcl8.*", "init.tcl"),
                                  ("TK_LIBRARY", "tk8.*", "tk.tcl")):
-        if os.environ.get(var):
+        if environ.get(var):
             continue
         for d in sorted(glob.glob(os.path.join(lib, pattern)), reverse=True):
             if os.path.isfile(os.path.join(d, marker)):
-                os.environ[var] = d
+                environ[var] = d
                 break
 
 

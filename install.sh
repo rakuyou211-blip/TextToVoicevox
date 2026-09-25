@@ -117,10 +117,11 @@ t2v_install() {
         u="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | "$PY" -c '
 import json, sys
 rel = json.load(sys.stdin)
-for a in rel.get("assets", []):
-    if a.get("name", "").endswith(".zip"):
-        print(a["browser_download_url"])
-        break
+# Mac 用の zip（TextToVoicevox_Mac.zip）を選ぶ。分ける前の版は zip が1つだけ
+zips = [a for a in rel.get("assets", []) if a.get("name", "").endswith(".zip")]
+mac = [a for a in zips if "Mac" in a["name"]] or [a for a in zips if "Windows" not in a["name"]]
+if mac:
+    print(mac[0]["browser_download_url"])
 ' 2>/dev/null || true)"
         if [ -n "$u" ]; then echo "$u"; return; fi
         say '  （最新版の情報を取れなかったので、main ブランチを使います）' >&2

@@ -101,7 +101,12 @@
         }
         try {
             $rel = Invoke-RestMethod -UseBasicParsing "https://api.github.com/repos/$Repo/releases/latest"
-            $asset = $rel.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1
+            # Windows 用の zip（TextToVoicevox_Windows.zip）を選ぶ。分ける前の版は zip が1つだけ
+            $asset = $rel.assets | Where-Object { $_.name -like '*Windows*.zip' } | Select-Object -First 1
+            if (-not $asset) {
+                $asset = $rel.assets | Where-Object { $_.name -like '*.zip' -and $_.name -notlike '*Mac*' } |
+                    Select-Object -First 1
+            }
             if ($asset) {
                 Say "  最新版: $($rel.tag_name)"
                 return $asset.browser_download_url

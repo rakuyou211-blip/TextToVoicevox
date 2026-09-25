@@ -42,6 +42,13 @@ curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main
 - 「画面収録」の許可の一覧に、**「python3.12」ではなく「TextToVoicevox」**と出るようにしました（アプリを Mac 標準の AppleScript で作り、その中から本体を動かす作り）
 - 部品を入れている間も、進み具合を表示します（黙って数分止まって見えないように）
 
+### ダウンロード：Windows 用と Mac 用に分けました
+
+- zip を **`TextToVoicevox_Windows.zip`** と **`TextToVoicevox_Mac.zip`** の2つにしました。自分の OS で使うファイルだけが入るので、どれを開けばいいか迷いません
+- 名前に版数を入れないので、README のダウンロードのリンクは、版が変わっても同じまま最新版を指します
+- Release を出すと、GitHub Actions が2つの zip を作って自動で添付します（`tools/make_release.py`・`.github/workflows/release.yml`）
+- 1行導入も、自分の OS 用の zip を選んで入れます（分ける前の版の zip 1つにも対応）
+
 ### 速さ
 
 - **📷 画面から読む**が速くなりました。Mac で、読めた文字が少ないと「写真が横倒しかも」と最大3回読み直していた（待ちが最大4倍）のを、画面から読むときはやめました（写真のときだけ行います）

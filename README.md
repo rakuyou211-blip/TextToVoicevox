@@ -50,9 +50,10 @@ Python が無ければ入れるかを聞き（パスワード不要）、アプ�
 
 ### zip で入れたい人
 
-**→ [GitHub Releases から最新版をダウンロード](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest)**
+- **⬇ [Windows 用をダウンロード](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip)**（`TextToVoicevox_Windows.zip`）
+- **⬇ [Mac 用をダウンロード](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip)**（`TextToVoicevox_Mac.zip`）
 
-最新は **v1.22.0**、ファイルは **`TextToVoicevox_v1.22.0.zip`**（数百KB）です。
+どちらも最新版（いまは **v1.22.0**・数百KB）です。自分の OS の方だけ落とせば大丈夫です（v1.22.0 から分けました。ほかの版は [Releases](https://github.com/rakuyou211-blip/TextToVoicevox/releases) から）。
 中身は Python のスクリプト一式です。EXE（ダブルクリックですぐ動く形）はまだありません。下の手順のとおり、Python を入れてから使ってください。
 Windows で zip から入れると、最初の1回だけ「WindowsによってPCが保護されました」が出ます（下の「はじめての人へ」参照）。
 
@@ -183,7 +184,7 @@ curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main
 
 #### zip で入れる（従来の方法）
 
-1. 上の「⬇ ダウンロード」から `TextToVoicevox_v1.22.0.zip` を落として、**解凍**する（Windows は右クリック→「すべて展開」、Mac はダブルクリック。OS標準の解凍がおすすめです）
+1. 上の「⬇ ダウンロード」から、自分の OS 用の zip（`TextToVoicevox_Windows.zip` / `TextToVoicevox_Mac.zip`）を落として、**解凍**する（Windows は右クリック→「すべて展開」、Mac はダブルクリック。OS標準の解凍がおすすめです）
 2. **Windows** → **`起動.bat`** をダブルクリック（「保護されました」と出たら下の「はじめての人へ」へ。通すのは初回1回だけです）
 3. **Mac** → **`起動.command`** をダブルクリック（「開けません」と出たら下の「Macで警告が出たとき」へ。通すのは初回1回だけです）
 
