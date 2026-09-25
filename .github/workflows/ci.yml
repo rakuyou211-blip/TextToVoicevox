@@ -29,7 +29,20 @@ jobs:
         run: python -m py_compile main.py core.py ocr_mac.py
 
       - name: Run tests
+        if: runner.os != 'macOS'
         run: pytest tests/ -v
+
+      # macOS の Tk は、1つのプロセスで App（Tk のルート窓）を何十回も作っては壊すと、
+      # 途中から内部が壊れ、そのあと最初に窓を扱った所で落ちる（落ちる場所は毎回ちがう）。
+      # 実際のアプリは1起動で窓1つなので、GUIテストは1件ずつ別プロセスで流す
+      # （起動中の小窓は T2V_NO_SPLASH で出さない。出すと別プロセスでも固まることがあった）。
+      # 1件ごとに時間切れを付け、止まったら行を書き出す。テストは1件も飛ばさない。
+      - name: Run tests (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 30
+        run: |
+          pytest tests/ -v --ignore=tests/test_gui.py
+          python tools/run_each.py tests/test_gui.py --timeout 90
 
   # Windows の「1行でかんたん導入」を、この commit の install.ps1 で実際に流す。
   # 利用者と同じく raw.githubusercontent から irm | iex で読む（文字コードの扱いも本番と同じ）。
