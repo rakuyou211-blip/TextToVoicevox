@@ -153,10 +153,12 @@ jobs:
           # 利用者と同じく Finder と同じ開き方（open）で起動し、窓の本体が動き続けるか
           open "$app"
           sleep 20
-          pid="$(pgrep -f "$d/main.py" | head -n 1)"
+          # 「sh -c ... main.py」（起動役が挟むシェル）ではなく、Python 本体の方をつかむ
+          pid="$(pgrep -f "^[^ ]*python[^ ]* $d/main.py" | head -n 1)"
           test -n "$pid" || { echo "the app did not start or exited early"; cat "$d/起動エラー.log" 2>/dev/null; exit 1; }
           # 本体は起動役のアプリ（applet）の子として動く（画面収録の許可が TextToVoicevox の名前で出るため）
-          ps -o command= -p "$(ps -o ppid= -p "$(ps -o ppid= -p "$pid" | tr -d ' ')" | tr -d ' ')" || true
+          ps -o pid=,ppid=,command= -p "$pid"
+          ps -o command= -p "$(ps -o ppid= -p "$(ps -o ppid= -p "$pid" | tr -d ' ')" | tr -d ' ')" | grep applet
           # 止まるのを待つ（止まる前に次の更新を流すと「起動中」と判定されて正しく止まる）
           kill "$pid"
           for i in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
