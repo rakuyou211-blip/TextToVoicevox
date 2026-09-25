@@ -159,3 +159,21 @@ def test_python_version_requirement_consistent():
         versions[name] = m.group(1)
     assert len(set(versions.values())) == 1, \
         f"最低Pythonバージョンの記載が不一致: {versions}"
+
+
+INSTALL_ONE_LINER = ("irm https://raw.githubusercontent.com/rakuyou211-blip/"
+                     "TextToVoicevox/main/install.ps1 | iex")
+
+
+def test_install_one_liner_is_documented():
+    """Windowsの1行導入が、READMEと同梱の案内の両方に正しく載っている。"""
+    for name in ("README.md", "README.en.md", "はじめにお読みください.txt"):
+        assert INSTALL_ONE_LINER in _read(name), f"{name} に1行導入の案内がありません"
+    assert INSTALL_ONE_LINER in _read("install.ps1")
+
+
+def test_install_ps1_has_no_bom():
+    """install.ps1 は irm | iex で読まれる。先頭のBOMは文字列に混ざって
+    最初の行を壊しうるので付けない（ocr_win.ps1 はファイル実行なのでBOM付きで正しい）。"""
+    with open(os.path.join(ROOT, "install.ps1"), "rb") as f:
+        assert not f.read(3).startswith(b"\xef\xbb\xbf")

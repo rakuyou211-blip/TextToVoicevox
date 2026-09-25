@@ -30,3 +30,57 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -v
+
+  # Windows の「1行でかんたん導入」を、この commit の install.ps1 で実際に流す。
+  # 利用者と同じく raw.githubusercontent から irm | iex で読む（文字コードの扱いも本番と同じ）。
+  # 本体はネットから取らず、チェックアウトした中身（T2V_SRC）を入れる。
+  install-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: One-line installer
+        shell: powershell
+        env:
+          T2V_SRC: ${{ github.workspace }}
+          T2V_DIR: ${{ runner.temp }}\t2v
+          T2V_NO_LAUNCH: "1"
+          T2V_YES: "1"
+        run: irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex
+
+      - name: Check the installed app
+        shell: powershell
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 't2v'
+          foreach ($f in @('main.py', 'core.py', 'venv\Scripts\pythonw.exe', 'assets\app-icon.ico')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $d $f))) { throw "missing: $f" }
+          }
+          & (Join-Path $d 'venv\Scripts\python.exe') -c "import PIL, pypdfium2, requests, tkinter; print('deps ok')"
+          if ($LASTEXITCODE) { throw 'dependencies are not installed' }
+          $shell = New-Object -ComObject WScript.Shell
+          foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+            $p = Join-Path $folder 'TextToVoicevox.lnk'
+            if (-not (Test-Path -LiteralPath $p)) { throw "shortcut missing: $p" }
+            $lnk = $shell.CreateShortcut($p)
+            if ($lnk.TargetPath -ne (Join-Path $d 'venv\Scripts\pythonw.exe')) { throw "bad target: $($lnk.TargetPath)" }
+            Write-Host "shortcut ok: $p -> $($lnk.TargetPath) $($lnk.Arguments)"
+          }
+
+      - name: Re-run keeps user data (update)
+        shell: powershell
+        env:
+          T2V_SRC: ${{ github.workspace }}
+          T2V_DIR: ${{ runner.temp }}\t2v
+          T2V_NO_LAUNCH: "1"
+          T2V_YES: "1"
+        run: |
+          $d = $env:T2V_DIR
+          Set-Content -LiteralPath (Join-Path $d 'settings.json') -Value '{"keep": true}' -Encoding UTF8
+          irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex
+          if (-not (Select-String -LiteralPath (Join-Path $d 'settings.json') -Pattern 'keep' -Quiet)) { throw 'settings.json was lost' }
+          Write-Host 'update kept settings.json'

@@ -93,6 +93,16 @@ If it won't start, run `デバッグ起動.bat` / `デバッグ起動.command` i
 
 ---
 
+## Windows: one-line install (recommended — no SmartScreen warning)
+
+Open **Terminal** (right-click the Start button) or Windows PowerShell, paste this line and press Enter:
+
+```powershell
+irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.ps1 | iex
+```
+
+It finds Python (and offers to install the official 3.12 via winget if it's missing), puts the app in `%LOCALAPPDATA%\TextToVoicevox`, installs its libraries, creates a **TextToVoicevox** icon on the desktop and in the Start menu, and launches it. Because PowerShell downloads the files itself, they never get the "downloaded from the internet" mark, so Windows doesn't show the *"Windows protected your PC"* warning. Run the same line again to update (your settings, dictionary and autosaved text are kept). No admin rights; to uninstall, delete that folder and the two icons. The script is [`install.ps1`](install.ps1).
+
 ## First run — if Windows or macOS warns you
 
 This app is **not code-signed** (signing certificates cost money I don't have yet, and I'm one person). Because of that, your computer may show a scary-looking warning the first time. That warning is about the *lack of a signature*, not about anything malicious — but you should never just trust a stranger's word on that, so here's what's actually happening and how to check.
