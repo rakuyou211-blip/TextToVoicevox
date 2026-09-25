@@ -84,3 +84,47 @@ jobs:
           irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex
           if (-not (Select-String -LiteralPath (Join-Path $d 'settings.json') -Pattern 'keep' -Quiet)) { throw 'settings.json was lost' }
           Write-Host 'update kept settings.json'
+
+  # 「📷 画面から読む」で囲まれそうな画面の文字を、本物のOCR（Windows.Media.Ocr /
+  # Apple Vision）で前処理を変えて読み比べる。結果は Job Summary に表で出る。
+  # 数字を見るためのジョブなので、ここが落ちても PR は止めない。
+  ocr-bench:
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pillow pypdfium2 requests
+
+      - name: Install Apple Vision bridge (macOS)
+        if: runner.os == 'macOS'
+        run: pip install "pyobjc-framework-Vision>=9"
+
+      - name: Install Japanese OCR (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $cap = Get-WindowsCapability -Online | Where-Object { $_.Name -like 'Language.OCR*ja-JP*' } | Select-Object -First 1
+          if ($cap) {
+            Write-Host "$($cap.Name): $($cap.State)"
+            if ($cap.State -ne 'Installed') { Add-WindowsCapability -Online -Name $cap.Name | Out-Host }
+          } else {
+            Write-Host 'Japanese OCR capability not listed'
+          }
+          [void][Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType = WindowsRuntime]
+          Write-Host ('OCR languages: ' + (([Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages | ForEach-Object { $_.LanguageTag }) -join ', '))
+
+      - name: Run OCR benchmark
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tools/ocr_bench/bench.py
