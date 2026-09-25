@@ -20,7 +20,7 @@ import tkinter as tk
 
 # 他メソッドが参照する（改名・削除不可の）保持必須ウィジェット属性
 REQUIRED_WIDGETS = [
-    "listbox", "clip_btn", "screen_btn", "extract_btn", "progress", "text", "text_font",
+    "listbox", "clip_btn", "screen_btn", "screen_again_btn", "extract_btn", "progress", "text", "text_font",
     "vvproj_btn", "speaker_cb", "dlg_speaker_cb", "preset_cb", "fmt_cb",
     "unit_cb", "preview_btn", "playall_btn", "resume_btn", "stop_btn",
     "synth_btn", "dict_btn", "rule_cb", "restore_btn", "theme_cb",
@@ -924,3 +924,45 @@ def test_clipboard_done_still_goes_to_top(app):
 def main_mod():
     import main
     return main
+
+
+def test_screen_read_again_reuses_region(app, fake_screen, monkeypatch):
+    """一度囲んだら、「同じ範囲を読む」は選び直さずに同じ場所を切り出して読む。"""
+    from PIL import Image, ImageGrab
+    shot, spawned = fake_screen
+    assert str(app.screen_again_btn["state"]) == "disabled"   # まだ囲んでいない
+    app.screen_read()
+    _grab_now(app)
+    cv = _screen_canvas(app)
+    app.update()
+    ox, oy = cv.winfo_rootx(), cv.winfo_rooty()
+    cv.event_generate("<ButtonPress-1>", x=30 - ox, y=20 - oy, rootx=30, rooty=20)
+    cv.event_generate("<ButtonRelease-1>", x=130 - ox, y=70 - oy, rootx=130, rooty=70)
+    app.update()
+    app._set_busy(False)
+    assert str(app.screen_again_btn["state"]) == "normal"
+    # ページをめくった＝別の画面。範囲選択の窓は出ずに、同じ場所だけ読む
+    page2 = Image.new("RGB", (400, 300), "gray")
+    monkeypatch.setattr(ImageGrab, "grab", lambda *a, **k: page2)
+    app.screen_read_again()
+    assert app.state() == "withdrawn"
+    h = app._ticks.pop("screen")
+    app.after_cancel(h)
+    app._screen_grab_again()
+    assert app._screen_win is None
+    assert app.state() != "withdrawn"
+    assert len(spawned) == 2
+    img = spawned[1][1][0]
+    assert img.size == (100, 50)
+    assert img.getpixel((0, 0)) == (128, 128, 128)   # 新しいページから切り出した
+    app._set_busy(False)
+
+
+def test_screen_read_again_without_region_starts_picking(app, fake_screen):
+    """まだ一度も囲んでいなければ、囲むところから始める。"""
+    app._screen_last = None
+    app.screen_read_again()
+    assert app._screen_win is True       # 撮影待ち（範囲選択の手前）
+    _grab_now(app)
+    assert isinstance(app._screen_win, tk.Toplevel)
+    app._screen_selected(None)

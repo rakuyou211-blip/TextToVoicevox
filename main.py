@@ -267,6 +267,7 @@ class App(_Base):
         self.replace_rules = []         # 保存済み置換ルール [[find, repl], ...]
         self._dict_win = None           # ユーザー辞書ダイアログ
         self._screen_win = None         # 「画面から読む」の範囲選択（撮影待ちの間は True）
+        self._screen_last = None        # 最後に囲んだ範囲 ((x0,y0),(x1,y1))（Tkの画面座標）
         self.presets = []               # 声プリセット [{name, speaker, speed, ...}]
         self._bookmark = None           # 連続再生のしおり（最後に再生した行番号）
         self._saved_dlg_speaker = None  # 設定から復元するセリフ話者ラベル
@@ -448,6 +449,14 @@ class App(_Base):
                  + ("\n※初回は「システム設定 → プライバシーとセキュリティ\n"
                     "　→ 画面収録」でこのアプリ（ターミナル/Python）の許可が要ります。"
                     if core.IS_MAC else ""))
+        self.screen_again_btn = ttk.Button(btns, text="🔁 同じ範囲を読む",
+                                           command=self.screen_read_again,
+                                           state="disabled")
+        self.screen_again_btn.pack(fill="x", pady=2)
+        _Tooltip(self.screen_again_btn,
+                 "前に囲んだのと同じ場所を、囲み直さずにもう一度読みます"
+                 f"（{mod}Shift+R）。\n電子書籍でページをめくったあとに押すと、"
+                 "次のページをそのまま読み上げます。")
         self.clip_btn = ttk.Button(btns, text="クリップボードOCR", command=self.clipboard_ocr)
         self.clip_btn.pack(fill="x", pady=2)
 
@@ -1030,6 +1039,8 @@ class App(_Base):
                 self.bind_all(f"<{mod}-s>", self._kb_save_txt)
                 self.bind_all(f"<{mod}-p>", lambda e: self._kb_invoke(self.preview_btn))
                 self.bind_all(f"<{mod}-r>", lambda e: self._kb_invoke(self.screen_btn))
+                self.bind_all(f"<{mod}-R>",
+                              lambda e: self._kb_invoke(self.screen_again_btn))
             except tk.TclError:
                 pass  # Command修飾子はmacOS以外に無い
         self.bind_all("<Escape>", self._kb_escape)
@@ -2904,6 +2915,44 @@ class App(_Base):
         self.withdraw()
         self._tick("screen", self.SCREEN_HIDE_MS, self._screen_grab)
 
+    def screen_read_again(self):
+        """「🔁 同じ範囲を読む」。前に囲んだ場所を、選び直さずに撮って読む。
+        電子書籍でページをめくるたびに押す使い方を想定（囲む手間を毎回かけない）。"""
+        if self._screen_last is None:
+            self.screen_read()   # まだ一度も囲んでいない → 囲むところから
+            return
+        if self.busy or self._previewing:
+            self.status_var.set("再生／処理の実行中です。停止・完了してからお試しください"
+                                "（止まらないときは■停止/Esc）。")
+            return
+        if self._screen_win is not None:
+            return
+        self._screen_win = True
+        self.withdraw()
+        self._tick("screen", self.SCREEN_HIDE_MS, self._screen_grab_again)
+
+    def _screen_grab_again(self):
+        self._ticks.pop("screen", None)
+        region, all_screens = self._screen_region()
+        try:
+            from PIL import ImageGrab
+            shot = (ImageGrab.grab(all_screens=True) if all_screens
+                    else ImageGrab.grab())
+        except Exception as e:
+            self._close_screen_picker()
+            messagebox.showerror("同じ範囲を読む", f"画面を撮れませんでした: {e}")
+            return
+        p0, p1 = self._screen_last
+        box = core.screen_selection_box(p0, p1, region, shot.size)
+        if box is None:
+            # モニタを外した等で、前の場所が画面の外になった → 囲み直してもらう
+            self._screen_last = None
+            self._close_screen_picker()
+            self._set_busy(False)
+            self.status_var.set("前の範囲が画面の外になりました。📷 画面から読む で囲み直してください。")
+            return
+        self._screen_selected(shot.crop(box))
+
     def _screen_region(self):
         """撮る範囲 (x, y, 幅, 高さ) と、全モニタを撮るか。
         Windows は全モニタ（本がサブモニタにあることも多い）。Mac はメイン画面
@@ -3026,6 +3075,9 @@ class App(_Base):
                 cv.itemconfigure(rect, state="hidden")
                 cv.itemconfigure(lit_item, image="")
                 return
+            # 「🔁 同じ範囲を読む」用に、画像の画素ではなく画面の座標で覚えておく
+            # （次に撮る画像の大きさが変わっても、同じ場所を切り出せるように）
+            self._screen_last = ((xr0, yr0), (e.x_root, e.y_root))
             self._screen_selected(shot.crop(box))
 
         def cancel(_e=None):
@@ -5396,6 +5448,8 @@ class App(_Base):
             self.extract_btn.config(state=state)
         self.clip_btn.config(state=state)
         self.screen_btn.config(state=state)
+        self.screen_again_btn.config(
+            state="normal" if not busy and self._screen_last else "disabled")
         if busy:
             # 音声生成中は synth_btn が「キャンセル」に切り替わるため無効化しない
             if self._synth_cancel is None:
