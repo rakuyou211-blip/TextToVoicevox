@@ -3098,8 +3098,10 @@ class App(_Base):
             # 「↻ 同じ範囲を読む」用に、画像の画素ではなく画面の座標で覚えておく
             # （次に撮る画像の大きさが変わっても、同じ場所を切り出せるように）
             self._screen_last = ((xr0, yr0), (e.x_root, e.y_root))
-            self._ensure_again_btn()
             self._screen_selected(shot.crop(box))
+            # ボタンは窓を元に戻したあとで作る。隠した窓にウィジェットを足してから
+            # deiconify すると、macOS の Tk が落ちる（CI で Bus error を確認）
+            self.after_idle(self._ensure_again_btn)
 
         def cancel(_e=None):
             self._screen_selected(None)
