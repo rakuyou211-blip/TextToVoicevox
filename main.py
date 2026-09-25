@@ -253,8 +253,15 @@ class App(_Base):
         super().__init__()
         self.title(APP_TITLE)
         self._set_window_icon()
-        self.geometry(f"{_px(980)}x{_px(880)}")
-        self.minsize(_px(860), _px(700))
+        # 画面に収まる高さにする（13インチのノートなどで窓の下がはみ出すと、Mac は窓を
+        # 縮めて本文欄（3.）が潰れる）。上のメニューバー・下の Dock／タスクバーのぶんを空ける
+        try:
+            room = self.winfo_screenheight() - _px(90)
+        except Exception:
+            room = _px(880)
+        height = max(min(_px(880), room), _px(560))
+        self.geometry(f"{_px(980)}x{height}")
+        self.minsize(_px(860), min(_px(700), height))
         # 構築中（Windowsは絵文字フォントの初回読み込みだけで最大1秒近く固まる）は
         # 本体を隠し、代わりに小さな「起動しています」窓を出す。ダブルクリックから
         # 無反応に見える時間をなくすため。窓が出せない環境でも起動自体は続ける
@@ -457,48 +464,52 @@ class App(_Base):
         top = ttk.LabelFrame(self._main, text="1. 📥 入力ファイル" + hint)
         top.pack(fill="x", padx=PAD_X, pady=(PAD_Y, PAD_Y // 2))
 
+        # ボタンは2つのかたまりを横に並べる（縦1列だと9段になり、本文欄（3.）を潰していた）
+        #   左：ファイルの出し入れ（2列×3段）  右：画面・クリップボードから読む（縦に最大4段）
         btns = ttk.Frame(top)
         btns.pack(side="left", fill="y", padx=GAPX, pady=GAPY)
-        ttk.Button(btns, text="ファイル追加", command=self.add_files).pack(fill="x", pady=2)
-        ttk.Button(btns, text="フォルダ追加", command=self.add_folder).pack(fill="x", pady=2)
-        ttk.Button(btns, text="選択削除", command=self.remove_selected).pack(fill="x", pady=2)
-        ttk.Button(btns, text="全クリア", command=self.clear_files).pack(fill="x", pady=2)
+        files = ttk.Frame(btns)
+        files.pack(side="left", fill="y", anchor="n")
+        grid = [(ttk.Button(files, text="ファイル追加", command=self.add_files), 0, 0),
+                (ttk.Button(files, text="フォルダ追加", command=self.add_folder), 0, 1),
+                (ttk.Button(files, text="選択削除", command=self.remove_selected), 1, 0),
+                (ttk.Button(files, text="全クリア", command=self.clear_files), 1, 1)]
         # 並べ替え（ファイルの順序＝読み上げ・結合の順序なので調整できるように）
-        mv = ttk.Frame(btns)
-        mv.pack(fill="x", pady=2)
-        up = ttk.Button(mv, text="▲ 上へ", width=6,
-                        command=lambda: self._move_selected(-1))
-        up.pack(side="left", expand=True, fill="x")
-        dn = ttk.Button(mv, text="▼ 下へ", width=6,
-                        command=lambda: self._move_selected(+1))
-        dn.pack(side="left", expand=True, fill="x", padx=(2, 0))
+        up = ttk.Button(files, text="▲ 上へ", command=lambda: self._move_selected(-1))
+        dn = ttk.Button(files, text="▼ 下へ", command=lambda: self._move_selected(+1))
+        grid += [(up, 2, 0), (dn, 2, 1)]
+        for w, r, c in grid:
+            w.grid(row=r, column=c, sticky="ew", padx=(0 if c == 0 else 2, 0), pady=2)
+        files.columnconfigure((0, 1), weight=1, uniform="files")
         for b in (up, dn):
             _Tooltip(b, "選択したファイルの順序を入れ替えます\n"
                         "（上から順に抽出・結合されます）。")
+        reads = ttk.Frame(btns)
+        reads.pack(side="left", fill="y", anchor="n", padx=(GAPX, 0))
         mod = "⌘" if core.IS_MAC else "Ctrl+"
-        self.screen_btn = ttk.Button(btns, text="📷 画面から読む",
+        self.screen_btn = ttk.Button(reads, text="📷 画面から読む",
                                      command=self.screen_read)
-        self.screen_btn.pack(fill="x", pady=(8, 2))
+        self.screen_btn.pack(fill="x", pady=2)
         _Tooltip(self.screen_btn,
                  "画面の読みたい所をドラッグで囲むと、その文字を読み取って\n"
                  f"すぐ読み上げます（{mod}R）。電子書籍・PDF・Webページなどに。\n"
                  "読み取った文字は本文の最後に足されます。"
                  + ("\n※初回は「システム設定 → プライバシーとセキュリティ\n"
-                    "　→ 画面収録」でこのアプリ（ターミナル/Python）の許可が要ります。"
+                    "　→ 画面収録」でこのアプリの許可が要ります。"
                     if core.IS_MAC else ""))
         # 「↻ 同じ範囲を読む」は、初めて範囲を囲んだときに作る（_ensure_again_btn）。
         # 起動時の画面を増やさない（macOS の CI で、起動時にボタンを1つ足しただけで
         # Tk が窓を出す瞬間に落ちるようになったため、起動時の構成は変えない）
-        self._screen_btns = btns
+        self._screen_btns = reads
         self.screen_again_btn = None
         self.auto_page_cb = None
         self.auto_page_var = tk.BooleanVar(value=False)   # 自動めくり読み（毎回オフで起動）
-        self.clip_btn = ttk.Button(btns, text="クリップボードOCR", command=self.clipboard_ocr)
+        self.clip_btn = ttk.Button(reads, text="クリップボードOCR", command=self.clipboard_ocr)
         self.clip_btn.pack(fill="x", pady=2)
 
         lst = ttk.Frame(top)
         lst.pack(side="left", fill="both", expand=True, padx=GAPX, pady=GAPY)
-        self.listbox = tk.Listbox(lst, height=5, selectmode="extended")
+        self.listbox = tk.Listbox(lst, height=4, selectmode="extended")
         self.listbox.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(lst, command=self.listbox.yview)
         sb.pack(side="right", fill="y")
@@ -553,12 +564,12 @@ class App(_Base):
                      "空欄=全ページ。表紙・目次・索引を飛ばすのに\n"
                      "（複数PDFには同じ範囲が適用されます）。")
 
-        ttk.Separator(opt, orient="horizontal").pack(fill="x", padx=GAPX, pady=(4, 2))
-
-        # --- 整形: よく使う項目は常時表示、上級者向けは「詳細設定」で折りたたむ ---
-        head = ttk.Frame(opt)
-        head.pack(fill="x", padx=GAPX)
-        ttk.Label(head, text="整形", style="Cluster.TLabel").pack(side="left")
+        # 「英語の画像は？」「詳細設定」は、改行の扱いの行の右端に置く（見出しだけの行を
+        # なくして縦を詰め、本文欄（3.）を広く取る）
+        # （1行目の列は、幅のある2行目「PDF処理」に合わせて広がるので、その右端に寄せる）
+        head = ttk.Frame(basic)
+        head.grid(row=0, column=1, sticky="e")
+        basic.columnconfigure(1, weight=1)
         self._adv_btn = ttk.Button(head, text="詳細設定 ▸", width=12,
                                    command=self._toggle_advanced)
         self._adv_btn.pack(side="right")
@@ -569,8 +580,11 @@ class App(_Base):
         _Tooltip(self._en_btn,
                  "英文の画像が漢字まじりに崩れて読まれるときの、直し方の説明です。")
 
+        # --- 整形: よく使う項目は常時表示、上級者向けは「詳細設定」で折りたたむ ---
         common = ttk.Frame(opt)
         common.pack(fill="x", padx=GAPX, pady=(2, 0))
+        ttk.Label(common, text="整形", style="Cluster.TLabel").grid(
+            row=0, column=0, rowspan=2, sticky="nw", padx=(0, GAPX), pady=1)
         self.pre_var = tk.BooleanVar(value=True)
         self.blank_var = tk.BooleanVar(value=True)
         self.ascii_var = tk.BooleanVar(value=True)
@@ -593,9 +607,9 @@ class App(_Base):
         ]
         for i, (var, label, tip) in enumerate(common_defs):
             cb = ttk.Checkbutton(common, text=label, variable=var)
-            cb.grid(row=i // 3, column=i % 3, sticky="w", padx=(0, GAPX), pady=1)
+            cb.grid(row=i // 3, column=1 + i % 3, sticky="w", padx=(0, GAPX), pady=1)
             _Tooltip(cb, tip)
-        for cidx in range(3):
+        for cidx in range(1, 4):
             common.columnconfigure(cidx, weight=1)
 
         # 折りたたみ対象（既定は畳む＝pack しない。子ツリーには繋がるのでD&D登録は効く）
