@@ -2787,3 +2787,39 @@ def test_screen_selection_box_clamped_to_image():
     assert box == (700, 500, 800, 600)
     assert core.screen_selection_box((900, 700), (1000, 800), (0, 0, 800, 600),
                                      (800, 600)) is None
+
+
+# ============================================================
+#  自動めくり読み：ページが変わったかの判定
+# ============================================================
+def _text_page(lines):
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (600, 200), (250, 247, 240))
+    d = ImageDraw.Draw(img)
+    for i, line in enumerate(lines):
+        d.text((20, 20 + i * 40), line, fill=(30, 30, 30))
+    return img
+
+
+def test_page_signature_same_page_is_zero():
+    a = _text_page(["The quick brown fox", "jumps over the lazy dog"])
+    assert core.signature_diff(core.page_signature(a), core.page_signature(a)) == 0
+
+
+def test_page_signature_detects_page_change():
+    a = _text_page(["The quick brown fox", "jumps over the lazy dog", "again and again"])
+    b = _text_page(["Lorem ipsum dolor sit", "amet consectetur", "adipiscing elit sed do"])
+    assert core.signature_diff(core.page_signature(a), core.page_signature(b)) \
+        >= core.PAGE_CHANGE_DIFF
+
+
+def test_page_signature_ignores_tiny_change():
+    a = _text_page(["The quick brown fox", "jumps over the lazy dog"])
+    b = _text_page(["The quick brown fox", "jumps over the lazy dot"])
+    assert core.signature_diff(core.page_signature(a), core.page_signature(b)) \
+        < core.PAGE_CHANGE_DIFF
+
+
+def test_signature_diff_mismatch_is_max():
+    assert core.signature_diff(b"", b"abc") == 255.0
+    assert core.signature_diff(b"ab", b"abc") == 255.0

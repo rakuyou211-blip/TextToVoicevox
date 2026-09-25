@@ -267,11 +267,35 @@
             try { Start-Process explorer.exe -ArgumentList ('"' + $Dest + '"') } catch {}
         }
 
+        # ---- VOICEVOX（声を作る無料ソフト）が入っているか ----
+        # アプリと同じ探し方（core.find_voicevox）で確かめる
+        $vvPath = ''
+        $old = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $vvPath = [string](& $vpy -c "import sys; sys.path.insert(0, sys.argv[1]); import core; print(core.find_voicevox() or '')" $Dest 2>$null |
+                Select-Object -Last 1)
+        } catch {
+            $vvPath = ''
+        } finally {
+            $ErrorActionPreference = $old
+        }
+
         Write-Host ''
         Write-Host '  できました！' -ForegroundColor Green
         Say '  これからは、デスクトップ（またはスタートメニュー）の「TextToVoicevox」から起動できます。'
         Say '  新しい版にしたいときも、同じ1行をもう一度貼り付けるだけです（設定や辞書は残ります）。'
-        Say '  ※ 音声にするには VOICEVOX も必要です: https://voicevox.hiroshiba.jp/'
+        if ($vvPath.Trim()) {
+            Say "  VOICEVOX: 見つかりました（$($vvPath.Trim())）。アプリの「VOICEVOX起動」からつなげます。"
+        } else {
+            Write-Host ''
+            Write-Host '  ※ VOICEVOX（読み上げの声を作る無料ソフト）が、このPCに見つかりませんでした。' -ForegroundColor Yellow
+            Say '     文字を取り出すことはできますが、声にするには VOICEVOX が必要です。'
+            Say '     https://voicevox.hiroshiba.jp/ から入れてください（無料）。'
+            if (-not $env:T2V_NO_LAUNCH -and (Ask '  VOICEVOX のダウンロードページを開きますか？')) {
+                try { Start-Process 'https://voicevox.hiroshiba.jp/' } catch {}
+            }
+        }
 
         if (-not $env:T2V_NO_LAUNCH) {
             Start-Process -FilePath $vpyw -ArgumentList ('"' + (Join-Path $Dest 'main.py') + '"') -WorkingDirectory $Dest

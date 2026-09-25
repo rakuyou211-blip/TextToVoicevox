@@ -268,6 +268,12 @@ class App(_Base):
         self._dict_win = None           # ユーザー辞書ダイアログ
         self._screen_win = None         # 「画面から読む」の範囲選択（撮影待ちの間は True）
         self._screen_last = None        # 最後に囲んだ範囲 ((x0,y0),(x1,y1))（Tkの画面座標）
+        self._screen_reading = False    # いまの連続再生が「画面から読む」由来か（読後の案内用）
+        self._screen_last_text = None   # 画面から最後に読んだ文章（自動めくりで同じ文を読まない）
+        self._auto_sig_read = None      # 自動めくり：最後に読んだページの縮小画像
+        self._auto_pending = None       # 自動めくり：変わり始めたページ（止まるのを待つ）
+        self._auto_grabbing = False     # 自動めくり：撮影スレッドが動いているか
+        self._auto_warned = False       # 自動めくり：窓が重なっている案内を出したか
         self.presets = []               # 声プリセット [{name, speaker, speed, ...}]
         self._bookmark = None           # 連続再生のしおり（最後に再生した行番号）
         self._saved_dlg_speaker = None  # 設定から復元するセリフ話者ラベル
@@ -458,6 +464,8 @@ class App(_Base):
         # Tk が窓を出す瞬間に落ちるようになったため、起動時の構成は変えない）
         self._screen_btns = btns
         self.screen_again_btn = None
+        self.auto_page_cb = None
+        self.auto_page_var = tk.BooleanVar(value=False)   # 自動めくり読み（毎回オフで起動）
         self.clip_btn = ttk.Button(btns, text="クリップボードOCR", command=self.clipboard_ocr)
         self.clip_btn.pack(fill="x", pady=2)
 
@@ -2911,15 +2919,35 @@ class App(_Base):
         """「📷 画面から読む」。自分の窓をいったん隠して画面を撮り、その写真の上で
         読みたい所をドラッグで囲んでもらう。囲んだ所をOCRして、すぐ読み上げる。
         撮った“写真”の上で選ぶので、動画や自動で変わる画面でも選んだ瞬間の文字が読める。"""
-        if self.busy or self._previewing:
-            self.status_var.set("再生／処理の実行中です。停止・完了してからお試しください"
-                                "（止まらないときは■停止/Esc）。")
+        if self._previewing and not self.busy:
+            # 読み上げ中でも止めて次へ（ページをめくってすぐ次を読みたいので待たせない）
+            self._after_stopping(self.screen_read)
+            return
+        if self.busy:
+            self.status_var.set("処理の実行中です。完了してからお試しください。")
             return
         if self._screen_win is not None:
             return   # 範囲選択の最中（ショートカットの連打など）
         self._screen_win = True
         self.withdraw()
         self._tick("screen", self.SCREEN_HIDE_MS, self._screen_grab)
+
+    def _after_stopping(self, then, tries=0):
+        """読み上げを止めてから then を呼ぶ。止まりきるまで最大4秒ほど待つ。"""
+        if self._previewing and not self.busy:
+            if tries == 0:
+                self.status_var.set("読み上げを止めて、次を読みます…")
+                self.stop_playall()
+            if tries < 40:
+                self._tick("screen_wait", 100,
+                           lambda: self._after_stopping(then, tries + 1))
+                return
+            # 止まりきらなかった。何度も止め直さず、押し直してもらう
+            self._ticks.pop("screen_wait", None)
+            self.status_var.set("読み上げが止まりきりませんでした。■停止のあと、もう一度押してください。")
+            return
+        self._ticks.pop("screen_wait", None)
+        then()
 
     def _ensure_again_btn(self):
         """「↻ 同じ範囲を読む」ボタンを、はじめて範囲を囲んだときに出す。"""
@@ -2935,6 +2963,15 @@ class App(_Base):
         self.screen_again_btn = b
         if self.busy:
             b.config(state="disabled")
+        cb = ttk.Checkbutton(self._screen_btns, text="めくったら自動で読む",
+                             variable=self.auto_page_var,
+                             command=self._toggle_auto_page)
+        cb.pack(fill="x", pady=(0, 2), after=b)
+        _Tooltip(cb, "オンにすると、囲んだ場所を見張って、ページが変わったら自動で"
+                     "読み取って読み上げます。\n電子書籍を全画面にして、ページを"
+                     "めくるだけで読み進められます（このアプリは最小化してOK）。\n"
+                     "このアプリの窓が囲んだ場所に重なっていると動きません。")
+        self.auto_page_cb = cb
 
     def screen_read_again(self):
         """「↻ 同じ範囲を読む」。前に囲んだ場所を、選び直さずに撮って読む。
@@ -2942,9 +2979,11 @@ class App(_Base):
         if self._screen_last is None:
             self.screen_read()   # まだ一度も囲んでいない → 囲むところから
             return
-        if self.busy or self._previewing:
-            self.status_var.set("再生／処理の実行中です。停止・完了してからお試しください"
-                                "（止まらないときは■停止/Esc）。")
+        if self._previewing and not self.busy:
+            self._after_stopping(self.screen_read_again)
+            return
+        if self.busy:
+            self.status_var.set("処理の実行中です。完了してからお試しください。")
             return
         if self._screen_win is not None:
             return
@@ -3161,6 +3200,7 @@ class App(_Base):
         if (self._engine_ready() and self._current_speaker() is not None
                 and core.can_play()):
             self.play_from_cursor()
+            self._screen_reading = self._previewing   # 読み終えたら「次のページ」を案内する
         else:
             self._schedule_prefetch()
             self.status_var.set(
@@ -3188,15 +3228,116 @@ class App(_Base):
         if img is None:
             self.status_var.set("画面から読むのをやめました。")
             return
+        self._auto_pending = None
+        try:
+            self._auto_sig_read = core.page_signature(img)   # 自動めくりで同じページを読まない
+        except Exception:
+            self._auto_sig_read = None
+        self._screen_start_ocr(img, "screen")
+
+    def _screen_start_ocr(self, img, source):
+        """囲んだ所の画像をOCRへ回す（手動の「画面から読む」と自動めくり読みで共通）。"""
         clean_opts = self._gather_clean_opts()
         self._set_busy(True)
-        self.status_var.set("囲んだ所の文字を読み取っています…")
+        self.status_var.set("ページが変わったので読み取っています…" if source == "screen_auto"
+                            else "囲んだ所の文字を読み取っています…")
         # 自分で囲んだ範囲は「ここを読んで」という指定なので、映像内ラベル・時刻などの
         # ノイズ除去（denoise）はかけない。全面スクショ向けの除去をかけると、正しく
         # 読めた短い行（「html」「2026-09-24」など）まで捨ててしまう（OCRベンチで確認）
         self._spawn(self._clipboard_worker,
                     (img, self.pre_var.get(), clean_opts,
-                     self.fixconf_var.get(), False, "screen"))
+                     self.fixconf_var.get(), False, source))
+
+    # ---------------- 自動めくり読み ----------------
+    AUTO_PAGE_MS = 1200   # 見張る間隔（Macは撮影が重いので長めにしない。古いPCでも軽く）
+
+    def _toggle_auto_page(self):
+        self._auto_pending = None
+        self._auto_warned = False
+        h = self._ticks.pop("auto_page", None)
+        if h is not None:
+            try:
+                self.after_cancel(h)
+            except tk.TclError:
+                pass
+        if self.auto_page_var.get():
+            self.status_var.set("ページが変わったら自動で読みます（このアプリは最小化してもOK）。")
+            self._tick("auto_page", self.AUTO_PAGE_MS, self._auto_page_tick)
+        else:
+            self.status_var.set("自動めくり読みを止めました。")
+
+    def _app_covers_region(self):
+        """このアプリの窓が、囲んだ範囲に重なっているか（重なると自分を撮ってしまう）。"""
+        if self._screen_last is None:
+            return False
+        try:
+            if self.state() not in ("normal", "zoomed"):
+                return False   # 最小化中・隠れている
+            ax, ay = self.winfo_rootx(), self.winfo_rooty()
+            aw, ah = self.winfo_width(), self.winfo_height()
+        except tk.TclError:
+            return False
+        (x0, y0), (x1, y1) = self._screen_last
+        left, right = sorted((x0, x1))
+        top, bottom = sorted((y0, y1))
+        return not (ax + aw <= left or right <= ax or ay + ah <= top or bottom <= ay)
+
+    def _auto_can_read(self):
+        return (self.auto_page_var.get() and self._screen_last is not None
+                and not self.busy and not self._previewing
+                and self._screen_win is None)
+
+    def _auto_page_tick(self):
+        self._ticks.pop("auto_page", None)
+        if not self.auto_page_var.get():
+            return
+        try:
+            if self._auto_can_read() and not self._auto_grabbing:
+                if self._app_covers_region():
+                    if not self._auto_warned:
+                        self._auto_warned = True
+                        self.status_var.set("このアプリの窓が読む場所に重なっています。窓をずらすか"
+                                            "最小化すると、自動めくり読みが動きます。")
+                else:
+                    self._auto_warned = False
+                    region, all_screens = self._screen_region()
+                    self._auto_grabbing = True
+                    threading.Thread(target=self._auto_page_worker,
+                                     args=(region, all_screens, self._screen_last),
+                                     daemon=True).start()
+        finally:
+            self._tick("auto_page", self.AUTO_PAGE_MS, self._auto_page_tick)
+
+    def _auto_page_worker(self, region, all_screens, last):
+        """（別スレッド）囲んだ範囲だけを撮って UI スレッドへ渡す。Tk には触らない。"""
+        img = None
+        try:
+            from PIL import ImageGrab
+            shot = (ImageGrab.grab(all_screens=True) if all_screens
+                    else ImageGrab.grab())
+            box = core.screen_selection_box(last[0], last[1], region, shot.size)
+            if box is not None:
+                img = shot.crop(box)
+        except Exception:
+            img = None
+        self.q.put(("auto_page_shot", img))
+
+    def _auto_page_step(self, img):
+        """撮った範囲を、前に読んだページと比べる。変わって、めくりの動きが止まったら読む。"""
+        if img is None or not self._auto_can_read():
+            return
+        sig = core.page_signature(img)
+        if (self._auto_sig_read is not None
+                and core.signature_diff(sig, self._auto_sig_read) < core.PAGE_CHANGE_DIFF):
+            self._auto_pending = None   # 同じページのまま
+            return
+        if (self._auto_pending is None
+                or core.signature_diff(sig, self._auto_pending) >= core.PAGE_STABLE_DIFF):
+            self._auto_pending = sig    # 変わり始めた。めくりの動きが止まるのを待つ
+            return
+        self._auto_pending = None
+        self._auto_sig_read = sig
+        self._screen_start_ocr(img, "screen_auto")
 
     # ---------------- ユーザー辞書（読み方の登録） ----------------
     def open_dict_dialog(self):
@@ -5260,16 +5401,25 @@ class App(_Base):
                         self.after(3000, self._health_probe_now)
                     except tk.TclError:
                         pass   # 終了中
+        elif kind == "auto_page_shot":
+            _, img = msg
+            self._auto_grabbing = False
+            self._auto_page_step(img)
         elif kind == "clip_done":
             _, cleaned, report, warnings, source = msg
             self._set_busy(False)
             self._merge_report(report)  # 追記なのでレポートは累積する
-            what = "囲んだ所" if source == "screen" else "クリップボード画像"
-            if not cleaned:
+            from_screen = source in ("screen", "screen_auto")
+            what = "囲んだ所" if from_screen else "クリップボード画像"
+            if (source == "screen_auto" and cleaned
+                    and cleaned.strip() == (self._screen_last_text or "").strip()):
+                # 時計や点滅などで画面が変わっただけで、文章は同じ。読み直さない
+                self.status_var.set("同じ文章だったので読みませんでした（ページが変わるのを待っています）。")
+            elif not cleaned:
                 self.status_var.set(f"{what}から文字を検出できませんでした。"
                                     + ("（Macで画面が真っ暗・壁紙だけのときは"
                                        "「画面収録」の許可が要ります）"
-                                       if source == "screen" and core.IS_MAC else ""))
+                                       if from_screen and core.IS_MAC else ""))
             else:
                 cur = self.text.get("1.0", "end").strip()
                 if cur:
@@ -5279,7 +5429,8 @@ class App(_Base):
                 else:
                     first = 1
                     self.text.insert("1.0", cleaned)
-                if source == "screen":
+                if from_screen:
+                    self._screen_last_text = cleaned
                     self._screen_read_aloud(first, len(cleaned))
                 else:
                     self._cursor_to_top()
@@ -5360,7 +5511,14 @@ class App(_Base):
                 self.sample_btn.config(state="normal")
                 if self._bookmark is not None:
                     self.resume_btn.config(state="normal")
-            if ok:
+            from_screen, self._screen_reading = self._screen_reading, False
+            if ok and not info and from_screen and self._screen_last is not None:
+                mod = "⌘" if core.IS_MAC else "Ctrl+"
+                self.status_var.set(
+                    "📖 読み終わったよ。ページをめくると自動で読みます。"
+                    if self.auto_page_var.get() else
+                    f"📖 読み終わったよ。ページをめくったら ↻ 同じ範囲を読む（{mod}Shift+R）。")
+            elif ok:
                 skip_note = f"・{skipped}行スキップ" if skipped else ""
                 self.status_var.set(
                     f"連続再生を停止しました（{played}行読んだよ{skip_note}）" if info

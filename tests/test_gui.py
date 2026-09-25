@@ -995,3 +995,86 @@ def test_screen_read_again_without_region_starts_picking(app, fake_screen):
     _grab_now(app)
     assert isinstance(app._screen_win, tk.Toplevel)
     app._screen_selected(None)
+
+
+# ---------------- 自動めくり読み・読み上げ中の📷 ----------------
+def _page_img(color):
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (300, 120), "white")
+    d = ImageDraw.Draw(img)
+    for i in range(4):
+        d.rectangle((10, 10 + i * 25, 290, 20 + i * 25), fill=color)
+    return img
+
+
+def test_auto_page_reads_only_after_change_settles(app, monkeypatch):
+    """同じページでは読まない。変わったら、めくりが止まってから（2回続けて同じ）読む。"""
+    spawned = []
+    monkeypatch.setattr(app, "_spawn",
+                        lambda target, args=(): spawned.append(args))
+    app._screen_last = ((0, 0), (300, 120))
+    app.auto_page_var.set(True)
+    a, b = _page_img("black"), _page_img("gray")
+    app._auto_sig_read = main_mod().core.page_signature(a)
+    app._auto_page_step(a)                 # 同じページ
+    assert not spawned
+    app._auto_page_step(b)                 # 変わり始めた（まだ読まない）
+    assert not spawned
+    app._auto_page_step(b)                 # 止まった → 読む
+    assert len(spawned) == 1
+    assert spawned[0][-1] == "screen_auto"
+    app._set_busy(False)
+    app._auto_page_step(b)                 # 読んだページはもう読まない
+    assert len(spawned) == 1
+    app.auto_page_var.set(False)
+
+
+def test_auto_page_skips_same_text(app):
+    """画面が少し変わっても、読み取った文章が前と同じなら読み直さない。"""
+    app.text.delete("1.0", "end")
+    app._screen_last_text = "同じ文章です。"
+    app.q.put(("clip_done", "同じ文章です。", {}, [], "screen_auto"))
+    app._poll_queue()
+    assert app.text.get("1.0", "end").strip() == ""
+    assert "同じ文章" in app.status_var.get()
+
+
+def test_app_covers_region(app):
+    """アプリの窓が囲んだ範囲に重なっているかを見分ける（重なると自分を撮ってしまう）。"""
+    app.geometry("300x200+100+100")
+    app.update()
+    ax, ay = app.winfo_rootx(), app.winfo_rooty()
+    app._screen_last = ((ax + 10, ay + 10), (ax + 50, ay + 50))
+    assert app._app_covers_region() is True
+    app._screen_last = ((ax + 2000, ay), (ax + 2100, ay + 50))
+    assert app._app_covers_region() is False
+
+
+def test_screen_read_while_playing_stops_then_opens(app, fake_screen, monkeypatch):
+    """読み上げ中に📷を押すと、止めてから範囲選択へ進む（「停止してから」と言わない）。"""
+    stopped = []
+
+    def fake_stop():
+        stopped.append(True)
+        app._previewing = False      # 止まった
+    monkeypatch.setattr(app, "stop_playall", fake_stop)
+    app._previewing = True
+    app.screen_read()
+    assert stopped
+    h = app._ticks.pop("screen_wait")
+    app.after_cancel(h)
+    app._after_stopping(app.screen_read, 1)
+    assert app._screen_win is True       # 撮影待ちへ進んだ
+    _grab_now(app)
+    app._screen_selected(None)
+
+
+def test_next_page_hint_after_screen_reading(app):
+    """画面から読んだ文章を読み終えたら、次のページの読み方を案内する。"""
+    app._screen_last = ((0, 0), (100, 100))
+    app._screen_reading = True
+    app._previewing = True
+    app.q.put(("playall_done", True, False, 3, 0, app._play_gen))
+    app._poll_queue()
+    assert "↻" in app.status_var.get()
+    assert app._screen_reading is False

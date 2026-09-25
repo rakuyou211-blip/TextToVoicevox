@@ -1422,6 +1422,39 @@ def screen_selection_box(p0, p1, region, image_size, min_drag=SCREEN_MIN_DRAG):
     return box
 
 
+# 「自動めくり読み」：囲んだ範囲のページが変わったかを、縮めた白黒画像の差で見る。
+# 差は「ページの文字（地の色から離れた濃さ）の量」に対する割合で測る。ただの平均差だと、
+# 広い範囲に小さな文字が少しだけ、という場面で差が薄まってページ替えを見逃すため。
+# 実測（96x96）：ページ替え 0.43〜0.68／1文字違い 0.009〜0.020／
+# めくりの途中（前後のページが半々）と次のページ 0.22〜0.34（白地・ダーク・小さい英字）。
+PAGE_SIG_SIZE = 96
+PAGE_CHANGE_DIFF = 0.15   # 前に読んだページとの差がこれ以上なら「ページが変わった」
+PAGE_STABLE_DIFF = 0.05   # 続けて撮った2枚の差がこれ未満なら「めくり終わって止まった」
+
+
+def page_signature(img, size=PAGE_SIG_SIZE):
+    """ページ替えの判定に使う、縮めた白黒画像のバイト列。"""
+    from PIL import Image
+    return img.convert("L").resize((size, size), Image.BILINEAR).tobytes()
+
+
+def _page_ink(sig):
+    """地の色（いちばん多い明るさ）から離れた濃さの平均＝ページの文字の量。"""
+    hist = [0] * 256
+    for v in sig:
+        hist[v] += 1
+    bg = hist.index(max(hist))
+    return sum(abs(v - bg) for v in sig) / len(sig)
+
+
+def signature_diff(a, b):
+    """page_signature どうしの差（ページの文字の量に対する割合）。比べられなければ大きい値。"""
+    if not a or not b or len(a) != len(b):
+        return 255.0
+    mad = sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+    return mad / max(_page_ink(a), _page_ink(b), 1.0)
+
+
 # ============================================================
 #  画像前処理 + OCR
 # ============================================================
