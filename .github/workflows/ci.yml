@@ -144,16 +144,19 @@ jobs:
           for f in main.py core.py venv_mac/bin/python; do test -e "$d/$f" || { echo "missing: $f"; exit 1; }; done
           "$d/venv_mac/bin/python" -c "import sys, tkinter, PIL, pypdfium2, requests, Vision; print(sys.executable, sys.version, 'Tk', tkinter.TkVersion); assert tkinter.TkVersion >= 8.6"
           "$d/venv_mac/bin/python" -c "import os, sys; assert os.path.realpath(sys.executable).startswith(os.path.realpath(sys.argv[1])), sys.executable" "$RUNNER_TEMP/py312"
-          test -x "$app/Contents/MacOS/TextToVoicevox"
-          test -s "$app/Contents/Resources/AppIcon.icns"
+          test -x "$app/Contents/MacOS/applet"
+          test -s "$app/Contents/Resources/applet.icns"
           plutil -lint "$app/Contents/Info.plist"
-          cat "$app/Contents/MacOS/TextToVoicevox"
+          test "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" = io.github.rakuyou211-blip.texttovoicevox
+          codesign --verify --deep "$app"
           if xattr -r "$d" "$app" | grep -q com.apple.quarantine; then echo "quarantine flag left"; exit 1; fi
-          # アプリの中の起動スクリプトで、実際に窓が開いて動き続けるか
-          "$app/Contents/MacOS/TextToVoicevox" &
-          pid=$!
-          sleep 15
-          kill -0 "$pid" || { echo "the app exited early"; cat "$d/起動エラー.log" 2>/dev/null; exit 1; }
+          # 利用者と同じく Finder と同じ開き方（open）で起動し、窓の本体が動き続けるか
+          open "$app"
+          sleep 20
+          pid="$(pgrep -f "$d/main.py" | head -n 1)"
+          test -n "$pid" || { echo "the app did not start or exited early"; cat "$d/起動エラー.log" 2>/dev/null; exit 1; }
+          # 本体は起動役のアプリ（applet）の子として動く（画面収録の許可が TextToVoicevox の名前で出るため）
+          ps -o command= -p "$(ps -o ppid= -p "$(ps -o ppid= -p "$pid" | tr -d ' ')" | tr -d ' ')" || true
           kill "$pid"
           echo "app ok"
 
@@ -189,6 +192,6 @@ jobs:
           set -e
           curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.sh" | bash
           test -x "$T2V_DIR/venv_mac/bin/python"
-          test -x "$T2V_APPS/TextToVoicevox.app/Contents/MacOS/TextToVoicevox"
+          test -x "$T2V_APPS/TextToVoicevox.app/Contents/MacOS/applet"
           test -f "$T2V_DIR/起動.command" || { echo "Japanese file names were broken"; ls "$T2V_DIR"; exit 1; }
           echo "release install ok"

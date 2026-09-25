@@ -1100,3 +1100,21 @@ def test_fix_tcl_library_points_venv_to_base_python(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "prefix", str(base))
     main_mod()._fix_tcl_library()
     assert "TCL_LIBRARY" not in os.environ
+
+
+def test_screen_read_skips_photo_retries(app, monkeypatch):
+    """画面から読んだ文字は、写真向けの読み直し（照明平坦化・90度回転）をしない。
+    短い範囲だと「低品質」と見なされ、最大3回読み直して待ちが延びていた。"""
+    from PIL import Image
+    import core as core_mod
+    calls = []
+    monkeypatch.setattr(core_mod, "run_ocr", lambda paths, **kw: {paths[0]: "テスト"})
+    monkeypatch.setattr(core_mod, "ocr_retry_if_poor",
+                        lambda text, *a, **kw: calls.append(text) or text)
+    img = Image.new("RGB", (40, 20), "white")
+    opts = app._gather_clean_opts()
+    app._clipboard_worker(img, False, opts, source="screen")
+    app._clipboard_worker(img, False, opts, source="screen_auto")
+    assert calls == []
+    app._clipboard_worker(img, False, opts, source="clip")
+    assert calls == ["テスト"]

@@ -356,6 +356,7 @@ class App(_Base):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._tick("poll", 120, self._poll_queue)
         self.after(600, self._auto_connect)  # 起動時にエンジンへ自動接続
+        self.after(2500, self._prewarm_ocr)
         self._tick("autosave", 60000, self._autosave_tick)
         self._tick("health", self._HEALTH_INTERVAL_MS, self._health_tick)
 
@@ -1641,6 +1642,24 @@ class App(_Base):
         return dict(speed=self.speed_var.get(), pitch=self.pitch_var.get(),
                     intonation=self.into_var.get(), volume=self.vol_var.get())
 
+    def _prewarm_ocr(self):
+        """画面から読む・画像の読み取りで使う部品を、起動のあと裏で読み込んでおく。
+        とくに Mac の Apple Vision は初回の読み込みだけで1秒以上かかり、
+        何もしないと「初めて 📷 を使ったときだけ遅い」になる。失敗しても何もしない
+        （そのときは、これまでどおり使う時に読み込まれる）。テスト中はしない。"""
+        if "pytest" in sys.modules:
+            return
+
+        def load():
+            try:
+                from PIL import Image, ImageGrab  # noqa: F401
+                if core.IS_MAC:
+                    import Vision  # noqa: F401
+                    import Foundation  # noqa: F401
+            except Exception:
+                pass
+        threading.Thread(target=load, daemon=True).start()
+
     def _warm_speaker(self, style_id=None):
         """選ばれている話者のモデルを、裏でエンジンに読み込ませておく。
         押してから最初の音が出るまでの待ちを縮めるための先回り。
@@ -2910,12 +2929,17 @@ class App(_Base):
             # OCRが済めばPNG（＝クリップボード画像のコピー）は不要。%TEMP%に残さない
             with tempfile.TemporaryDirectory(prefix="t2v_clip_") as tmpdir:
                 png = os.path.join(tmpdir, "clip.png")
-                core.preprocess_image(img, enable=preprocess).save(png)
+                # すぐ OCR に渡して消す一時ファイルなので、圧縮は最小（Retina の
+                # 大きな画面だと、既定の圧縮だけで待ちが目に見えて延びる）
+                core.preprocess_image(img, enable=preprocess).save(png, compress_level=1)
                 notices = []
                 res = core.run_ocr([png], strip_labels=denoise, notices=notices)
                 raw = res.get(png, "")
-                # 低品質（写真の影・ムラ）なら照明平坦化で再OCR（macのみ・自動）
-                raw = core.ocr_retry_if_poor(raw, img, tmpdir, strip_labels=denoise)
+                # 低品質（写真の影・ムラ・横倒し）なら前処理を変えて再OCR（macのみ・自動）。
+                # 画面から読んだ文字は影も横倒しも無く、短い範囲だと「低品質」と見なされて
+                # 最大3回読み直すだけ（待ちが最大4倍）になるので、写真のときだけ行う
+                if not source.startswith("screen"):
+                    raw = core.ocr_retry_if_poor(raw, img, tmpdir, strip_labels=denoise)
             if fix_confusables and raw:
                 fixed = core.fix_ocr_confusables(raw)
                 if fixed != raw:

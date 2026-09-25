@@ -39,6 +39,14 @@ curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main
 - **Python が無くても大丈夫。** 使える Python（3.9以降・画面表示の Tk 8.6 つき）が無ければ、入れるかを聞いてから、このアプリ専用の Python 3.12 を `~/.local/python3.12` に入れます（パスワード不要）。Apple の開発ツール付属の Python（Tk 8.5 で画面が真っ白になる）は使いません
 - アプリは `~/Library/Application Support/TextToVoicevox` に置き、**`~/Applications` に「TextToVoicevox」アプリ**を作ります（Launchpad・Spotlight から開ける）。「画面収録」の許可も「TextToVoicevox」として出ます
 - 更新も同じ1行。起動中なら閉じてもらうのを待ち、VOICEVOX が入っているかも確かめます（Windows 版と同じ）
+- 「画面収録」の許可の一覧に、**「python3.12」ではなく「TextToVoicevox」**と出るようにしました（アプリを Mac 標準の AppleScript で作り、その中から本体を動かす作り）
+- 部品を入れている間も、進み具合を表示します（黙って数分止まって見えないように）
+
+### 速さ
+
+- **📷 画面から読む**が速くなりました。Mac で、読めた文字が少ないと「写真が横倒しかも」と最大3回読み直していた（待ちが最大4倍）のを、画面から読むときはやめました（写真のときだけ行います）
+- 読み取りに渡す一時画像の圧縮を最小にしました（Retina の大きな画面で目に見えて効きます）
+- 起動のあと、読み取りの部品（Mac の Apple Vision など）を裏で読み込んでおくので、**初めて 📷 を使ったときだけ遅い**、がなくなります
 - CI（GitHub Actions の macOS）で、この1行を実際に流して「専用 Python が入る・部品が揃う・アプリが起動し続ける・検疫フラグが無い・更新で設定が残る・最新リリースから入る」を毎回確かめています
 
 ### 📷 画面から読む（新機能）
