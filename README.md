@@ -51,6 +51,7 @@ Python が無ければ入れるかを聞き（パスワード不要）、アプ�
 ### zip で入れたい人
 
 - **⬇ [Windows 用をダウンロード](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip)**（`TextToVoicevox_Windows.zip`）
+  → **展開する前に**、zip を右クリック →「プロパティ」→ いちばん下の「**許可する**」にチェック → OK。それから「すべて展開」すると、`起動.bat` が警告なしで開けます（上の1行導入なら、この手間もいりません）
 - **Mac の人は、zip ではなく、上の「Mac の人」のターミナルの1行を使ってください**（警告が出ません）。
   zip が欲しい人は → [Mac 用 zip](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip)（`TextToVoicevox_Mac.zip`）。ただし、ブラウザで落とした zip の中身を**ダブルクリックすると、Mac が必ず「開いていません」と止めます**（Apple の有料の審査を受けていないアプリには、どれも出ます）。zip で入れるときは、下の「zip で入れる」の Mac の手順どおり、ダブルクリックではなくターミナルから始めてください。そうすれば出ません
 
@@ -222,6 +223,8 @@ curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main
 
 ### Windows で警告が出たとき
 
+- **いちばん確実なのは、zip を使わず、上の「Windows：1行でかんたん導入」の1行です**（警告が出ません。入っている版もそのまま新しくなります）
+- zip のときは、**展開する前に** zip を右クリック →「プロパティ」→「**許可する**」（ブロックの解除）にチェック → OK。これで展開したファイルは止められません
 - `起動.bat` の初回に**「WindowsによってPCが保護されました」**と出たら → 小さい **「詳細情報」** をクリック → **「実行」** ボタンが出ます。**通すのはこの1回だけ**で、あとは残りのファイルのブロックを自動で外します
 - それでも `.bat` が反応しないときは（保険） → そのファイルを右クリック → **プロパティ** → 下のほうの **「ブロックの解除」** にチェック → OK
 - ウイルス対策ソフトが `.bat` を止めることがあります。中身はただの起動・セットアップ用スクリプトです。心配なら中身を読んでから許可してください
