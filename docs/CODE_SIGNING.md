@@ -15,8 +15,9 @@ The rest of the app is Python source code that anyone can read in this repositor
 ## How it is built / 作り方
 
 - The launcher is built from this repository's source by GitHub Actions ([`.github/workflows/release.yml`](../.github/workflows/release.yml)) on every release. Nothing built on a personal computer is signed.
-- The signed launcher is added to `TextToVoicevox_Windows.zip` on the GitHub Release page.
+- Once signing is switched on, the signed launcher is added to `TextToVoicevox_Windows.zip` on the GitHub Release page. **The SignPath application is still pending, so no release ships that `.exe` yet.** Until it does, the zip's entry point is `起動.bat`, and the documented route is to unblock the zip *before* extracting it (or to use the `install.ps1` one-liner).
 - 起動用 .exe は、Release のたびに GitHub Actions がこのリポジトリのソースから作ります。個人のパソコンで作ったものは署名しません。
+- **SignPath はまだ申請中で、署名も同梱も始まっていません。** いまの zip の入口は `起動.bat` だけです。それまでは、展開する前に zip のブロックを外すか、`install.ps1` の1行を使ってください。
 
 ## Team roles / 役割
 

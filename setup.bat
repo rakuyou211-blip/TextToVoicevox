@@ -11,8 +11,11 @@ if not exist "%~dp0core.py" goto not_extracted
 if not exist "%~dp0requirements.txt" goto not_extracted
 
 rem ダウンロード由来の警告ブロック (Mark of the Web) をフォルダごと自己解除する。
-rem SmartScreen の「詳細情報」→「実行」はこの setup.bat の初回 1 回だけで済ませ、
-rem 起動.bat などの兄弟ファイルには警告を残さない。失敗しても続行（本筋はセットアップ）。
+rem SmartScreen の「詳細情報」→「実行」を通したあとの後始末で、兄弟ファイルに警告を残さない。
+rem ただし「スマート アプリ コントロール」が有効な機械では、MOTW の付いた .bat は拡張子だけで
+rem 落とされるので、ここには到達しない（.bat の中に解除を置いている以上、鶏と卵になる）。
+rem その場合の道は、展開前に zip のブロックを外すか、自分で開いた PowerShell から
+rem Unblock-File するか、install.ps1 の1行を使うか。失敗しても続行（本筋はセットアップ）。
 rem 対象は %~dp0（このbatのあるフォルダ）を環境変数で明示的に渡す。カレントディレクトリ
 rem 依存にすると、UNCパス実行時に cd が失敗して C:\Windows を走査してしまうため。
 rem venv の中は自分の機械で作った物なのでブロックは付かない。数千ファイルあるので除く。
