@@ -77,19 +77,19 @@ Once it's installed you don't have to start it by hand every time. In the **4. �
 This app is a Python program. If you don't have Python yet, install it first (**Python 3.9 or newer** from the official python.org installer is recommended). On Windows, tick "Add Python to PATH" during install. The python.org installers for Windows and macOS already include tkinter, which the app's screen uses.
 
 **③ Install this app**
-Download the release zip (below). **On Windows, before you unzip it:** right-click the zip → *Properties* → tick **Unblock** → OK. Then unzip it somewhere (right-click → *Extract All* on Windows, double-click on macOS — the OS built-in extractor is recommended; some third-party tools mangle Japanese filenames or drop execute permissions). Then:
-- **Windows:** double-click `起動.bat` (skip the *Unblock* step above and Windows may refuse to run it outright — see **First run** below)
+Download the release zip (below) and unzip it somewhere (right-click → *Extract All* on Windows, double-click on macOS — the OS built-in extractor is recommended; some third-party tools mangle Japanese filenames or drop execute permissions). Then:
+- **Windows:** double-click **`起動.pyw`** — not `起動.bat`. Windows blocks a downloaded `.bat` outright on some machines; `.pyw` is not blocked, so `起動.pyw` strips the download mark first and then runs `起動.bat` for you (see **First run** below)
 - **macOS:** run `起動.command`
 
 That's it. The first run sets everything up automatically (it creates a local virtual environment and installs the dependencies — internet is needed only for that first run). After that, everything runs offline. You normally never touch `setup.bat` / `setup.command` — those are the setup scripts the launcher calls for you, kept around in case you ever want to reinstall the parts by hand.
 
-If Windows or macOS shows a security warning on that first double-click, see **First run** below. On macOS you only need to get past it **once** — the launcher then clears the quarantine flag from the other files for you. On Windows it depends which gate you hit: SmartScreen can be waved through once, but **Smart App Control cannot be waved through at all**, and the launcher never gets to run its own unblocking. The zip also ships with `はじめにお読みください.txt` (a "read me first" note, in Japanese) covering the same steps.
+If macOS shows a security warning on that first double-click, see **First run** below — you only need to get past it **once**, and the launcher then clears the quarantine flag from the other files for you. On Windows, starting from `起動.pyw` means you should see no warning at all; if you started from `起動.bat` instead and got stopped, **First run** explains which of the two Windows gates you hit and what to do. The zip also ships with `はじめにお読みください.txt` (a "read me first" note, in Japanese) covering the same steps.
 
-If it won't start, run `デバッグ起動.bat` / `デバッグ起動.command` instead — it opens a console window so you can read the actual error. (On Windows, check first whether the file was *blocked* rather than merely warned about: `デバッグ起動.bat` is another `.bat` carrying the same download mark, so it gets blocked in exactly the same way, and no `起動エラー.log` is written either because nothing ever ran. That silence is itself the clue — go to **First run → ②**.) Two log files may also show up in the folder, and they mean different things: `起動エラー.log` is written only when the app fails to *start* (rewritten each time), while `エラー.log` records failures that happen once the window is open — extraction, synthesis, playback — appended as they occur and trimmed from the oldest end when it grows too big. If you report a problem, the matching log is the most useful thing to attach.
+If it won't start, run `デバッグ起動.bat` / `デバッグ起動.command` instead — it opens a console window so you can read the actual error. (On Windows, check first whether the file was *blocked* rather than merely warned about: `デバッグ起動.bat` is another `.bat` carrying the same download mark, so it gets blocked in exactly the same way, and no `起動エラー.log` is written either because nothing ever ran. That silence is itself the clue — start from `起動.pyw` once, which clears the marks, and `デバッグ起動.bat` will then open normally.) Two log files may also show up in the folder, and they mean different things: `起動エラー.log` is written only when the app fails to *start* (rewritten each time), while `エラー.log` records failures that happen once the window is open — extraction, synthesis, playback — appended as they occur and trimmed from the oldest end when it grows too big. If you report a problem, the matching log is the most useful thing to attach.
 
 > Heads up: right now this is distributed as a **script zip**, not a ready-made `.exe` or `.app`. There is no packaged executable yet. That's on my list, but it isn't here today, and I'd rather say so than pretend otherwise.
 
-**Download (latest, v1.22.1):** [Windows](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip) (`TextToVoicevox_Windows.zip`) · [macOS](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip) (`TextToVoicevox_Mac.zip`). Older versions are on the [Releases page](https://github.com/rakuyou211-blip/TextToVoicevox/releases).
+**Download (latest, v1.23.0):** [Windows](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip) (`TextToVoicevox_Windows.zip`) · [macOS](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip) (`TextToVoicevox_Mac.zip`). Older versions are on the [Releases page](https://github.com/rakuyou211-blip/TextToVoicevox/releases).
 
 ---
 
@@ -123,7 +123,7 @@ The two systems go about it slightly differently. On **Windows**, `起動.bat` u
 
 **Windows — two separate gates**
 
-Windows has *two* different gates here, and which one you hit changes the fix. You can avoid both: tick **Unblock** on the zip **before** extracting it (right-click the zip → **Properties** → **Unblock** → OK), or use the one-line install above.
+Windows has *two* different gates here, and which one you hit changes the fix. **You avoid both simply by starting from `起動.pyw` instead of `起動.bat`** (since v1.23.0) — or by using the one-line install above. The rest of this section is for when you opened `起動.bat` directly.
 
 *① "Windows protected your PC" (SmartScreen) — you can get past this one.*
 Click the small **More info** → **Run anyway**, just this once, for `起動.bat`. After that, `起動.bat` clears the download mark from the remaining files itself.
@@ -133,7 +133,8 @@ That is Windows 11's **Smart App Control** (Start → *Windows Security* → *Ap
 
 - Fix: right-click `起動.bat` → **Properties** → tick **Unblock** → OK, then double-click it again.
 - Or switch to the one-line install above — that is the reliable route.
-- **The self-unblocking inside `起動.bat` cannot help here**, because the `.bat` is killed before its first line runs. The signed `TextToVoicevox.exe` launcher ([docs/CODE_SIGNING.md](docs/CODE_SIGNING.md)) exists to break exactly that deadlock: it strips the mark first, *then* runs the `.bat`.
+- Easiest of all: just double-click **`起動.pyw`** instead. Smart App Control does not block `.py` / `.pyw`, so it clears the marks and then starts `起動.bat` normally.
+- **The self-unblocking inside `起動.bat` cannot help here**, because the `.bat` is killed before its first line runs. Reversing that order is exactly what [`起動.pyw`](起動.pyw) is for. The signed `TextToVoicevox.exe` launcher ([docs/CODE_SIGNING.md](docs/CODE_SIGNING.md)) does the same thing, but it is still waiting on SignPath approval.
 
 If you'd rather be careful first, that's completely reasonable.
 

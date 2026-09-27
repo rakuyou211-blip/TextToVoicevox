@@ -4,7 +4,7 @@
     python tools/make_release.py [出力フォルダ] [--win-exe 署名済みの TextToVoicevox.exe]
 
 できるもの（名前に版数を入れないので、ダウンロードのリンクが版をまたいで変わらない）:
-    TextToVoicevox_Windows.zip … .bat・ocr_win.ps1 など Windows で使うものだけ
+    TextToVoicevox_Windows.zip … 起動.pyw・.bat・ocr_win.ps1 など Windows で使うものだけ
     TextToVoicevox_Mac.zip     … .command・.sh・ocr_mac.py など Mac で使うものだけ
 
 中身は git 管理のファイル（作業中の変更は入らない）。テスト・開発用の道具・
@@ -30,7 +30,9 @@ _SKIP_FILES = {".gitattributes", ".gitignore", "install.ps1", "install.sh"}
 
 
 def _windows_only(path):
-    return path.endswith((".bat", ".ps1")) or path == "requirements-english-ocr.txt"
+    # .pyw は Windows 用の起動口（起動.pyw）。SAC に止められない入口として使う。
+    return (path.endswith((".bat", ".ps1", ".pyw"))
+            or path == "requirements-english-ocr.txt")
 
 
 def _mac_only(path):

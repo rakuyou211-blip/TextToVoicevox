@@ -53,6 +53,20 @@ def test_first_readme_txt_covers_both_os():
         assert needle in txt, f"はじめにお読みください.txt に「{needle}」の案内がありません"
 
 
+def test_pyw_launcher_unblocks_then_runs_the_bat():
+    """起動.pyw が「印を外してから 起動.bat を呼ぶ」順序を保っていること。
+
+    印の付いた .bat はスマート アプリ コントロールが拡張子だけで落とすので、
+    .bat の中に置いた自己解除は走れない（鶏と卵）。.pyw は落とされないため、
+    ここで先に印を外す。この順序が崩れると、また誰も起動できなくなる。
+    """
+    body = _read("起動.pyw")
+    assert "Zone.Identifier" in body, "起動.pyw に印の除去がありません"
+    assert body.index("def unblock") < body.index('"起動.bat"'), (
+        "起動.pyw が 起動.bat を呼ぶ前に印を外していません")
+    assert "still_blocked" in body, "印が残ったままかの確認がありません"
+
+
 def test_windows_scripts_self_unblock():
     """.bat が Mark of the Web を自己解除する（setup は再帰・起動系は直下のみ）。"""
     for name in ("setup.bat", "起動.bat", "デバッグ起動.bat"):
@@ -226,9 +240,10 @@ def test_release_zips_are_split_by_os():
         assert not any(f.startswith(("tests/", "tools/", ".github/")) for f in files)
         assert "install.ps1" not in files and "install.sh" not in files
     assert "起動.bat" in win and "ocr_win.ps1" in win
+    assert "起動.pyw" in win, "SAC に止められない起動口が Windows 用 zip に入っていません"
     assert not any(f.endswith((".command", ".sh")) for f in win) and "ocr_mac.py" not in win
     assert "起動.command" in mac and "ocr_mac.py" in mac and "setup_mac.sh" in mac
-    assert not any(f.endswith((".bat", ".ps1")) for f in mac)
+    assert not any(f.endswith((".bat", ".ps1", ".pyw")) for f in mac)
 
 
 def test_download_links_match_release_zip_names():
