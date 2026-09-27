@@ -5,7 +5,7 @@
 ## What is signed / 署名するもの
 
 Only `TextToVoicevox.exe`, the small Windows launcher built from [`launcher/TextToVoicevox.cs`](../launcher/TextToVoicevox.cs).
-It removes the "downloaded from the internet" mark (`Zone.Identifier`) from the files in its own folder and then runs `起動.bat`.
+It removes the "downloaded from the internet" mark (`Zone.Identifier`) from the files in its own folder and then runs `起動.bat`. (`起動.pyw` already does this today, without a certificate; the signed `.exe` is the tidier version of the same idea.)
 The rest of the app is Python source code that anyone can read in this repository.
 
 署名するのは、Windows 用の小さな起動用 `TextToVoicevox.exe` だけです（ソースは [`launcher/TextToVoicevox.cs`](../launcher/TextToVoicevox.cs)）。
@@ -15,9 +15,9 @@ The rest of the app is Python source code that anyone can read in this repositor
 ## How it is built / 作り方
 
 - The launcher is built from this repository's source by GitHub Actions ([`.github/workflows/release.yml`](../.github/workflows/release.yml)) on every release. Nothing built on a personal computer is signed.
-- Once signing is switched on, the signed launcher is added to `TextToVoicevox_Windows.zip` on the GitHub Release page. **The SignPath application is still pending, so no release ships that `.exe` yet.** Until it does, the zip's entry point is `起動.bat`, and the documented route is to unblock the zip *before* extracting it (or to use the `install.ps1` one-liner).
+- Once signing is switched on, the signed launcher is added to `TextToVoicevox_Windows.zip` on the GitHub Release page. **The SignPath application is still pending, so no release ships that `.exe` yet.** Until it does, the zip ships [`起動.pyw`](../起動.pyw) instead: a small Python entry point that does the same job — strip the mark, then run `起動.bat` — and that Smart App Control does not block, because `.py` / `.pyw` are outside the extensions it stops. The `.exe` is not urgent because of it.
 - 起動用 .exe は、Release のたびに GitHub Actions がこのリポジトリのソースから作ります。個人のパソコンで作ったものは署名しません。
-- **SignPath はまだ申請中で、署名も同梱も始まっていません。** いまの zip の入口は `起動.bat` だけです。それまでは、展開する前に zip のブロックを外すか、`install.ps1` の1行を使ってください。
+- **SignPath はまだ申請中で、署名も同梱も始まっていません。** そのあいだは、同じ仕事をする [`起動.pyw`](../起動.pyw) を zip に入れています（印を外してから `起動.bat` を呼ぶ）。スマート アプリ コントロールは `.py` / `.pyw` を止めないので、署名がなくても行き止まりになりません。
 
 ## Team roles / 役割
 

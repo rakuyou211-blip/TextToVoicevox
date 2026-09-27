@@ -14,3 +14,6 @@
 
 # Python は LF
 *.py text eol=lf
+
+# Python は LF（.pyw も同じ）
+*.pyw text eol=lf
