@@ -1,44 +1,44 @@
 @echo off
 rem === First-time setup: create venv and install dependencies ===
 rem Requires internet ONLY for this initial setup. The app itself runs offline.
-chcp 65001 >nul
+rem ‚±‚Ì .bat ‚ÍA‚í‚´‚Æ Shift_JISicp932j‚Å•Û‘¶‚µ‚Ä chcp 65001 ‚àŽg‚í‚È‚¢i——R‚Í tests/test_docs.pyjB
 cd /d "%~dp0"
 
-rem zip ã‚’é–‹ã„ãŸä¸­èº«ã®ã¾ã¾ ã“ã® .bat ã ã‘ã‚’å®Ÿè¡Œã™ã‚‹ã¨ã€Windows ã¯ .bat ã ã‘ã‚’ä¸€æ™‚
-rem ãƒ•ã‚©ãƒ«ãƒ€ã¸å–ã‚Šå‡ºã—ã¦èµ°ã‚‰ã›ã‚‹ãŸã‚ã€éš£ã«ã‚ã‚‹ã¯ãšã®ãƒ•ã‚¡ã‚¤ãƒ«ãŒç„¡ã„ã€‚å…ˆã«æ­¢ã‚ã‚‹ã€‚
+rem zip ‚ðŠJ‚¢‚½’†g‚Ì‚Ü‚Ü ‚±‚Ì .bat ‚¾‚¯‚ðŽÀs‚·‚é‚ÆAWindows ‚Í .bat ‚¾‚¯‚ðˆêŽž
+rem ƒtƒHƒ‹ƒ_‚ÖŽæ‚èo‚µ‚Ä‘–‚ç‚¹‚é‚½‚ßA—×‚É‚ ‚é‚Í‚¸‚Ìƒtƒ@ƒCƒ‹‚ª–³‚¢Bæ‚ÉŽ~‚ß‚éB
 if not exist "%~dp0main.py" goto not_extracted
 if not exist "%~dp0core.py" goto not_extracted
 if not exist "%~dp0requirements.txt" goto not_extracted
 
-rem ãƒ€ã‚¦ãƒ³ãƒ­ãƒ¼ãƒ‰ç”±æ¥ã®è­¦å‘Šãƒ–ãƒ­ãƒƒã‚¯ (Mark of the Web) ã‚’ãƒ•ã‚©ãƒ«ãƒ€ã”ã¨è‡ªå·±è§£é™¤ã™ã‚‹ã€‚
-rem SmartScreen ã®ã€Œè©³ç´°æƒ…å ±ã€â†’ã€Œå®Ÿè¡Œã€ã‚’é€šã—ãŸã‚ã¨ã®å¾Œå§‹æœ«ã§ã€å…„å¼Ÿãƒ•ã‚¡ã‚¤ãƒ«ã«è­¦å‘Šã‚’æ®‹ã•ãªã„ã€‚
-rem ãŸã ã—ã€Œã‚¹ãƒžãƒ¼ãƒˆ ã‚¢ãƒ—ãƒª ã‚³ãƒ³ãƒˆãƒ­ãƒ¼ãƒ«ã€ãŒæœ‰åŠ¹ãªæ©Ÿæ¢°ã§ã¯ã€MOTW ã®ä»˜ã„ãŸ .bat ã¯æ‹¡å¼µå­ã ã‘ã§
-rem è½ã¨ã•ã‚Œã‚‹ã®ã§ã€ã“ã“ã«ã¯åˆ°é”ã—ãªã„ï¼ˆ.bat ã®ä¸­ã«è§£é™¤ã‚’ç½®ã„ã¦ã„ã‚‹ä»¥ä¸Šã€é¶ã¨åµã«ãªã‚‹ï¼‰ã€‚
-rem ãã®å ´åˆã®é“ã¯ã€å±•é–‹å‰ã« zip ã®ãƒ–ãƒ­ãƒƒã‚¯ã‚’å¤–ã™ã‹ã€è‡ªåˆ†ã§é–‹ã„ãŸ PowerShell ã‹ã‚‰
-rem Unblock-File ã™ã‚‹ã‹ã€install.ps1 ã®1è¡Œã‚’ä½¿ã†ã‹ã€‚å¤±æ•—ã—ã¦ã‚‚ç¶šè¡Œï¼ˆæœ¬ç­‹ã¯ã‚»ãƒƒãƒˆã‚¢ãƒƒãƒ—ï¼‰ã€‚
-rem å¯¾è±¡ã¯ %~dp0ï¼ˆã“ã®batã®ã‚ã‚‹ãƒ•ã‚©ãƒ«ãƒ€ï¼‰ã‚’ç’°å¢ƒå¤‰æ•°ã§æ˜Žç¤ºçš„ã«æ¸¡ã™ã€‚ã‚«ãƒ¬ãƒ³ãƒˆãƒ‡ã‚£ãƒ¬ã‚¯ãƒˆãƒª
-rem ä¾å­˜ã«ã™ã‚‹ã¨ã€UNCãƒ‘ã‚¹å®Ÿè¡Œæ™‚ã« cd ãŒå¤±æ•—ã—ã¦ C:\Windows ã‚’èµ°æŸ»ã—ã¦ã—ã¾ã†ãŸã‚ã€‚
-rem venv ã®ä¸­ã¯è‡ªåˆ†ã®æ©Ÿæ¢°ã§ä½œã£ãŸç‰©ãªã®ã§ãƒ–ãƒ­ãƒƒã‚¯ã¯ä»˜ã‹ãªã„ã€‚æ•°åƒãƒ•ã‚¡ã‚¤ãƒ«ã‚ã‚‹ã®ã§é™¤ãã€‚
-rem è§£é™¤ã§ããŸã‹ã¯ Zone.Identifier ãŒæ®‹ã£ã¦ã„ãªã„ã‹ã§ç¢ºã‹ã‚ã‚‹ã€‚PowerShell ãŒ
-rem æ­¢ã‚ã‚‰ã‚Œã¦ã„ã‚‹ç’°å¢ƒã§ã¯é»™ã£ã¦å¤±æ•—ã™ã‚‹ã®ã§ã€æˆå¦ã‚’è¦‹ã¦ã‹ã‚‰å°ã‚’ç½®ãã€‚
-echo ãƒ€ã‚¦ãƒ³ãƒ­ãƒ¼ãƒ‰æ™‚ã®è­¦å‘Šãƒ–ãƒ­ãƒƒã‚¯ã‚’è§£é™¤ã—ã¦ã„ã¾ã™...
+rem ƒ_ƒEƒ“ƒ[ƒh—R—ˆ‚ÌŒxƒuƒƒbƒN (Mark of the Web) ‚ðƒtƒHƒ‹ƒ_‚²‚ÆŽ©ŒÈ‰ðœ‚·‚éB
+rem SmartScreen ‚ÌuÚ×î•ñv¨uŽÀsv‚ð’Ê‚µ‚½‚ ‚Æ‚ÌŒãŽn––‚ÅAŒZ’íƒtƒ@ƒCƒ‹‚ÉŒx‚ðŽc‚³‚È‚¢B
+rem ‚½‚¾‚µuƒXƒ}[ƒg ƒAƒvƒŠ ƒRƒ“ƒgƒ[ƒ‹v‚ª—LŒø‚È‹@ŠB‚Å‚ÍAMOTW ‚Ì•t‚¢‚½ .bat ‚ÍŠg’£Žq‚¾‚¯‚Å
+rem —Ž‚Æ‚³‚ê‚é‚Ì‚ÅA‚±‚±‚É‚Í“ž’B‚µ‚È‚¢i.bat ‚Ì’†‚É‰ðœ‚ð’u‚¢‚Ä‚¢‚éˆÈãAŒ{‚Æ—‘‚É‚È‚éjB
+rem ‚»‚Ìê‡‚Ì“¹‚ÍA“WŠJ‘O‚É zip ‚ÌƒuƒƒbƒN‚ðŠO‚·‚©AŽ©•ª‚ÅŠJ‚¢‚½ PowerShell ‚©‚ç
+rem Unblock-File ‚·‚é‚©Ainstall.ps1 ‚Ì1s‚ðŽg‚¤‚©BŽ¸”s‚µ‚Ä‚à‘±si–{‹Ø‚ÍƒZƒbƒgƒAƒbƒvjB
+rem ‘ÎÛ‚Í %~dp0i‚±‚Ìbat‚Ì‚ ‚éƒtƒHƒ‹ƒ_j‚ðŠÂ‹«•Ï”‚Å–¾Ž¦“I‚É“n‚·BƒJƒŒƒ“ƒgƒfƒBƒŒƒNƒgƒŠ
+rem ˆË‘¶‚É‚·‚é‚ÆAUNCƒpƒXŽÀsŽž‚É cd ‚ªŽ¸”s‚µ‚Ä C:\Windows ‚ð‘–¸‚µ‚Ä‚µ‚Ü‚¤‚½‚ßB
+rem venv ‚Ì’†‚ÍŽ©•ª‚Ì‹@ŠB‚Åì‚Á‚½•¨‚È‚Ì‚ÅƒuƒƒbƒN‚Í•t‚©‚È‚¢B”çƒtƒ@ƒCƒ‹‚ ‚é‚Ì‚Åœ‚­B
+rem ‰ðœ‚Å‚«‚½‚©‚Í Zone.Identifier ‚ªŽc‚Á‚Ä‚¢‚È‚¢‚©‚ÅŠm‚©‚ß‚éBPowerShell ‚ª
+rem Ž~‚ß‚ç‚ê‚Ä‚¢‚éŠÂ‹«‚Å‚Í–Ù‚Á‚ÄŽ¸”s‚·‚é‚Ì‚ÅA¬”Û‚ðŒ©‚Ä‚©‚çˆó‚ð’u‚­B
+echo ƒ_ƒEƒ“ƒ[ƒhŽž‚ÌŒxƒuƒƒbƒN‚ð‰ðœ‚µ‚Ä‚¢‚Ü‚·...
 set "APPDIR=%~dp0"
 set "UNBLOCKED="
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $f = Get-ChildItem -LiteralPath $env:APPDIR -Recurse -File -ErrorAction Stop | Where-Object { -not $_.FullName.StartsWith($env:APPDIR + 'venv\', [StringComparison]::OrdinalIgnoreCase) }; $f | Unblock-File -ErrorAction SilentlyContinue; if ($f | Get-Item -Stream Zone.Identifier -ErrorAction SilentlyContinue) { exit 1 }; exit 0 } catch { exit 1 }" >nul 2>&1
-rem ç•°å¸¸çµ‚äº†ï¼ˆè² ã®çµ‚äº†ã‚³ãƒ¼ãƒ‰ï¼‰ã¯ errorlevel 1 ã§ã¯æ‹¾ãˆãªã„ã®ã§ã€0 ã‹ã©ã†ã‹ã§è¦‹ã‚‹
+rem ˆÙíI—¹i•‰‚ÌI—¹ƒR[ƒhj‚Í errorlevel 1 ‚Å‚ÍE‚¦‚È‚¢‚Ì‚ÅA0 ‚©‚Ç‚¤‚©‚ÅŒ©‚é
 if errorlevel 1 goto unblock_failed
 if not "%ERRORLEVEL%"=="0" goto unblock_failed
 set "UNBLOCKED=1"
 goto unblock_done
 :unblock_failed
-echo [!] è­¦å‘Šï¼ˆãƒ–ãƒ­ãƒƒã‚¯ï¼‰ã¯å¤–ã›ã¾ã›ã‚“ã§ã—ãŸã€‚æ¯Žå›žè­¦å‘ŠãŒå‡ºã‚‹ã¨ãã¯ã€
-echo     zip ã‚’å³ã‚¯ãƒªãƒƒã‚¯â†’ãƒ—ãƒ­ãƒ‘ãƒ†ã‚£â†’ã€Œãƒ–ãƒ­ãƒƒã‚¯ã®è§£é™¤ã€â†’ã‚‚ã†ä¸€åº¦ã€Œã™ã¹ã¦å±•é–‹ã€ã§ãªãŠã‚Šã¾ã™ã€‚
+echo [!] ŒxiƒuƒƒbƒNj‚ÍŠO‚¹‚Ü‚¹‚ñ‚Å‚µ‚½B–ˆ‰ñŒx‚ªo‚é‚Æ‚«‚ÍA
+echo     zip ‚ð‰EƒNƒŠƒbƒN¨ƒvƒƒpƒeƒB¨uƒuƒƒbƒN‚Ì‰ðœv¨‚à‚¤ˆê“xu‚·‚×‚Ä“WŠJv‚Å‚È‚¨‚è‚Ü‚·B
 :unblock_done
 
-echo Python ã‚’æŽ¢ã—ã¦ã„ã¾ã™...
-rem 'py' ãƒ©ãƒ³ãƒãƒ£ã‚’å„ªå…ˆã—ã€ç„¡ã‘ã‚Œã° 'python' ã‚’è©¦ã™ã€‚
-rem ï¼ˆã¾ã£ã•ã‚‰ãª Windows ã§ã¯ 'python' ã¯ Microsoft Store ã‚’é–‹ãã ã‘ã®ãƒ€ãƒŸãƒ¼ã§ã€
-rem   --version ãŒå¤±æ•—ã™ã‚‹ã®ã§ä¸‹ã®åˆ†å²ã§å¼¾ã‘ã‚‹ï¼‰
+echo Python ‚ð’T‚µ‚Ä‚¢‚Ü‚·...
+rem 'py' ƒ‰ƒ“ƒ`ƒƒ‚ð—Dæ‚µA–³‚¯‚ê‚Î 'python' ‚ðŽŽ‚·B
+rem i‚Ü‚Á‚³‚ç‚È Windows ‚Å‚Í 'python' ‚Í Microsoft Store ‚ðŠJ‚­‚¾‚¯‚Ìƒ_ƒ~[‚ÅA
+rem   --version ‚ªŽ¸”s‚·‚é‚Ì‚Å‰º‚Ì•ªŠò‚Å’e‚¯‚éj
 set "PYCMD="
 py -3 --version >nul 2>&1 && set "PYCMD=py -3"
 if not defined PYCMD (
@@ -47,54 +47,54 @@ if not defined PYCMD (
 
 if not defined PYCMD (
     echo.
-    echo [!] Python ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“ã§ã—ãŸã€‚
+    echo [!] Python ‚ªŒ©‚Â‚©‚è‚Ü‚¹‚ñ‚Å‚µ‚½B
     echo.
-    echo     ã“ã®ã‚¢ãƒ—ãƒªã¯ Python ãŒå¿…è¦ã§ã™ã€‚ã¾ãšâ†“ã‹ã‚‰å…¥ã‚Œã¦ãã ã•ã„:
+    echo     ‚±‚ÌƒAƒvƒŠ‚Í Python ‚ª•K—v‚Å‚·B‚Ü‚¸«‚©‚ç“ü‚ê‚Ä‚­‚¾‚³‚¢:
     echo         https://www.python.org/downloads/
     echo.
-    echo     ãƒ»ãƒãƒ¼ã‚¸ãƒ§ãƒ³ã¯ 3.9 ä»¥é™
-    echo     ãƒ»ã‚¤ãƒ³ã‚¹ãƒˆãƒ¼ãƒ«ç”»é¢ã®ä¸‹ã«ã‚ã‚‹ "Add python.exe to PATH" ã«
-    echo       å¿…ãšãƒã‚§ãƒƒã‚¯ã‚’å…¥ã‚Œã¦ãã ã•ã„ï¼ˆã“ã“ãŒä¸€ç•ªã®ã¤ã¾ãšãã©ã“ã‚ã§ã™ï¼‰
+    echo     Eƒo[ƒWƒ‡ƒ“‚Í 3.9 ˆÈ~
+    echo     EƒCƒ“ƒXƒg[ƒ‹‰æ–Ê‚Ì‰º‚É‚ ‚é "Add python.exe to PATH" ‚É
+    echo       •K‚¸ƒ`ƒFƒbƒN‚ð“ü‚ê‚Ä‚­‚¾‚³‚¢i‚±‚±‚ªˆê”Ô‚Ì‚Â‚Ü‚¸‚«‚Ç‚±‚ë‚Å‚·j
     echo.
-    echo     å…¥ã‚Œçµ‚ã‚ã£ãŸã‚‰ã€ã“ã® setup.bat ã‚’ã‚‚ã†ä¸€åº¦ãƒ€ãƒ–ãƒ«ã‚¯ãƒªãƒƒã‚¯ã—ã¦ãã ã•ã„ã€‚
+    echo     “ü‚êI‚í‚Á‚½‚çA‹N“®.pyw ‚ð‚à‚¤ˆê“xƒ_ƒuƒ‹ƒNƒŠƒbƒN‚µ‚Ä‚­‚¾‚³‚¢B
     echo.
     pause
     exit /b 1
 )
 
-echo ä½¿ç”¨ã™ã‚‹ Python: %PYCMD%
-echo ä»®æƒ³ç’°å¢ƒï¼ˆvenvï¼‰ã‚’ä½œæˆã—ã¦ã„ã¾ã™...
+echo Žg—p‚·‚é Python: %PYCMD%
+echo ‰¼‘zŠÂ‹«ivenvj‚ðì¬‚µ‚Ä‚¢‚Ü‚·...
 %PYCMD% -m venv "%~dp0venv"
 if errorlevel 1 (
     echo.
-    echo [ERROR] ä»®æƒ³ç’°å¢ƒã®ä½œæˆã«å¤±æ•—ã—ã¾ã—ãŸã€‚
-    echo     Python 3.9 ä»¥é™ãŒæ­£ã—ãå…¥ã£ã¦ã„ã‚‹ã‹ç¢ºèªã—ã¦ãã ã•ã„:
+    echo [ERROR] ‰¼‘zŠÂ‹«‚Ìì¬‚ÉŽ¸”s‚µ‚Ü‚µ‚½B
+    echo     Python 3.9 ˆÈ~‚ª³‚µ‚­“ü‚Á‚Ä‚¢‚é‚©Šm”F‚µ‚Ä‚­‚¾‚³‚¢:
     echo         https://www.python.org/downloads/
-    echo     ï¼ˆã‚¤ãƒ³ã‚¹ãƒˆãƒ¼ãƒ«æ™‚ã® "Add python.exe to PATH" ã®ãƒã‚§ãƒƒã‚¯ã‚‚ç¢ºèªï¼‰
+    echo     iƒCƒ“ƒXƒg[ƒ‹Žž‚Ì "Add python.exe to PATH" ‚Ìƒ`ƒFƒbƒN‚àŠm”Fj
     pause
     exit /b 1
 )
 
-echo å¿…è¦ãƒ©ã‚¤ãƒ–ãƒ©ãƒªã‚’ã‚¤ãƒ³ã‚¹ãƒˆãƒ¼ãƒ«ã—ã¦ã„ã¾ã™ï¼ˆrequirements.txtï¼‰...
+echo •K—vƒ‰ƒCƒuƒ‰ƒŠ‚ðƒCƒ“ƒXƒg[ƒ‹‚µ‚Ä‚¢‚Ü‚·irequirements.txtj...
 "%~dp0venv\Scripts\python.exe" -m pip install --upgrade pip
 "%~dp0venv\Scripts\python.exe" -m pip install -r "%~dp0requirements.txt"
 if errorlevel 1 (
-    echo [ERROR] ãƒ©ã‚¤ãƒ–ãƒ©ãƒªã®ã‚¤ãƒ³ã‚¹ãƒˆãƒ¼ãƒ«ã«å¤±æ•—ã—ã¾ã—ãŸã€‚
-    echo     ãƒãƒƒãƒˆæŽ¥ç¶šã‚’ç¢ºèªã—ã¦ã€ã‚‚ã†ä¸€åº¦ setup.bat ã‚’å®Ÿè¡Œã—ã¦ãã ã•ã„ã€‚
+    echo [ERROR] ƒ‰ƒCƒuƒ‰ƒŠ‚ÌƒCƒ“ƒXƒg[ƒ‹‚ÉŽ¸”s‚µ‚Ü‚µ‚½B
+    echo     ƒlƒbƒgÚ‘±‚ðŠm”F‚µ‚ÄA‚à‚¤ˆê“x setup.bat ‚ðŽÀs‚µ‚Ä‚­‚¾‚³‚¢B
     pause
     exit /b 1
 )
 
-rem ãƒ‰ãƒ©ãƒƒã‚°ï¼†ãƒ‰ãƒ­ãƒƒãƒ—éƒ¨å“ã¯ä»»æ„ã€‚å¯¾å¿œã™ã‚‹éƒ¨å“ãŒç„¡ã„ç’°å¢ƒï¼ˆARM64ç‰ˆWindowsãªã©ï¼‰ãŒ
-rem ã‚ã‚‹ãŸã‚ requirements.txt ã®å¿…é ˆå´ã‹ã‚‰ã¯å¤–ã—ã¦ã‚ã‚‹ã€‚ã“ã“ã§åˆ¥ã«å…¥ã‚Œã¦ã€
-rem å…¥ã‚‰ãªãã¦ã‚‚ã‚»ãƒƒãƒˆã‚¢ãƒƒãƒ—ã¯æ­¢ã‚ãªã„ï¼ˆã‚¢ãƒ—ãƒªã¯ D&D ç„¡ã—ã§å‹•ãï¼‰ã€‚
-echo ãƒ‰ãƒ©ãƒƒã‚°ï¼†ãƒ‰ãƒ­ãƒƒãƒ—éƒ¨å“ã‚’å…¥ã‚Œã¦ã„ã¾ã™ï¼ˆä»»æ„ï¼‰...
+rem ƒhƒ‰ƒbƒO•ƒhƒƒbƒv•”•i‚Í”CˆÓB‘Î‰ž‚·‚é•”•i‚ª–³‚¢ŠÂ‹«iARM64”ÅWindows‚È‚Çj‚ª
+rem ‚ ‚é‚½‚ß requirements.txt ‚Ì•K{‘¤‚©‚ç‚ÍŠO‚µ‚Ä‚ ‚éB‚±‚±‚Å•Ê‚É“ü‚ê‚ÄA
+rem “ü‚ç‚È‚­‚Ä‚àƒZƒbƒgƒAƒbƒv‚ÍŽ~‚ß‚È‚¢iƒAƒvƒŠ‚Í D&D –³‚µ‚Å“®‚­jB
+echo ƒhƒ‰ƒbƒO•ƒhƒƒbƒv•”•i‚ð“ü‚ê‚Ä‚¢‚Ü‚·i”CˆÓj...
 "%~dp0venv\Scripts\python.exe" -m pip install "tkinterdnd2>=0.3,<1"
-if errorlevel 1 echo   å…¥ã‚Šã¾ã›ã‚“ã§ã—ãŸã€‚ãƒ•ã‚¡ã‚¤ãƒ«ã¯ã€Œé¸ã¶ã€ãƒœã‚¿ãƒ³ã‹ã‚‰ä½¿ãˆã¾ã™ã€‚
+if errorlevel 1 echo   “ü‚è‚Ü‚¹‚ñ‚Å‚µ‚½Bƒtƒ@ƒCƒ‹‚Íu‘I‚Ôvƒ{ƒ^ƒ“‚©‚çŽg‚¦‚Ü‚·B
 
-rem èµ·å‹•.bat ãŒäºŒå›žç›®ä»¥é™ PowerShell ã‚’å‘¼ã°ãšã«æ¸ˆã‚€ã‚ˆã†ã€è§£é™¤ã§ããŸã“ã¨ã‚’æŽ§ãˆã‚‹ã€‚
-rem ç‰ˆæ•°ã‚’æ›¸ã„ã¦ãŠãã¨ã€ä¸Šæ›¸ãã§æ–°ã—ã„ç‰ˆã‚’å…¥ã‚ŒãŸã¨ãï¼ˆvenv ã¨ä¸€ç·’ã«å¤ã„å°ãŒ
-rem æ®‹ã£ã¦ã„ã¦ã‚‚ï¼‰ç‰ˆé•ã„ãŒåˆ†ã‹ã‚Šã€èµ·å‹•.bat ãŒè§£é™¤ã‚’ã‚„ã‚Šç›´ã›ã‚‹ã€‚
+rem ‹N“®.bat ‚ª“ñ‰ñ–ÚˆÈ~ PowerShell ‚ðŒÄ‚Î‚¸‚ÉÏ‚Þ‚æ‚¤A‰ðœ‚Å‚«‚½‚±‚Æ‚ðT‚¦‚éB
+rem ”Å”‚ð‘‚¢‚Ä‚¨‚­‚ÆAã‘‚«‚ÅV‚µ‚¢”Å‚ð“ü‚ê‚½‚Æ‚«ivenv ‚Æˆê‚ÉŒÃ‚¢ˆó‚ª
+rem Žc‚Á‚Ä‚¢‚Ä‚àj”Åˆá‚¢‚ª•ª‚©‚èA‹N“®.bat ‚ª‰ðœ‚ð‚â‚è’¼‚¹‚éB
 if not defined UNBLOCKED goto setup_done
 set "APPVER="
 for /f "tokens=2 delims==" %%A in ('findstr /b /c:"APP_VERSION = " "%~dp0core.py"') do set APPVER=%%A
@@ -105,14 +105,20 @@ set APPVER=%APPVER:"=%
 
 :setup_done
 echo.
-echo ã‚»ãƒƒãƒˆã‚¢ãƒƒãƒ—å®Œäº†ã€‚ã“ã‚Œã‹ã‚‰ã¯ èµ·å‹•.bat ã§èµ·å‹•ã§ãã¾ã™ã€‚
+rem ‹N“®.bat ‚©‚çŒÄ‚Î‚ê‚½‚Æ‚«‚ÍA‚±‚Ì‚ ‚Æ‘±‚¯‚ÄƒAƒvƒŠ‚ðŠJ‚­‚Ì‚Å‘Ò‚½‚È‚¢B
+rem ‚±‚±‚ÅŽ~‚ß‚é‚ÆuŠ®—¹v‚ðŒ©‚Ä‘‹‚ð•Â‚¶‚½l‚Ì‰‰ñ‚¾‚¯AƒAƒvƒŠ‚ªŠJ‚©‚È‚©‚Á‚½B
+if defined T2V_FROM_LAUNCHER (
+    echo ƒZƒbƒgƒAƒbƒvŠ®—¹BƒAƒvƒŠ‚ðŠJ‚«‚Ü‚·B
+    exit /b 0
+)
+echo ƒZƒbƒgƒAƒbƒvŠ®—¹B‚±‚ê‚©‚ç‚Í ‹N“®.pyw ‚Å‹N“®‚Å‚«‚Ü‚·B
 pause
 exit /b 0
 
 :not_extracted
-echo [!] åŒã˜ãƒ•ã‚©ãƒ«ãƒ€ã« main.py ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“ã€‚
-echo     zip ã‚’å³ã‚¯ãƒªãƒƒã‚¯â†’ã€Œã™ã¹ã¦å±•é–‹ã€ã—ã¦ã‹ã‚‰ã€å‡ºã¦ããŸãƒ•ã‚©ãƒ«ãƒ€ã®ä¸­ã®
-echo     setup.bat ã‚’é–‹ã„ã¦ãã ã•ã„ã€‚
+echo [!] “¯‚¶ƒtƒHƒ‹ƒ_‚É main.py ‚ªŒ©‚Â‚©‚è‚Ü‚¹‚ñB
+echo     zip ‚ð‰EƒNƒŠƒbƒN¨u‚·‚×‚Ä“WŠJv‚µ‚Ä‚©‚çAo‚Ä‚«‚½ƒtƒHƒ‹ƒ_‚Ì’†‚Ì
+echo     ‹N“®.pyw ‚ðŠJ‚¢‚Ä‚­‚¾‚³‚¢B
 echo.
 pause
 exit /b 1

@@ -19,7 +19,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _read(name):
-    with open(os.path.join(ROOT, name), encoding="utf-8") as f:
+    # .bat だけは Shift_JIS（cp932）で保存している（test_bat_files_are_cp932 を参照）
+    enc = "cp932" if name.endswith(".bat") else "utf-8"
+    with open(os.path.join(ROOT, name), encoding=enc) as f:
         return f.read()
 
 
@@ -53,18 +55,37 @@ def test_first_readme_txt_covers_both_os():
         assert needle in txt, f"はじめにお読みください.txt に「{needle}」の案内がありません"
 
 
-def test_pyw_launcher_unblocks_then_runs_the_bat():
-    """起動.pyw が「印を外してから 起動.bat を呼ぶ」順序を保っていること。
+# 利用者がダブルクリックするよう案内している Windows の入口は、.bat ではなく
+# .pyw であること。印の付いた .bat はスマート アプリ コントロールが拡張子だけで
+# 落とすので、.bat を入口にすると、また誰も起動できなくなる。
+PYW_ENTRIES = {"起動.pyw": "起動.bat", "デバッグ起動.pyw": "デバッグ起動.bat"}
 
-    印の付いた .bat はスマート アプリ コントロールが拡張子だけで落とすので、
-    .bat の中に置いた自己解除は走れない（鶏と卵）。.pyw は落とされないため、
-    ここで先に印を外す。この順序が崩れると、また誰も起動できなくなる。
+
+def test_pyw_entry_points_exist_for_every_documented_bat():
+    """案内している .bat には、必ず .pyw の入口が対になっていること。"""
+    for pyw, bat in PYW_ENTRIES.items():
+        assert os.path.exists(os.path.join(ROOT, pyw)), f"{pyw} がありません"
+        assert os.path.exists(os.path.join(ROOT, bat)), f"{bat} がありません"
+        body = _read(pyw)
+        assert f'"{bat}"' in body, f"{pyw} が {bat} を呼んでいません"
+        assert "winlaunch" in body, f"{pyw} が winlaunch を使っていません"
+
+
+def test_pyw_launcher_unblocks_then_runs_the_bat():
+    """winlaunch.run が「印を外してから .bat を呼ぶ」順序を保っていること。
+
+    .bat の中に置いた自己解除は、.bat 自身が1行目に届く前に止められるので
+    走れない（鶏と卵）。.pyw は止められないので、ここで先に印を外す。
+    この順序が崩れると、また誰も起動できなくなる。
     """
-    body = _read("起動.pyw")
-    assert "Zone.Identifier" in body, "起動.pyw に印の除去がありません"
-    assert body.index("def unblock") < body.index('"起動.bat"'), (
-        "起動.pyw が 起動.bat を呼ぶ前に印を外していません")
+    body = _read("winlaunch.py")
+    assert "Zone.Identifier" in body, "winlaunch.py に印の除去がありません"
     assert "still_blocked" in body, "印が残ったままかの確認がありません"
+    run = body[body.index("def run("):]
+    assert run.index("unblock(here)") < run.index("subprocess.Popen"), (
+        "winlaunch.run が .bat を呼ぶ前に印を外していません")
+    assert run.index("still_blocked") < run.index("subprocess.Popen"), (
+        "印が残ったままでも .bat を呼んでしまいます")
 
 
 def test_windows_scripts_self_unblock():
@@ -75,6 +96,38 @@ def test_windows_scripts_self_unblock():
         assert "-ErrorAction SilentlyContinue" in body, \
             f"{name} の Unblock-File が防御的（失敗しても続行）になっていません"
     assert "-Recurse" in _read("setup.bat"), "setup.bat の解除が -Recurse ではありません"
+
+
+def test_bat_files_are_cp932():
+    """日本語の入った .bat は Shift_JIS（cp932）で保存し、chcp 65001 を使わないこと。
+    UTF-8 の .bat を chcp 65001 の下で走らせると、cmd が次に読む位置を行の途中にずらし、
+    rem や echo の後ろ半分を「コマンド」として実行する（v1.23.0 まで。Windows 11 で実測。
+    初回セットアップの窓に 'is not recognized' が15行出て、案内文がいくつも消えていた）。
+    同じ中身を cp932 で保存して chcp を外すと、0 件になる。"""
+    names = subprocess.run(["git", "ls-files", "-z", "--", "*.bat"],
+                           cwd=ROOT, capture_output=True, check=True).stdout
+    bad = []
+    for name in filter(None, names.decode("utf-8").split("\0")):
+        with open(os.path.join(ROOT, name), "rb") as f:
+            raw = f.read()
+        try:
+            text = raw.decode("cp932")
+        except UnicodeDecodeError:
+            bad.append(f"{name}: cp932 として読めません（UTF-8 で保存し直された？）")
+            continue
+        if not raw.isascii():
+            try:
+                raw.decode("utf-8")
+                bad.append(f"{name}: UTF-8 で保存されています（cp932 にする）")
+            except UnicodeDecodeError:
+                pass
+        if re.search(r"^\s*chcp\s+65001", text, re.IGNORECASE | re.MULTILINE):
+            bad.append(f"{name}: chcp 65001 があります")
+        # 日本語以外の Windows は1バイトずつ読むので、2バイト目が | の文字はパイプになる
+        for ch in sorted({c for c in text if ord(c) > 0x7f}):
+            if ch.encode("cp932")[1:2] == b"|":
+                bad.append(f"{name}: 「{ch}」の2バイト目が | です（言い換える）")
+    assert not bad, "\n".join(bad)
 
 
 def test_mac_scripts_self_repair():
@@ -240,7 +293,9 @@ def test_release_zips_are_split_by_os():
         assert not any(f.startswith(("tests/", "tools/", ".github/")) for f in files)
         assert "install.ps1" not in files and "install.sh" not in files
     assert "起動.bat" in win and "ocr_win.ps1" in win
-    assert "起動.pyw" in win, "SAC に止められない起動口が Windows 用 zip に入っていません"
+    for need in ("起動.pyw", "デバッグ起動.pyw", "winlaunch.py"):
+        assert need in win, f"SAC に止められない起動口 {need} が Windows 用 zip にありません"
+    assert "winlaunch.py" not in mac, "winlaunch.py は Windows 専用です"
     assert not any(f.endswith((".command", ".sh")) for f in win) and "ocr_mac.py" not in win
     assert "起動.command" in mac and "ocr_mac.py" in mac and "setup_mac.sh" in mac
     assert not any(f.endswith((".bat", ".ps1", ".pyw")) for f in mac)

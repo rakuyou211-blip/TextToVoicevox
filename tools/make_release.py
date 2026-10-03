@@ -30,9 +30,9 @@ _SKIP_FILES = {".gitattributes", ".gitignore", "install.ps1", "install.sh"}
 
 
 def _windows_only(path):
-    # .pyw は Windows 用の起動口（起動.pyw）。SAC に止められない入口として使う。
+    # .pyw は Windows 用の起動口。SAC に止められない入口として使う（winlaunch.py が中身）。
     return (path.endswith((".bat", ".ps1", ".pyw"))
-            or path == "requirements-english-ocr.txt")
+            or path in ("requirements-english-ocr.txt", "winlaunch.py"))
 
 
 def _mac_only(path):
