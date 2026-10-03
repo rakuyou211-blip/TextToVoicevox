@@ -1,26 +1,26 @@
 @echo off
 rem === Debug launcher (console stays open, shows errors) ===
-chcp 65001 >nul
+rem ‚±‚Ì .bat ‚ÍA‚í‚´‚Æ Shift_JISicp932j‚Å•Û‘¶‚µ‚Ä chcp 65001 ‚àŽg‚í‚È‚¢i——R‚Í tests/test_docs.pyjB
 cd /d "%~dp0"
 
-rem zip ã‚’é–‹ã„ãŸä¸­èº«ã®ã¾ã¾ ã“ã® .bat ã ã‘ã‚’å®Ÿè¡Œã™ã‚‹ã¨ã€Windows ã¯ .bat ã ã‘ã‚’ä¸€æ™‚
-rem ãƒ•ã‚©ãƒ«ãƒ€ã¸å–ã‚Šå‡ºã—ã¦èµ°ã‚‰ã›ã‚‹ãŸã‚ã€éš£ã«ã‚ã‚‹ã¯ãšã®ãƒ•ã‚¡ã‚¤ãƒ«ãŒç„¡ã„ã€‚å…ˆã«æ­¢ã‚ã‚‹ã€‚
+rem zip ‚ðŠJ‚¢‚½’†g‚Ì‚Ü‚Ü ‚±‚Ì .bat ‚¾‚¯‚ðŽÀs‚·‚é‚ÆAWindows ‚Í .bat ‚¾‚¯‚ðˆêŽž
+rem ƒtƒHƒ‹ƒ_‚ÖŽæ‚èo‚µ‚Ä‘–‚ç‚¹‚é‚½‚ßA—×‚É‚ ‚é‚Í‚¸‚Ìƒtƒ@ƒCƒ‹‚ª–³‚¢Bæ‚ÉŽ~‚ß‚éB
 if not exist "%~dp0main.py" goto not_extracted
 if not exist "%~dp0core.py" goto not_extracted
 
-rem ãƒ€ã‚¦ãƒ³ãƒ­ãƒ¼ãƒ‰ç”±æ¥ã®è­¦å‘Šãƒ–ãƒ­ãƒƒã‚¯ãŒæ®‹ã£ã¦ã„ã‚Œã°è§£é™¤ï¼ˆç›´ä¸‹ã®ã¿ãƒ»å¤±æ•—ã—ã¦ã‚‚ç¶šè¡Œï¼‰ã€‚
-rem ã“ã¡ã‚‰ã¯ä¸å…·åˆã‚’è¦‹ã‚‹ãŸã‚ã®å…¥å£ãªã®ã§ã€å°ã¯è¦‹ãªã„ã—ç½®ã‹ãªã„ï¼ˆæ¯Žå›žã‚„ã‚Šç›´ã™ï¼‰ã€‚
+rem ƒ_ƒEƒ“ƒ[ƒh—R—ˆ‚ÌŒxƒuƒƒbƒN‚ªŽc‚Á‚Ä‚¢‚ê‚Î‰ðœi’¼‰º‚Ì‚ÝEŽ¸”s‚µ‚Ä‚à‘±sjB
+rem ‚±‚¿‚ç‚Í•s‹ï‡‚ðŒ©‚é‚½‚ß‚Ì“üŒû‚È‚Ì‚ÅAˆó‚ÍŒ©‚È‚¢‚µ’u‚©‚È‚¢i–ˆ‰ñ‚â‚è’¼‚·jB
 set "APPDIR=%~dp0"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $f = Get-ChildItem -LiteralPath $env:APPDIR -File -ErrorAction Stop; $f | Unblock-File -ErrorAction SilentlyContinue; if ($f | Get-Item -Stream Zone.Identifier -ErrorAction SilentlyContinue) { exit 1 }; exit 0 } catch { exit 1 }" >nul 2>&1
 if not errorlevel 1 goto unblock_done
-echo [!] ãƒ€ã‚¦ãƒ³ãƒ­ãƒ¼ãƒ‰æ™‚ã®è­¦å‘Šï¼ˆãƒ–ãƒ­ãƒƒã‚¯ï¼‰ã¯å¤–ã›ã¾ã›ã‚“ã§ã—ãŸã€‚æ¯Žå›žè­¦å‘ŠãŒå‡ºã‚‹ã¨ãã¯ã€
-echo     zip ã‚’å³ã‚¯ãƒªãƒƒã‚¯â†’ãƒ—ãƒ­ãƒ‘ãƒ†ã‚£â†’ã€Œãƒ–ãƒ­ãƒƒã‚¯ã®è§£é™¤ã€â†’ã‚‚ã†ä¸€åº¦ã€Œã™ã¹ã¦å±•é–‹ã€ã§ãªãŠã‚Šã¾ã™ã€‚
+echo [!] ƒ_ƒEƒ“ƒ[ƒhŽž‚ÌŒxiƒuƒƒbƒNj‚ÍŠO‚¹‚Ü‚¹‚ñ‚Å‚µ‚½B–ˆ‰ñŒx‚ªo‚é‚Æ‚«‚ÍA
+echo     zip ‚ð‰EƒNƒŠƒbƒN¨ƒvƒƒpƒeƒB¨uƒuƒƒbƒN‚Ì‰ðœv¨‚à‚¤ˆê“xu‚·‚×‚Ä“WŠJv‚Å‚È‚¨‚è‚Ü‚·B
 echo.
 
 :unblock_done
 if not exist "%~dp0venv\Scripts\python.exe" (
-    echo venv ãŒã‚ã‚Šã¾ã›ã‚“ã€‚å…ˆã« setup.bat ã‚’å®Ÿè¡Œã—ã¦ãã ã•ã„ã€‚
-    echo ï¼ˆãµã ã‚“ã® èµ·å‹•.bat ãªã‚‰ã€åˆå›žã‚»ãƒƒãƒˆã‚¢ãƒƒãƒ—ã‚‚è‡ªå‹•ã§ã‚„ã‚Šã¾ã™ï¼‰
+    echo venv ‚ª‚ ‚è‚Ü‚¹‚ñBæ‚É setup.bat ‚ðŽÀs‚µ‚Ä‚­‚¾‚³‚¢B
+    echo i‚Ó‚¾‚ñ‚Ì ‹N“®.pyw ‚È‚çA‰‰ñƒZƒbƒgƒAƒbƒv‚àŽ©“®‚Å‚â‚è‚Ü‚·j
     pause
     exit /b 1
 )
@@ -31,9 +31,9 @@ pause
 exit /b 0
 
 :not_extracted
-echo [!] åŒã˜ãƒ•ã‚©ãƒ«ãƒ€ã« main.py ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“ã€‚
-echo     zip ã‚’å³ã‚¯ãƒªãƒƒã‚¯â†’ã€Œã™ã¹ã¦å±•é–‹ã€ã—ã¦ã‹ã‚‰ã€å‡ºã¦ããŸãƒ•ã‚©ãƒ«ãƒ€ã®ä¸­ã®
-echo     ãƒ‡ãƒãƒƒã‚°èµ·å‹•.bat ã‚’é–‹ã„ã¦ãã ã•ã„ã€‚
+echo [!] “¯‚¶ƒtƒHƒ‹ƒ_‚É main.py ‚ªŒ©‚Â‚©‚è‚Ü‚¹‚ñB
+echo     zip ‚ð‰EƒNƒŠƒbƒN¨u‚·‚×‚Ä“WŠJv‚µ‚Ä‚©‚çAo‚Ä‚«‚½ƒtƒHƒ‹ƒ_‚Ì’†‚Ì
+echo     ƒfƒoƒbƒO‹N“®.pyw ‚ðŠJ‚¢‚Ä‚­‚¾‚³‚¢B
 echo.
 pause
 exit /b 1

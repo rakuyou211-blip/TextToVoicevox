@@ -19,7 +19,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _read(name):
-    with open(os.path.join(ROOT, name), encoding="utf-8") as f:
+    # .bat だけは Shift_JIS（cp932）で保存している（test_bat_files_are_cp932 を参照）
+    enc = "cp932" if name.endswith(".bat") else "utf-8"
+    with open(os.path.join(ROOT, name), encoding=enc) as f:
         return f.read()
 
 
@@ -94,6 +96,38 @@ def test_windows_scripts_self_unblock():
         assert "-ErrorAction SilentlyContinue" in body, \
             f"{name} の Unblock-File が防御的（失敗しても続行）になっていません"
     assert "-Recurse" in _read("setup.bat"), "setup.bat の解除が -Recurse ではありません"
+
+
+def test_bat_files_are_cp932():
+    """日本語の入った .bat は Shift_JIS（cp932）で保存し、chcp 65001 を使わないこと。
+    UTF-8 の .bat を chcp 65001 の下で走らせると、cmd が次に読む位置を行の途中にずらし、
+    rem や echo の後ろ半分を「コマンド」として実行する（v1.23.0 まで。Windows 11 で実測。
+    初回セットアップの窓に 'is not recognized' が15行出て、案内文がいくつも消えていた）。
+    同じ中身を cp932 で保存して chcp を外すと、0 件になる。"""
+    names = subprocess.run(["git", "ls-files", "-z", "--", "*.bat"],
+                           cwd=ROOT, capture_output=True, check=True).stdout
+    bad = []
+    for name in filter(None, names.decode("utf-8").split("\0")):
+        with open(os.path.join(ROOT, name), "rb") as f:
+            raw = f.read()
+        try:
+            text = raw.decode("cp932")
+        except UnicodeDecodeError:
+            bad.append(f"{name}: cp932 として読めません（UTF-8 で保存し直された？）")
+            continue
+        if not raw.isascii():
+            try:
+                raw.decode("utf-8")
+                bad.append(f"{name}: UTF-8 で保存されています（cp932 にする）")
+            except UnicodeDecodeError:
+                pass
+        if re.search(r"^\s*chcp\s+65001", text, re.IGNORECASE | re.MULTILINE):
+            bad.append(f"{name}: chcp 65001 があります")
+        # 日本語以外の Windows は1バイトずつ読むので、2バイト目が | の文字はパイプになる
+        for ch in sorted({c for c in text if ord(c) > 0x7f}):
+            if ch.encode("cp932")[1:2] == b"|":
+                bad.append(f"{name}: 「{ch}」の2バイト目が | です（言い換える）")
+    assert not bad, "\n".join(bad)
 
 
 def test_mac_scripts_self_repair():

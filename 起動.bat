@@ -1,47 +1,49 @@
 @echo off
 rem === Text-to-VOICEVOX launcher (no console window) ===
-chcp 65001 >nul
+rem ���� .bat �́A�킴�� Shift_JIS�icp932�j�ŕۑ����� chcp 65001 ���g��Ȃ��i���R�� tests/test_docs.py�j�B
 cd /d "%~dp0"
 
-rem zip を開いた中身のまま この .bat だけを実行すると、Windows は .bat だけを一時
-rem フォルダへ取り出して走らせるため、隣にあるはずのファイルが無い状態で進んでしまう。
-rem そのまま進めても必ず失敗するので、ここで止めて案内する。
+rem zip ���J�������g�̂܂� ���� .bat ���������s����ƁAWindows �� .bat �������ꎞ
+rem �t�H���_�֎��o���đ��点�邽�߁A�ׂɂ���͂��̃t�@�C����������ԂŐi��ł��܂��B
+rem ���̂܂ܐi�߂Ă��K�����s����̂ŁA�����Ŏ~�߂Ĉē�����B
 if not exist "%~dp0main.py" goto not_extracted
 if not exist "%~dp0core.py" goto not_extracted
 
 if not exist "%~dp0venv\Scripts\pythonw.exe" (
-    echo 初回セットアップがまだのようなので、先に setup.bat を実行します。
-    echo （初回だけネット接続が必要です。数分かかることがあります）
+    echo ����Z�b�g�A�b�v���܂��̂悤�Ȃ̂ŁA��� setup.bat �����s���܂��B
+    echo �i���񂾂��l�b�g�ڑ����K�v�ł��B���������邱�Ƃ�����܂��j
     echo.
+    set "T2V_FROM_LAUNCHER=1"
     call "%~dp0setup.bat"
 ) else (
-    rem venv があっても、フォルダごと別のPCから持ってきた場合や Python を
-    rem 入れ直した場合は、中の Python が動かない（venv は機械ごとに作る物）。
-    rem 実際に動くか一度だけ確かめて、ダメなら setup.bat で作り直す。
+    rem venv �������Ă��A�t�H���_���ƕʂ�PC���玝���Ă����ꍇ�� Python ��
+    rem ���꒼�����ꍇ�́A���� Python �������Ȃ��ivenv �͋@�B���Ƃɍ�镨�j�B
+    rem ���ۂɓ�������x�����m���߂āA�_���Ȃ� setup.bat �ō�蒼���B
     "%~dp0venv\Scripts\python.exe" -c "" >nul 2>&1
     if errorlevel 1 (
-        echo venv が今のパソコンでは動かないため、setup.bat で作り直します。
+        echo venv �����̃p�\�R���ł͓����Ȃ����߁Asetup.bat �ō�蒼���܂��B
         echo.
+        set "T2V_FROM_LAUNCHER=1"
         call "%~dp0setup.bat"
     )
 )
 if not exist "%~dp0venv\Scripts\pythonw.exe" (
     echo.
-    echo [!] セットアップが完了していないため、起動できませんでした。
-    echo     上に出ているメッセージを確認してください。
+    echo [!] �Z�b�g�A�b�v���������Ă��Ȃ����߁A�N���ł��܂���ł����B
+    echo     ��ɏo�Ă��郁�b�Z�[�W���m�F���Ă��������B
     pause
     exit /b 1
 )
 
-rem ダウンロード由来の警告ブロックを解除する（このフォルダ直下のみ）。
-rem PowerShellは呼び出すだけで毎回1〜2秒かかるため、済んだら venv の中に印を残して
-rem 二回目以降は丸ごと飛ばす（venvは配布物に入らない＝別PCでは初回やり直しになる）。
-rem 印には版数を書く。上書きで新しい版を展開すると venv ごと古い印も残るので、
-rem 版が変わったかどうかで「解除をやり直すか」を決める。
+rem �_�E�����[�h�R���̌x���u���b�N����������i���̃t�H���_�����̂݁j�B
+rem PowerShell�͌Ăяo�������Ŗ���1�`2�b�����邽�߁A�ς񂾂� venv �̒��Ɉ���c����
+rem ���ڈȍ~�͊ۂ��Ɣ�΂��ivenv�͔z�z���ɓ���Ȃ�����PC�ł͏����蒼���ɂȂ�j�B
+rem ��ɂ͔Ő��������B�㏑���ŐV�����ł�W�J����� venv ���ƌÂ�����c��̂ŁA
+rem �ł��ς�������ǂ����Łu��������蒼�����v�����߂�B
 set "APPVER="
 for /f "tokens=2 delims==" %%A in ('findstr /b /c:"APP_VERSION = " "%~dp0core.py"') do set APPVER=%%A
 if not defined APPVER goto do_unblock
-rem 取り出した値は引用符つきなので、空白と引用符を落として数字だけにする
+rem ���o�����l�͈��p�����Ȃ̂ŁA�󔒂ƈ��p���𗎂Ƃ��Đ��������ɂ���
 set APPVER=%APPVER: =%
 set APPVER=%APPVER:"=%
 set "DONEVER="
@@ -50,11 +52,11 @@ set /p DONEVER=<"%~dp0venv\.unblocked"
 if "%DONEVER%"=="%APPVER%" goto unblock_done
 
 :do_unblock
-rem 解除できたかは Zone.Identifier が残っていないかで確かめる。PowerShell が
-rem 止められている環境では黙って失敗するため、成否を見てから印を置く。
+rem �����ł������� Zone.Identifier ���c���Ă��Ȃ����Ŋm���߂�BPowerShell ��
+rem �~�߂��Ă�����ł͖ق��Ď��s���邽�߁A���ۂ����Ă�����u���B
 set "APPDIR=%~dp0"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $f = Get-ChildItem -LiteralPath $env:APPDIR -File -ErrorAction Stop; $f | Unblock-File -ErrorAction SilentlyContinue; if ($f | Get-Item -Stream Zone.Identifier -ErrorAction SilentlyContinue) { exit 1 }; exit 0 } catch { exit 1 }" >nul 2>&1
-rem 異常終了（負の終了コード）は errorlevel 1 では拾えないので、0 かどうかで見る
+rem �ُ�I���i���̏I���R�[�h�j�� errorlevel 1 �ł͏E���Ȃ��̂ŁA0 ���ǂ����Ō���
 if errorlevel 1 goto unblock_failed
 if not "%ERRORLEVEL%"=="0" goto unblock_failed
 if not defined APPVER goto unblock_done
@@ -62,8 +64,8 @@ if not defined APPVER goto unblock_done
 goto unblock_done
 
 :unblock_failed
-echo [!] ダウンロード時の警告（ブロック）は外せませんでした。毎回警告が出るときは、
-echo     zip を右クリック→プロパティ→「ブロックの解除」→もう一度「すべて展開」でなおります。
+echo [!] �_�E�����[�h���̌x���i�u���b�N�j�͊O���܂���ł����B����x�����o��Ƃ��́A
+echo     zip ���E�N���b�N���v���p�e�B���u�u���b�N�̉����v��������x�u���ׂēW�J�v�łȂ���܂��B
 echo.
 
 :unblock_done
@@ -71,9 +73,9 @@ start "" "%~dp0venv\Scripts\pythonw.exe" "%~dp0main.py"
 exit /b 0
 
 :not_extracted
-echo [!] 同じフォルダに main.py が見つかりません。
-echo     zip を右クリック→「すべて展開」してから、出てきたフォルダの中の
-echo     起動.bat を開いてください。
+echo [!] �����t�H���_�� main.py ��������܂���B
+echo     zip ���E�N���b�N���u���ׂēW�J�v���Ă���A�o�Ă����t�H���_�̒���
+echo     �N��.pyw ���J���Ă��������B
 echo.
 pause
 exit /b 1
