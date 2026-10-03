@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
-"""TextToVoicevox の起動用（Windows）。ダブルクリックで使います。
+"""英語の文字読み取り部品（RapidOCR）を入れる（Windows・任意）。ダブルクリックで使います。
 
-初回は黒い窓で部品を入れてから（数分）、2回目からはすぐにアプリを開きます。
-.bat を使わないのは、Windows に止められないためです（理由は winlaunch.py）。
-
-Python が入っていないと、これはダブルクリックしても何も起きません。
-そのときは「はじめにお読みください.txt」のとおり、先に Python を入れてください。
+英文の多い画像を読むための部品です。入れなくてもアプリは使えます。
+Windows に「英語（米国）」を追加する方法なら、アプリは大きくなりません。
+先に 起動.pyw でアプリが開くのを確かめてから使ってください。
 """
 import os
 import sys
@@ -25,10 +23,10 @@ except ImportError:
             "TextToVoicevox",
             "zip の中から直接開いています。\n\n"
             "zip を右クリック →「すべて展開」してから、出てきたフォルダの中の\n"
-            "起動.pyw を開いてください。")
+            "英語OCRを入れる.pyw を開いてください。")
     except Exception:
         pass
     sys.exit(1)
 
 if __name__ == "__main__":
-    sys.exit(winlaunch.run(HERE, "launch"))
+    sys.exit(winlaunch.run(HERE, "ocr"))

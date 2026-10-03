@@ -5,9 +5,9 @@
 #
 # なぜこの方法か:
 #   ブラウザで落とした zip には「インターネットから来た」という印が付き、
-#   そこから出した 起動.bat を開くと Windows が「PCが保護されました」（SmartScreen）で止める。
+#   そこから出したファイルを開くと Windows が「PCが保護されました」（SmartScreen）で止める。
 #   さらに「スマート アプリ コントロール」が有効な機械では、通すボタンの無い窓で完全に
-#   止まる（印の付いた .bat は拡張子だけで弾かれ、.bat 側の自動解除も走り出せない）。
+#   止まる（v1.23 までの zip に入っていた .bat は、印が付いていると拡張子だけで弾かれた）。
 #   この1行は PowerShell 自身がファイルを取ってくるので印が付かず、
 #   できたデスクトップのアイコンからは、警告なしで起動できる。
 #
@@ -207,6 +207,15 @@
             # 上書きコピー（消しはしない）。設定・辞書・自動保存・立ち絵・venv は残る
             & robocopy $src $Dest /E /XD .git venv __pycache__ .pytest_cache /NFL /NDL /NJH /NJS /NP | Out-Null
             if ($LASTEXITCODE -ge 8) { throw "ファイルのコピーに失敗しました（robocopy $LASTEXITCODE）。" }
+            # 上書きコピーは消さないので、v1.23 までの .bat が残る。今は使わない上に、
+            # 「起動.pyw」と並んで「起動」が2つに見えるので消す。
+            # 置いた中身が新しい形（winsetup.py がある）のときだけ。古い版を入れたときに
+            # その版が頼りにしている .bat まで消さないように
+            if (Test-Path -LiteralPath (Join-Path $src 'winsetup.py')) {
+                foreach ($old in @('起動.bat', 'setup.bat', 'デバッグ起動.bat', '英語OCRを入れる.bat')) {
+                    Remove-Item -LiteralPath (Join-Path $Dest $old) -Force -ErrorAction SilentlyContinue
+                }
+            }
         } finally {
             Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -232,6 +241,12 @@
         } catch {
             Say '  （ドラッグ＆ドロップ部品は入りませんでした。ファイルは「ファイル追加」から使えます）'
         }
+        # 部品を入れ終えた印（winlaunch.py と同じ: requirements.txt の SHA-256・小文字・BOM 無し）。
+        # これが無いと、入れたフォルダの 起動.pyw を開いたときにセットアップをやり直す
+        try {
+            $stamp = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Dest 'requirements.txt')).Hash.ToLowerInvariant()
+            [IO.File]::WriteAllText((Join-Path $venv '.t2v_setup'), $stamp)
+        } catch {}
 
         # ---- 4. アイコン ----
         Step '4/4 デスクトップとスタートメニューにアイコンを作っています'
@@ -269,7 +284,7 @@
         foreach ($m in $made) { Say "  作成: $m" }
         if ($made.Count -eq 0) {
             Say '  （このPCの設定でアイコンを作れませんでした。アプリは入っています）'
-            Say "  起動するときは、次のフォルダの「起動.bat」をダブルクリックしてください:"
+            Say "  起動するときは、次のフォルダの「起動.pyw」をダブルクリックしてください:"
             Say "    $Dest"
             try { Start-Process explorer.exe -ArgumentList ('"' + $Dest + '"') } catch {}
         }

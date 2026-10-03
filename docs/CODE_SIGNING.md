@@ -5,19 +5,19 @@
 ## What is signed / 署名するもの
 
 Only `TextToVoicevox.exe`, the small Windows launcher built from [`launcher/TextToVoicevox.cs`](../launcher/TextToVoicevox.cs).
-It removes the "downloaded from the internet" mark (`Zone.Identifier`) from the files in its own folder and then runs `起動.bat`. (`起動.pyw` already does this today, without a certificate; the signed `.exe` is the tidier version of the same idea.)
+It removes the "downloaded from the internet" mark (`Zone.Identifier`) from the files in its own folder and then opens `起動.pyw`. (`起動.pyw` already does this today, without a certificate; the signed `.exe` is the tidier version of the same idea.)
 The rest of the app is Python source code that anyone can read in this repository.
 
 署名するのは、Windows 用の小さな起動用 `TextToVoicevox.exe` だけです（ソースは [`launcher/TextToVoicevox.cs`](../launcher/TextToVoicevox.cs)）。
-自分のフォルダのファイルから「インターネットから来た」印を外し、`起動.bat` を動かします。
+自分のフォルダのファイルから「インターネットから来た」印を外し、`起動.pyw` を開きます。
 アプリの本体は Python のソースで、このリポジトリで誰でも読めます。
 
 ## How it is built / 作り方
 
 - The launcher is built from this repository's source by GitHub Actions ([`.github/workflows/release.yml`](../.github/workflows/release.yml)) on every release. Nothing built on a personal computer is signed.
-- Once signing is switched on, the signed launcher is added to `TextToVoicevox_Windows.zip` on the GitHub Release page. **The SignPath application is still pending, so no release ships that `.exe` yet.** Until it does, the zip ships [`起動.pyw`](../起動.pyw) instead: a small Python entry point that does the same job — strip the mark, then run `起動.bat` — and that Smart App Control does not block, because `.py` / `.pyw` are outside the extensions it stops. The `.exe` is not urgent because of it.
+- Once signing is switched on, the signed launcher is added to `TextToVoicevox_Windows.zip` on the GitHub Release page. **The SignPath application is still pending, so no release ships that `.exe` yet.** Until it does, the zip ships [`起動.pyw`](../起動.pyw) instead: a small Python entry point that does the same job — strip the mark, then set up and start the app (since v1.24.0 the zip has no `.bat` at all) — and that Smart App Control does not block, because `.py` / `.pyw` are outside the extensions it stops. The `.exe` is not urgent because of it.
 - 起動用 .exe は、Release のたびに GitHub Actions がこのリポジトリのソースから作ります。個人のパソコンで作ったものは署名しません。
-- **SignPath はまだ申請中で、署名も同梱も始まっていません。** そのあいだは、同じ仕事をする [`起動.pyw`](../起動.pyw) を zip に入れています（印を外してから `起動.bat` を呼ぶ）。スマート アプリ コントロールは `.py` / `.pyw` を止めないので、署名がなくても行き止まりになりません。
+- **SignPath はまだ申請中で、署名も同梱も始まっていません。** そのあいだは、同じ仕事をする [`起動.pyw`](../起動.pyw) を zip に入れています（印を外してから、セットアップと起動を Python だけでやる。v1.24.0 から zip に `.bat` はありません）。スマート アプリ コントロールは `.py` / `.pyw` を止めないので、署名がなくても行き止まりになりません。
 
 ## Team roles / 役割
 

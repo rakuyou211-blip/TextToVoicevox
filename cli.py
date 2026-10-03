@@ -9,7 +9,7 @@ cli.py - GUIなしの一括変換（自動化・上級者向け）
   # 音声まで一括生成（VOICEVOXエンジン起動が必要）
   python cli.py 本.pdf -o 出力フォルダ --wav --speaker ずんだもん --combine --srt
 
-`起動.bat` / `起動.command` と同じ venv の python で実行してください。
+`起動.pyw` / `起動.command` と同じ venv の python で実行してください。
 """
 import os
 import sys

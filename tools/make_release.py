@@ -4,12 +4,12 @@
     python tools/make_release.py [出力フォルダ] [--win-exe 署名済みの TextToVoicevox.exe]
 
 できるもの（名前に版数を入れないので、ダウンロードのリンクが版をまたいで変わらない）:
-    TextToVoicevox_Windows.zip … 起動.pyw・.bat・ocr_win.ps1 など Windows で使うものだけ
+    TextToVoicevox_Windows.zip … 起動.pyw・winsetup.py・ocr_win.ps1 など Windows で使うものだけ
     TextToVoicevox_Mac.zip     … .command・.sh・ocr_mac.py など Mac で使うものだけ
 
 中身は git 管理のファイル（作業中の変更は入らない）。テスト・開発用の道具・
 1行導入の台本（install.ps1 / install.sh。ネットから直接読むもの）は入れない。
-.bat は CRLF、.command / .sh は LF のまま（.gitattributes どおり）入れ、
+.ps1 は CRLF、.command / .sh は LF のまま（.gitattributes どおり）入れ、
 .command / .sh には実行権限を付ける。Release を出すと GitHub Actions
 （.github/workflows/release.yml）がこれを動かして、2つの zip を自動で添付する。
 """
@@ -30,9 +30,10 @@ _SKIP_FILES = {".gitattributes", ".gitignore", "install.ps1", "install.sh"}
 
 
 def _windows_only(path):
-    # .pyw は Windows 用の起動口。SAC に止められない入口として使う（winlaunch.py が中身）。
+    # .pyw は Windows 用の起動口。SAC に止められない入口として使う（winlaunch.py /
+    # winsetup.py が中身）。.bat は v1.24.0 で1つも無くなった。
     return (path.endswith((".bat", ".ps1", ".pyw"))
-            or path in ("requirements-english-ocr.txt", "winlaunch.py"))
+            or path in ("requirements-english-ocr.txt", "winlaunch.py", "winsetup.py"))
 
 
 def _mac_only(path):
