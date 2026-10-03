@@ -24,7 +24,7 @@ from urllib.parse import unquote
 
 # アプリのバージョン（タイトルバー・CLI --version・不具合報告の目印に使う）。
 # リリースごとにここだけ更新する。
-APP_VERSION = "1.23.1"
+APP_VERSION = "1.24.0"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
@@ -1535,7 +1535,7 @@ OCR_ENGLISH_MISSING_MSG = (
     "英文が崩れて読み取られています。次のどちらかで読めるようになります。\n\n"
     "・Windows の［設定］→［時刻と言語］→［言語と地域］で"
     "「英語（米国）」を追加する（アプリは大きくなりません）\n"
-    "・アプリのフォルダにある「英語OCRを入れる.bat」を実行する"
+    "・アプリのフォルダにある「英語OCRを入れる.pyw」を開く"
     "（約88MBのダウンロード・アプリが約240MB大きくなります。"
     "64bit の Windows・Python 3.12 まで）")
 
@@ -1597,7 +1597,7 @@ def rapidocr_available() -> bool:
     try:
         import importlib
         import importlib.util
-        # アプリを開いたまま「英語OCRを入れる.bat」で入れた場合にも気づけるように、
+        # アプリを開いたまま「英語OCRを入れる.pyw」で入れた場合にも気づけるように、
         # インポートの探し先の覚えを捨ててから探す（呼ばれるのは英文の画像のときだけ）
         importlib.invalidate_caches()
         return importlib.util.find_spec("rapidocr_onnxruntime") is not None
