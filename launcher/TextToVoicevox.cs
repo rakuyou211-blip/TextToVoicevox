@@ -3,12 +3,13 @@
 // 何をするか:
 //   1. このフォルダ（とその下）のファイルから「インターネットから来た」印
 //      （Zone.Identifier。ブラウザで落とした zip を展開すると全部に付く）を外す
-//   2. いつもの「起動.bat」を動かす（初回は部品のセットアップ、2回目からはすぐ起動）
+//   2. いつもの「起動.pyw」を開く（初回は部品のセットアップ、2回目からはすぐ起動）。
+//      起動.pyw が無い v1.23 までの形のフォルダでは「起動.bat」を動かす
 //
 // なぜ .exe にするか:
 //   印の付いた .bat は、Windows の SmartScreen やスマート アプリ コントロールに
-//   止められる。署名した .exe だけを最初に開いてもらえば、そこで印を外すので、
-//   その後に動く .bat や Python のファイルは止められない。
+//   止められる（v1.24.0 で zip から .bat は無くした）。署名した .exe を最初に
+//   開いてもらえば、そこで印を外すので、その後に動くファイルは止められない。
 //   この .exe は Release のときに GitHub Actions でソースから作り、
 //   SignPath Foundation の証明書で署名する（docs/CODE_SIGNING.md）。
 //
@@ -48,22 +49,37 @@ static class Launcher
 
         Unblock(dir);
 
+        // v1.24.0 から zip に .bat は無く、起動.pyw が入口（セットアップも起動も Python）。
+        // 起動.pyw が無い古い形のフォルダだけ、従来どおり 起動.bat を動かす
+        string pyw = Path.Combine(dir, "起動.pyw");
         string bat = Path.Combine(dir, "起動.bat");
-        if (!File.Exists(bat))
+        if (!File.Exists(pyw) && !File.Exists(bat))
         {
-            MessageBox.Show("「起動.bat」が見つかりません。zip をもう一度展開してください。",
+            MessageBox.Show("「起動.pyw」が見つかりません。zip をもう一度展開してください。",
                             Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return 1;
         }
         try
         {
-            // 初回はセットアップの進み具合を見せたいので、黒い窓（コンソール）ありで動かす。
-            // 2回目からは 起動.bat がすぐ終わるので、窓は一瞬で閉じる
-            var psi = new ProcessStartInfo("cmd.exe", "/c \"\"" + bat + "\"\"")
+            ProcessStartInfo psi;
+            if (File.Exists(pyw))
             {
-                WorkingDirectory = dir,
-                UseShellExecute = false,
-            };
+                // 関連付けどおり（Python）で開く
+                psi = new ProcessStartInfo(pyw)
+                {
+                    WorkingDirectory = dir,
+                    UseShellExecute = true,
+                };
+            }
+            else
+            {
+                // 初回はセットアップの進み具合を見せたいので、黒い窓（コンソール）ありで動かす
+                psi = new ProcessStartInfo("cmd.exe", "/c \"\"" + bat + "\"\"")
+                {
+                    WorkingDirectory = dir,
+                    UseShellExecute = false,
+                };
+            }
             Process.Start(psi);
             return 0;
         }

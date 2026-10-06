@@ -4337,7 +4337,7 @@ class App(_Base):
             self._en_help_win.lift()
             return
         installed = core.rapidocr_available()
-        bat = os.path.join(core.APP_DIR, "英語OCRを入れる.bat")
+        setup_py = os.path.join(core.APP_DIR, "winsetup.py")
         win = tk.Toplevel(self)
         self._en_help_win = win
         win.title("英語の画像を読むには")
@@ -4370,7 +4370,7 @@ class App(_Base):
             ttk.Label(frm, wraplength=W, justify="left", style="Credit.TLabel",
                       text="① Windows に「英語（米国）」を追加する"
                            "（アプリは大きくなりません）\n"
-                           "② 「英語OCRを入れる.bat」を実行する"
+                           "② 「英語OCRを入れる.pyw」を開く"
                            "（約88MBのダウンロード・アプリが約240MB大きくなります。"
                            "64bit の Windows・Python 3.12 まで）"
                       ).pack(anchor="w", pady=(0, 4))
@@ -4393,18 +4393,27 @@ class App(_Base):
             b1.pack(side="right", padx=6)
             self._en_help_buttons["settings"] = b1
 
-            if not installed and os.path.exists(bat):
+            if not installed and os.path.exists(setup_py):
                 def open_bat():
+                    import subprocess
                     try:
-                        os.startfile(bat)
+                        # 英語OCRを入れる.pyw と同じ（黒い窓で winsetup.py ocr）。
+                        # .bat は Windows に止められるので、v1.24.0 から使わない
+                        py = os.path.join(os.path.dirname(sys.executable),
+                                          "python.exe")
+                        subprocess.Popen(
+                            [py if os.path.exists(py) else sys.executable,
+                             setup_py, "ocr"], cwd=core.APP_DIR,
+                            creationflags=getattr(
+                                subprocess, "CREATE_NEW_CONSOLE", 0))
                         self.status_var.set(
                             "英語OCRのインストールを始めました"
                             "（黒い画面の指示に従ってね）。")
                     except Exception:
                         messagebox.showinfo(
                             "情報", "開けませんでした。アプリのフォルダの"
-                            "「英語OCRを入れる.bat」をダブルクリックしてください。")
-                b2 = ttk.Button(btns, text="② 英語OCRを入れる.bat を開く",
+                            "「英語OCRを入れる.pyw」をダブルクリックしてください。")
+                b2 = ttk.Button(btns, text="② 英語OCRを入れる",
                                 command=open_bat)
                 b2.pack(side="right", padx=6)
                 self._en_help_buttons["install"] = b2
@@ -5737,7 +5746,7 @@ class App(_Base):
 
 
 def _report_startup_error(err_text):
-    """起動失敗をユーザーに伝える。起動.bat は pythonw（コンソール無し）で起動する
+    """起動失敗をユーザーに伝える。起動.pyw は pythonw（コンソール無し）で起動する
     ため、ここで拾わないと例外は完全に無言＝「ダブルクリックしても何も起きない」に
     見える。ログに残した上でダイアログでも知らせる。Tk 自体が壊れているときは
     Windows標準の MessageBox に退避する。"""
@@ -5756,7 +5765,8 @@ def _report_startup_error(err_text):
         pass
     msg = ("起動に失敗しました。\n\n"
            "詳しい内容を「起動エラー.log」に保存しました。\n"
-           "setup.bat（Macは setup.command）をもう一度実行すると直ることがあります。\n"
+           "Windows は「venv」フォルダを消してから 起動.pyw を開くと、部品を入れ直します"
+           "（Mac は setup.command をもう一度実行）。\n"
            "直らないときは「デバッグ起動」で画面に出るエラーを確認してください。")
     try:
         root = tk.Tk()
