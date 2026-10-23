@@ -1,6 +1,7 @@
 # Python 仮想環境（各自 setup で作成するため配布しない）
 venv/
 venv_mac/
+venv_mac.old/
 
 # Python キャッシュ
 __pycache__/

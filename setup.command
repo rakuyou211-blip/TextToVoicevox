@@ -17,10 +17,25 @@ chmod +x ./*.command ./*.sh 2>/dev/null
 #   - Apple の開発ツール付属の Python は Tk 8.5 で、画面が真っ白になる
 # なので「ある」だけでは選ばず、Tcl を実際に動かし、Tk 8.6 以上・Python 3.9 以上かを確かめる。
 # 起動.command も同じ確かめ方をする（ずれると、作った venv を起動側が弾いてしまう）。
+# 確かめ方の中身（setup.command・起動.command・install.sh でまったく同じ文にしておく。
+# ずれると、片方で作った venv をもう片方が弾く。tests/test_mac_setup.py が見張っている）。
+# venv の中の Python では、まず main.py の _fix_tcl_library と同じ手当てをする: 1行導入が
+# 入れる自分用 Python（python-build-standalone）から作った venv は、そのままだと Tcl が
+# 自分の部品（init.tcl）を venv の中に探しに行って見つけられず、本当は動くのに落ちる。
+T2V_TK_CHECK='import glob, os, sys
+if sys.platform == "darwin" and sys.prefix != sys.base_prefix:
+    for var, pat, marker in (("TCL_LIBRARY", "tcl8.*", "init.tcl"), ("TK_LIBRARY", "tk8.*", "tk.tcl")):
+        if not os.environ.get(var):
+            for d in sorted(glob.glob(os.path.join(sys.base_prefix, "lib", pat)), reverse=True):
+                if os.path.isfile(os.path.join(d, marker)):
+                    os.environ[var] = d
+                    break
+import tkinter
+tkinter.Tcl().eval("info patchlevel")
+sys.exit(0 if sys.version_info >= (3, 9) and tkinter.TkVersion >= 8.6 else 1)'
 py_ok() {
     [ -x "$1" ] || return 1
-    "$1" -c 'import sys, tkinter; tkinter.Tcl().eval("info patchlevel"); sys.exit(0 if sys.version_info >= (3, 9) and tkinter.TkVersion >= 8.6 else 1)' \
-        >/dev/null 2>&1
+    "$1" -c "$T2V_TK_CHECK" >/dev/null 2>&1
 }
 
 PY=""
@@ -63,9 +78,21 @@ fi
 
 echo "使用する Python: $PY"
 echo "仮想環境を作成しています..."
-# --clear: 前に作った venv_mac が残っていても（tkinter の無い Python で作った・
-# 別の Mac から持ってきた等）、中を空にして今の Python で作り直す
-"$PY" -m venv --clear venv_mac || {
+# venv_mac は今の Python で、空の所から作り直す（tkinter の無い Python で作った・
+# 別の Mac から持ってきた等の venv が残っていても、作り直しが効くように）。
+# ただし前の venv_mac は、新しいのが出来上がるまで venv_mac.old に退かしておき、
+# 部品のダウンロードに失敗したら（オフライン等）元に戻す。動いていた venv を消さないため
+rm -rf venv_mac.old
+[ -e venv_mac ] && mv venv_mac venv_mac.old
+restore_old_venv() {
+    rm -rf venv_mac
+    if [ -e venv_mac.old ]; then
+        mv venv_mac.old venv_mac
+        echo "  （前の venv_mac に戻しました）"
+    fi
+}
+"$PY" -m venv venv_mac || {
+    restore_old_venv
     echo "[エラー] venv の作成に失敗しました。"
     read -n 1 -s -r -p "何かキーを押すと閉じます..."
     exit 1
@@ -74,10 +101,12 @@ echo "仮想環境を作成しています..."
 echo "依存ライブラリをインストールしています（requirements.txt）..."
 ./venv_mac/bin/python -m pip install --upgrade pip
 ./venv_mac/bin/python -m pip install -r requirements.txt || {
+    restore_old_venv
     echo "[エラー] インストールに失敗しました。ネット接続を確認してください。"
     read -n 1 -s -r -p "何かキーを押すと閉じます..."
     exit 1
 }
+rm -rf venv_mac.old
 
 echo
 echo "セットアップ完了。「起動.command」で起動できます。"
