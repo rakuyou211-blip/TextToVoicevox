@@ -8,10 +8,25 @@ chmod +x ./*.command ./*.sh 2>/dev/null
 # venv_mac の Python で、画面表示の部品（tkinter / Tk 8.6 以上）が本当に動くか。
 # setup.command の py_ok と同じ確かめ方。ここを通らないまま main.py を起動すると、
 # 窓が出ないまま何も言わずに終わってしまう（Homebrew の tkinter 無し Python で作った等）
+# 確かめ方の中身（setup.command・起動.command・install.sh でまったく同じ文にしておく。
+# ずれると、片方で作った venv をもう片方が弾く。tests/test_mac_setup.py が見張っている）。
+# venv の中の Python では、まず main.py の _fix_tcl_library と同じ手当てをする: 1行導入が
+# 入れる自分用 Python（python-build-standalone）から作った venv は、そのままだと Tcl が
+# 自分の部品（init.tcl）を venv の中に探しに行って見つけられず、本当は動くのに落ちる。
+T2V_TK_CHECK='import glob, os, sys
+if sys.platform == "darwin" and sys.prefix != sys.base_prefix:
+    for var, pat, marker in (("TCL_LIBRARY", "tcl8.*", "init.tcl"), ("TK_LIBRARY", "tk8.*", "tk.tcl")):
+        if not os.environ.get(var):
+            for d in sorted(glob.glob(os.path.join(sys.base_prefix, "lib", pat)), reverse=True):
+                if os.path.isfile(os.path.join(d, marker)):
+                    os.environ[var] = d
+                    break
+import tkinter
+tkinter.Tcl().eval("info patchlevel")
+sys.exit(0 if sys.version_info >= (3, 9) and tkinter.TkVersion >= 8.6 else 1)'
 venv_ok() {
     [ -x venv_mac/bin/python ] || return 1
-    venv_mac/bin/python -c 'import sys, tkinter; tkinter.Tcl().eval("info patchlevel"); sys.exit(0 if sys.version_info >= (3, 9) and tkinter.TkVersion >= 8.6 else 1)' \
-        >/dev/null 2>&1
+    venv_mac/bin/python -c "$T2V_TK_CHECK" >/dev/null 2>&1
 }
 
 if [ ! -x venv_mac/bin/python ]; then
