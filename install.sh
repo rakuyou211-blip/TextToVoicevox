@@ -69,10 +69,25 @@ t2v_install() {
     # Apple の開発ツール付属の Python は Tk 8.5 で、画面が真っ白になるので弾く。
     # Homebrew の python3 は tkinter が別売り（python-tk）で、無いと import の時点で落ちる。
     # zip 版の setup.command・起動.command も同じ確かめ方をする
+    # 確かめ方の中身（setup.command・起動.command・install.sh でまったく同じ文にしておく。
+    # ずれると、片方で作った venv をもう片方が弾く。tests/test_mac_setup.py が見張っている）。
+    # venv の中の Python では、まず main.py の _fix_tcl_library と同じ手当てをする: 1行導入が
+    # 入れる自分用 Python（python-build-standalone）から作った venv は、そのままだと Tcl が
+    # 自分の部品（init.tcl）を venv の中に探しに行って見つけられず、本当は動くのに落ちる。
+    local T2V_TK_CHECK='import glob, os, sys
+if sys.platform == "darwin" and sys.prefix != sys.base_prefix:
+    for var, pat, marker in (("TCL_LIBRARY", "tcl8.*", "init.tcl"), ("TK_LIBRARY", "tk8.*", "tk.tcl")):
+        if not os.environ.get(var):
+            for d in sorted(glob.glob(os.path.join(sys.base_prefix, "lib", pat)), reverse=True):
+                if os.path.isfile(os.path.join(d, marker)):
+                    os.environ[var] = d
+                    break
+import tkinter
+tkinter.Tcl().eval("info patchlevel")
+sys.exit(0 if sys.version_info >= (3, 9) and tkinter.TkVersion >= 8.6 else 1)'
     py_ok() {
         [ -x "$1" ] || return 1
-        "$1" -c 'import sys, tkinter; tkinter.Tcl().eval("info patchlevel"); sys.exit(0 if sys.version_info >= (3, 9) and tkinter.TkVersion >= 8.6 else 1)' \
-            >/dev/null 2>&1
+        "$1" -c "$T2V_TK_CHECK" >/dev/null 2>&1
     }
     find_python() {
         local c
@@ -211,12 +226,20 @@ if mac:
     local VENV="$DEST/venv_mac"
     local VPY="$VENV/bin/python"
     if ! py_ok "$VPY"; then
-        # 無い・壊れている・別の Mac から持ってきた venv は作り直す
-        rm -rf "$VENV"
-        "$PY" -m venv "$VENV" || { fail '仮想環境（venv）の作成に失敗しました。'; return 1; }
+        # 無い・壊れている・別の Mac から持ってきた venv は作り直す。
+        # 前のものは新しいのが出来上がるまで退かしておき、失敗したら戻す
+        rm -rf "$VENV.old"
+        [ -e "$VENV" ] && mv "$VENV" "$VENV.old"
+        "$PY" -m venv "$VENV" || {
+            rm -rf "$VENV"; [ -e "$VENV.old" ] && mv "$VENV.old" "$VENV"
+            fail '仮想環境（venv）の作成に失敗しました。'; return 1
+        }
     fi
-    "$VPY" -m pip install --disable-pip-version-check --progress-bar on -r "$DEST/requirements.txt" \
-        || { fail '部品のインストールに失敗しました。'; return 1; }
+    "$VPY" -m pip install --disable-pip-version-check --progress-bar on -r "$DEST/requirements.txt" || {
+        if [ -e "$VENV.old" ]; then rm -rf "$VENV"; mv "$VENV.old" "$VENV"; fi
+        fail '部品のインストールに失敗しました。'; return 1
+    }
+    rm -rf "$VENV.old"
 
     # ---- 4. アプリ ----
     step '4/4 アプリ（TextToVoicevox.app）を作っています'
