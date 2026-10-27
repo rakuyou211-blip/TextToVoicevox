@@ -1118,3 +1118,25 @@ def test_screen_read_skips_photo_retries(app, monkeypatch):
     assert calls == []
     app._clipboard_worker(img, False, opts, source="clip")
     assert calls == ["テスト"]
+
+
+def test_reading_mode_toggle_and_escape(app):
+    """本文最大化（読書モード）: 切替で周囲のセクションが隠れ、本文と再生バーが残り、
+    もう一度押すか Esc で元の画面に戻る。"""
+    assert hasattr(app, "read_mode_btn")
+    assert app._reading_mode is False
+    app.toggle_reading_mode()
+    assert app._reading_mode is True
+    assert not app._files_sec.winfo_manager()
+    assert not app._opt_sec.winfo_manager()
+    assert not app._vv_sec.winfo_manager()
+    assert app._result_sec.winfo_manager()
+    assert app._player_ctl.winfo_manager()
+    assert "元の表示" in str(app.read_mode_btn["text"])
+    # 待機中の Esc で読書モードが解除される
+    app._kb_escape()
+    assert app._reading_mode is False
+    assert app._files_sec.winfo_manager()
+    assert app._opt_sec.winfo_manager()
+    assert app._vv_sec.winfo_manager()
+    assert "最大化" in str(app.read_mode_btn["text"])

@@ -355,6 +355,7 @@ class App(_Base):
         self._cleared_bookmark = None   # そのときのしおり（復元で一緒に戻す）
         self._suppress_modified = False  # <<Modified>>ハンドラの一時抑止（全消去/復元の自編集用）
         self._vdetail_open = False      # プリセット/セリフ行の開閉状態（§4の折りたたみ）
+        self._reading_mode = False      # 本文最大化（読書モード）の開閉状態
         self._resize_after = None       # <Configure>デバウンス用のafterハンドル
         self._reflow_after = None       # 行の並び直し（_reflow）の予約
         self._destroying = False        # 窓を壊している最中か（予約した処理を止める）
@@ -511,6 +512,7 @@ class App(_Base):
         hint = "（画像・PDF・フォルダを画面のどこにでもドラッグ＆ドロップ）" if _HAS_DND else ""
         top = ttk.LabelFrame(self._main, text="1. 📥 入力ファイル" + hint)
         top.pack(fill="x", padx=PAD_X, pady=(PAD_Y, PAD_Y // 2))
+        self._files_sec = top
 
         # ボタンは2つのかたまりを横に並べる（縦1列だと9段になり、本文欄（3.）を潰していた）
         #   左：ファイルの出し入れ（2列×3段）  右：画面・クリップボードから読む（縦に最大4段）
@@ -579,6 +581,7 @@ class App(_Base):
     def _build_options_section(self):
         opt = ttk.LabelFrame(self._main, text="2. ⚙️ 抽出オプション")
         opt.pack(fill="x", padx=PAD_X, pady=PAD_Y // 2)
+        self._opt_sec = opt
 
         # --- 基本（入出力）: 改行の扱い / PDF処理 / 解像度。ラベルを col0 で縦に揃える ---
         basic = ttk.Frame(opt)
@@ -841,6 +844,7 @@ class App(_Base):
         # （§3の本文）を優先して各クラスタは1〜2行に抑える。
         bottom = ttk.LabelFrame(self._main, text="4. 🔊 VOICEVOX へ")
         bottom.pack(side="bottom", fill="x", padx=PAD_X, pady=(PAD_Y // 2, PAD_Y))
+        self._vv_sec = bottom
 
         def _sep():
             ttk.Separator(bottom, orient="horizontal").pack(fill="x", padx=GAPX, pady=4)
@@ -1070,6 +1074,7 @@ class App(_Base):
     def _build_result_section(self):
         mid = ttk.LabelFrame(self._main, text="3. ✏️ 抽出結果（手動で修正できます）")
         mid.pack(fill="both", expand=True, padx=PAD_X, pady=PAD_Y // 2)
+        self._result_sec = mid
 
         # 一括置換バー（bar）。置換の道具（rep）と本文の情報（info: 行数・レポート・
         # 全消去）を窓の幅で並べ分ける（_reflow_result_bar）。入るなら1行、入らない
@@ -1191,6 +1196,10 @@ class App(_Base):
                 pass  # Command修飾子はmacOS以外に無い
         self.bind_all("<Escape>", self._kb_escape)
         self.bind_all("<space>", self._kb_space)
+        try:
+            self.bind_all("<F11>", lambda e: (self.toggle_reading_mode(), "break")[1])
+        except tk.TclError:
+            pass
         # Textクラスの既定バインド（Ctrl+O=行挿入・Ctrl+P=行移動・Ctrl/Cmd+Return=改行）は
         # bind_all（allタグ＝classより後）では抑止できないため、ウィジェット段で先取りして
         # "break"（各ハンドラの戻り値）で止める
@@ -1243,6 +1252,13 @@ class App(_Base):
         ctl = ttk.Frame(bar)
         ctl.pack(fill="x")
         self._player_ctl = ctl
+        # 本文最大化（読書モード）トグル：右端に先に確保し、最大化中も同じ場所で戻せる
+        self.read_mode_btn = ttk.Button(ctl, text="📖 最大化", width=10,
+                                        command=self.toggle_reading_mode)
+        self.read_mode_btn.pack(side="right", padx=(GAPX, 0))
+        _Tooltip(self.read_mode_btn,
+                 "周りの設定欄を隠して、本文と再生バーだけを大きく表示します（F11）。\n"
+                 "もう一度押すか Esc で元の画面に戻ります。")
         self.prev_btn = ttk.Button(ctl, text="⏮ 前の行",
                                    command=lambda: self._play_step(-1))
         self.prev_btn.pack(side="left")
@@ -1361,7 +1377,7 @@ class App(_Base):
         あるので、たいてい1秒もかからない）。"""
         def go():
             self.text.mark_set("insert", f"{lineno}.0")
-            self.text.see(f"{lineno}.0")
+            self._scroll_to_line(lineno)
             self.text.tag_remove("playing", "1.0", "end")
             self.text.tag_add("playing", f"{lineno}.0", f"{lineno}.end")
         go()
@@ -1468,12 +1484,17 @@ class App(_Base):
         return "break"
 
     def _kb_escape(self, event=None):
-        """Esc: 音声生成・抽出の実行中はキャンセル、それ以外は再生停止。"""
+        """Esc: 音声生成・抽出の実行中はキャンセル、再生中は停止、読書モード中は解除。"""
         if self._synth_cancel is not None and self.busy:
             self.cancel_synth()
             return "break"
         if self._extract_cancel is not None and self.busy:
             self.cancel_extract()
+            return "break"
+        if self._previewing:
+            return self._kb_invoke(self.stop_btn)
+        if self._reading_mode:
+            self._set_reading_mode(False)
             return "break"
         return self._kb_invoke(self.stop_btn)
 
@@ -1949,7 +1970,7 @@ class App(_Base):
 
     def _on_resize_toggle_side(self, event=None):
         """窓が狭いときは立ち絵パネルを自動で畳み、メインの横幅を確保する。"""
-        if self._side is None:
+        if self._side is None or self._reading_mode:
             return
         try:
             w = self.winfo_width()
@@ -2019,7 +2040,7 @@ class App(_Base):
         もう一度ためた処理を回すと落ちることがある）。測った幅が古くても、並べ終わって
         本文欄の <Configure> が来たら、もう一度ここが動いて正しい並びになる。"""
         self._reflow_after = None
-        if self._destroying:
+        if self._destroying or self._reading_mode:
             return
         try:
             self._reflow_run_row()
@@ -2146,6 +2167,76 @@ class App(_Base):
                       before=body)
             info.pack(in_=foot, side="top", fill="x", expand=True, padx=0)
         info.lift()
+
+    # ---------------- 本文最大化（読書モード）と追従スクロール ----------------
+    def toggle_reading_mode(self):
+        """本文最大化（読書モード）のオン/オフを切り替える。"""
+        self._set_reading_mode(not self._reading_mode)
+
+    def _set_reading_mode(self, show):
+        """周りの設定欄（1. 入力・2. オプション・4. VOICEVOX・一括置換バー）を隠して、
+        本文と下の再生バーだけを窓いっぱいに広げる。既存の Text と再生バーをそのまま
+        使うので、行ハイライト・追従スクロール・クリック位置からの再生・文字拡大縮小が
+        すべてそのまま動く。"""
+        want = bool(show)
+        if want == self._reading_mode:
+            return
+        self._reading_mode = want
+        bar, _rep, info, foot, body = self._rbar
+        if want:
+            if self._side is not None and self._side_shown:
+                self._side.pack_forget()
+                self._side_shown = False
+            for sec in (self._files_sec, self._opt_sec, self._vv_sec):
+                sec.pack_forget()
+            info.pack_forget()
+            bar.pack_forget()
+            foot.pack_forget()
+            self._result_sec.config(
+                text="3. 📖 本文（最大化表示中 ― Esc または「↩ 元の表示」で戻ります）")
+            self.read_mode_btn.config(text="↩ 元の表示")
+        else:
+            self._files_sec.pack(fill="x", padx=PAD_X, pady=(PAD_Y, PAD_Y // 2),
+                                 before=self._result_sec)
+            self._opt_sec.pack(fill="x", padx=PAD_X, pady=PAD_Y // 2,
+                               before=self._result_sec)
+            self._vv_sec.pack(side="bottom", fill="x", padx=PAD_X,
+                              pady=(PAD_Y // 2, PAD_Y), before=self._result_sec)
+            bar.pack(fill="x", padx=GAPX, pady=(GAPY, 0), before=body)
+            foot.pack(side="bottom", fill="x", padx=GAPX, pady=(0, GAPY),
+                      before=body)
+            info.pack(in_=foot, side="top", fill="x", expand=True, padx=0)
+            info.lift()
+            self._rbar_one = False
+            self._result_sec.config(text="3. ✏️ 抽出結果（手動で修正できます）")
+            self.read_mode_btn.config(text="📖 最大化")
+            self._on_resize_toggle_side()
+            self._schedule_reflow()
+        # 再生中（またはしおり/カーソル位置）の行を見失わないよう位置を合わせる
+        try:
+            cur = (self._bookmark if self._playall_pause is not None and self._bookmark
+                   else int(self.text.index("insert").split(".")[0]))
+            self._scroll_to_line(cur)
+        except tk.TclError:
+            pass
+
+    def _scroll_to_line(self, lineno):
+        """指定した行番号が見えるようにスクロールし、画面の高さが十分あれば
+        上から1/3付近（続きの文を目で先読みしやすい位置）に寄せる。"""
+        idx = f"{lineno}.0"
+        self.text.see(idx)
+        try:
+            h = self.text.winfo_height()
+            info = self.text.dlineinfo(idx)
+            if h > 80 and info is not None:
+                y, line_h = info[1], max(info[3], 1)
+                target_y = int(h * 0.35)
+                delta = int(round((y - target_y) / line_h))
+                if delta != 0:
+                    self.text.yview_scroll(delta, "units")
+                    self.text.see(idx)
+        except tk.TclError:
+            pass
 
     # ---------------- 合成パラメータ・行別話者ヘルパー ----------------
     def _format_choices(self):
@@ -6294,7 +6385,7 @@ class App(_Base):
             self.text.tag_remove("playing", "1.0", "end")
             self.text.tag_add("playing", f"{lineno}.0", f"{lineno}.end")
             self.text.mark_set("insert", f"{lineno}.0")
-            self.text.see(f"{lineno}.0")
+            self._scroll_to_line(lineno)
             self._set_position(lineno)
             self.status_var.set(f"連続再生中 {done+1}/{total}: {line[:30]}")
         elif kind == "playall_skip":
