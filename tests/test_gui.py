@@ -485,6 +485,47 @@ def test_unit_dependent_spinbox_state(app):
     assert str(app.gap_sb["state"]) == "normal"
 
 
+def test_player_gap_spinbox_syncs_and_waits(app):
+    """再生バーの「間」スピンボックスが§4の文間の無音(gap_var)と連動し、
+    「1行=1ファイル」選択中も再生バー側は常時使え、行間ウェイトに反映される。"""
+    import io
+    import struct
+    import threading
+    import wave
+    import core
+    assert hasattr(app, "player_gap_sb")
+    assert str(app.player_gap_sb.cget("textvariable")) == str(app.gap_var)
+    keys = list(app._UNITS.keys())
+    app.unit_cb.current(keys.index("each"))
+    app._on_unit_selected()
+    assert str(app.gap_sb["state"]) == "disabled"
+    assert str(app.player_gap_sb["state"]) != "disabled"
+    app.gap_var.set(0.7)
+    assert abs(app._play_gap - 0.7) < 1e-6
+    # 停止イベントが立っていれば即座に抜ける
+    stop = threading.Event()
+    pause = threading.Event()
+    stop.set()
+    app._wait_playall_gap(stop, pause)
+    app.gap_var.set(0.4)
+    # 再生用WAVパディング（末尾のDCオフセットをフェードアウトして無音を付加）
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        w.writeframes(struct.pack("<4h", -120, -120, -120, -120))
+    raw_wav = buf.getvalue()
+    padded = core._pad_wav_for_play(raw_wav, tail_sec=0.1)
+    assert abs(core.wav_duration(padded) - (4 / 24000.0 + 0.1)) < 1e-4
+    with wave.open(io.BytesIO(padded), "rb") as w:
+        samples = struct.unpack(f"<{w.getnframes()}h", w.readframes(w.getnframes()))
+    assert samples[:4] == (-120, -120, -120, -120)
+    assert -120 < samples[120] < 0  # フェードアウト中盤
+    assert samples[-1] == 0         # 末尾は完全な無音
+    assert core._pad_wav_for_play(b"not-a-wav") == b"not-a-wav"
+
+
 def test_kb_synth_guard_during_generation(app):
     """生成中の Ctrl/Cmd+G は誤キャンセルにならない（何もしない）。"""
     import threading

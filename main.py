@@ -370,6 +370,7 @@ class App(_Base):
         self._prefetch_target = None    # 先読み中の (本文, 話者, 声の数値)
         self._prefetch_done = None      # その先読みが終わったら立つ Event
         self._play_gen = 0              # 再生の世代番号（古い完了通知を捨てる）
+        self._play_gap = 0.4            # 連続再生の文間の無音（秒。gap_varと同期）
         self._engine_id = core.VV_ENGINE_ID  # 接続中エンジンの識別子（実物で上書き）
         self._playall_pause = None      # 連続再生の一時停止Event（再生中のみ非None）
         self._preview_stop = None       # 試聴・声サンプルの停止Event（再生中のみ非None）
@@ -1008,8 +1009,8 @@ class App(_Base):
                                   textvariable=self.gap_var)
         self.gap_sb.pack(side="left")
         _Tooltip(self.gap_sb,
-                 "複数の行を1ファイルにまとめるとき、行間に入れる無音の長さです\n"
-                 "（「1行=1ファイル」では使いません）。")
+                 "複数の行を1ファイルにまとめるときや連続再生のときに、\n"
+                 "行間に入れる無音の長さです（再生バーの「間」と連動します）。")
         self.srt_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(oa, text="字幕(.srt)も保存",
                         variable=self.srt_var).pack(side="left", padx=GAPX)
@@ -1286,6 +1287,18 @@ class App(_Base):
                  "読み上げの速さ（4. の話速と同じ値です）。\n"
                  "再生中に変えると、今の行の頭から新しい速さで読み直します。")
         self.speed_var.trace_add("write", self._on_speed_var)
+        # 文間の無音（秒）は 4. の gap_var と同じ値。連続再生でも行間の間合いとして使い、
+        # 再生中に変えても次の行間からすぐ反映される
+        ttk.Label(ctl, text="間").pack(side="left", padx=(GAPX, 2))
+        self.player_gap_sb = ttk.Spinbox(
+            ctl, from_=0.0, to=3.0, increment=0.1, width=4,
+            textvariable=self.gap_var)
+        self.player_gap_sb.pack(side="left")
+        ttk.Label(ctl, text="秒").pack(side="left", padx=(2, 0))
+        _Tooltip(self.player_gap_sb,
+                 "文と文のあいだに入れる無音の長さ（秒）です。\n"
+                 "4. の「文間の無音(秒)」と連動し、再生中にも変えられます。")
+        self.gap_var.trace_add("write", self._on_gap_var)
         # いま何行目か（読み上げる行のうち）と、その割合
         self._pos_var = tk.StringVar()
         ttk.Label(ctl, textvariable=self._pos_var).pack(side="right")
@@ -1406,6 +1419,29 @@ class App(_Base):
         self._ticks.pop("speed_restart", None)
         if self._playall_pause is not None and self._bookmark is not None:
             self._play_jump(self._bookmark)
+
+    def _on_gap_var(self, *_):
+        """文間の無音（秒）が変わったら、連続再生ワーカーが参照する秒数を更新する。"""
+        try:
+            v = float(self.gap_var.get())
+        except (tk.TclError, ValueError):
+            return   # 入力途中の空欄など
+        self._play_gap = max(0.0, min(10.0, v))
+
+    def _wait_playall_gap(self, stop, pause):
+        """連続再生の行間で、指定された無音秒数だけ待つ（停止・一時停止には即応）。"""
+        gap = max(0.0, float(getattr(self, "_play_gap", 0.4)))
+        if gap <= 0.0:
+            return
+        deadline = time.monotonic() + gap
+        while time.monotonic() < deadline:
+            if stop.is_set():
+                return
+            if pause.is_set():
+                while pause.is_set() and not stop.is_set():
+                    time.sleep(0.05)
+                return
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
     def _show_resume(self, line):
         """「前回の続き：◯行目「…」から ⏵ 続きを聴く」を再生バーの上に出す。"""
@@ -4514,6 +4550,7 @@ class App(_Base):
             return
         self._playall_stop = threading.Event()
         self._playall_pause = threading.Event()
+        self._play_gap = max(0.0, min(10.0, float(self._get_num(self.gap_var, 0.4))))
         self._previewing = True
         self._play_pos = {t[0]: i for i, t in enumerate(numbered)}
         self._hide_resume()
@@ -4677,6 +4714,8 @@ class App(_Base):
                     if stop.is_set():
                         break
                     played += 1
+                    if k + 1 < len(targets):
+                        self._wait_playall_gap(stop, pause)
             self.q.put(("playall_done", True, stop.is_set(), played,
                         skipped, gen))
         except Exception:

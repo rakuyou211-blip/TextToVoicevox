@@ -2717,6 +2717,59 @@ def _remove_play_tmp(path, tries=6):
         _PLAY_TMP_PENDING.append(path)
 
 
+# Windows の PlaySound は、WAVデータの末尾(EOF)に達した瞬間に WASAPI/waveOut の
+# ストリームを閉じるため、ハードウェア出力バッファ（約100〜200ms）に残っている語尾が
+# スピーカーから出切る前に断ち切られたり、VOICEVOX の末尾サンプルに残る微かな
+# DCオフセット（非ゼロ値）から急に0へ落ちて「ぷつっ」と鳴ることがある。
+# 再生時だけWAV末尾にフェードアウト＋無音フレームを足して、バッファが完全に吐き出されてから
+# ストリームが閉じるようにする（保存用WAVやキャッシュの中身は変えない）。
+_PLAY_TAIL_SILENCE_SEC = 0.25
+_WIN_PLAY_TAIL_PAD = 0.12
+
+
+def _pad_wav_for_play(wav_bytes, tail_sec=_PLAY_TAIL_SILENCE_SEC):
+    """再生用にWAV末尾へ短いフェードアウトと無音フレームを付加したバイト列を返す。
+    非圧縮PCMでない場合や壊れたデータの場合はそのまま返す。"""
+    if not wav_bytes or tail_sec <= 0:
+        return wav_bytes
+    try:
+        import struct
+        with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+            params = w.getparams()
+            if (params.comptype != "NONE" or params.framerate <= 0
+                    or params.nchannels <= 0 or params.sampwidth <= 0):
+                return wav_bytes
+            frames = w.readframes(params.nframes)
+        n_pad = int(params.framerate * tail_sec)
+        if n_pad <= 0:
+            return wav_bytes
+        fw = params.sampwidth * params.nchannels
+        if params.sampwidth == 2 and len(frames) >= fw:
+            n_ch = params.nchannels
+            last_samples = struct.unpack(f"<{n_ch}h", frames[-fw:])
+            if any(last_samples):
+                fade_n = min(n_pad, max(1, int(params.framerate * 0.01)))
+                fade_buf = []
+                for i in range(1, fade_n + 1):
+                    r = 1.0 - (i / float(fade_n))
+                    for s in last_samples:
+                        fade_buf.append(int(round(s * r)))
+                fade_bytes = struct.pack(f"<{len(fade_buf)}h", *fade_buf)
+                pad_bytes = fade_bytes + (b"\x00" * ((n_pad - fade_n) * fw))
+            else:
+                pad_bytes = b"\x00" * (n_pad * fw)
+        else:
+            pad_bytes = b"\x00" * (n_pad * fw)
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setparams(params)
+            w.writeframes(frames)
+            w.writeframes(pad_bytes)
+        return out.getvalue()
+    except Exception:
+        return wav_bytes
+
+
 def play_wav_blocking(wav_bytes, stop_event=None):
     """WAVバイト列を同期再生する（ワーカースレッドから呼ぶ想定）。
     stop_event (threading.Event) がセットされたら途中で再生を打ち切る。"""
@@ -2728,9 +2781,10 @@ def play_wav_blocking(wav_bytes, stop_event=None):
         return
     if IS_WIN:
         import winsound
+        play_bytes = _pad_wav_for_play(wav_bytes)
         if stop_event is None:
             # SND_MEMORY 同期再生（止める必要がないときはこれで足りる）
-            winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+            winsound.PlaySound(play_bytes, winsound.SND_MEMORY)
             return
         # 途中で止められるようにするには非同期再生が要るが、winsound は
         # 「メモリから非同期」を受け付けない（SND_MEMORY|SND_ASYNC は必ず
@@ -2743,13 +2797,14 @@ def play_wav_blocking(wav_bytes, stop_event=None):
         stopped = False
         try:
             with os.fdopen(fd, "wb") as f:
-                f.write(wav_bytes)
+                f.write(play_bytes)
             try:
-                dur = wav_duration(wav_bytes)
+                dur = wav_duration(play_bytes)
             except Exception:
                 dur = 0.0   # 長さが読めなくても再生自体は試す
             winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            deadline = time.monotonic() + dur
+            pad = _WIN_PLAY_TAIL_PAD if dur > 0 else 0.0
+            deadline = time.monotonic() + dur + pad
             while time.monotonic() < deadline:
                 if stop_event.is_set():
                     stopped = True
@@ -3075,6 +3130,11 @@ def vv_synthesize_with_kana(base_url, text, speaker_id, speed=1.0,
     reading = _format_kana(query.get("kana", ""))
     if speed and speed != 1.0:
         query["speedScale"] = float(speed)
+        if float(speed) > 1.0 and "postPhonemeLength" in query:
+            # 話速を上げるとエンジン側で postPhonemeLength（既定0.1秒）も 1/speed に
+            # 短縮されて語尾の余韻がボコーダ内で欠けるため、実時間の余白を維持する
+            query["postPhonemeLength"] = (
+                float(query["postPhonemeLength"]) * float(speed))
     if pitch:
         query["pitchScale"] = float(pitch)
     if intonation != 1.0:
