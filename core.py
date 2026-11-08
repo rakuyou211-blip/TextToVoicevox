@@ -8,9 +8,11 @@ import os
 import re
 import sys
 import json
+import math
 import time
 import uuid
 import wave
+import queue
 import shutil
 import zipfile
 import tempfile
@@ -24,10 +26,12 @@ from urllib.parse import unquote
 
 # アプリのバージョン（タイトルバー・CLI --version・不具合報告の目印に使う）。
 # リリースごとにここだけ更新する。
-APP_VERSION = "1.25.0"
+APP_VERSION = "1.26.0"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
+OCR_HELPER = os.path.join(APP_DIR, "ocr_helper.py")
+OCR_ENGINE_DIR = os.path.join(APP_DIR, "ocr_engine")   # 強い文字読み取り（Windows の初回セットアップで入る）
 
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
@@ -115,6 +119,11 @@ def remove_cjk_spaces(text: str, keep_ascii_spaces: bool = True) -> str:
 _SENT_ENDERS = "。．！？!?"
 
 
+# clean_text の途中で、行頭の字下げ（段落の始まり）を運ぶ見えない印（私用領域の1文字。
+# 空白ではないので strip で消えず、本文に出てくることも無い）
+_PARA_MARK = ""
+
+
 def join_wrapped_lines(text: str, max_len: int = 90) -> str:
     """
     視覚的な改行で途切れた文を連結する（小説・段落向け）。
@@ -133,8 +142,8 @@ def join_wrapped_lines(text: str, max_len: int = 90) -> str:
                 continue
             if buf == "":
                 buf = ln
-            elif buf[-1] in _SENT_ENDERS or len(buf) >= max_len:
-                # 文末記号で終わる、または既に長い → 連結せず改行
+            elif ln.startswith(_PARA_MARK) or buf[-1] in _SENT_ENDERS or len(buf) >= max_len:
+                # 字下げで始まる（新しい段落）・文末記号で終わる・既に長い → 連結せず改行
                 buf += "\n" + ln
             else:
                 # 連結：両端がASCIIなら空白、それ以外は詰める
@@ -277,6 +286,41 @@ def _group_ocr_blocks(items: list, h: float) -> list:
         else:
             blocks.append([line])
     return blocks
+
+
+# 行の箱の縦が横のこの倍以上で、2字以上あれば、縦書きの列とみなす
+_TATE_RATIO = 1.5
+
+
+def image_aspect(path) -> float:
+    """画像の 幅÷高さ。開けなければ 1.0（画像の先頭だけ読むので軽い）。"""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return im.width / im.height
+    except Exception:
+        return 1.0
+
+
+def tate_to_yoko(lines: list, aspect: float = 1.0) -> list:
+    """縦書きのページなら、列を「横書きの行」に見立てた座標に直して返す（横書きはそのまま）。
+    読み手は列を左から順に返すが、縦書きは右の列から読む。以前は順番を直さず、電子書籍の
+    縦書きをページの終わりから読み上げていた。座標を回せば、並べ替えも段組も折り返しの連結も
+    ラベルの除去も、横書きと同じ処理で済む（列の上端→左端、列の下端→右端、右の列ほど上）。
+    列の字が過半数のページだけを回す。aspect は画像の 幅÷高さ（座標は幅と高さで割ってあり、
+    そのままでは縦長か比べられない。横に細長い切り抜きの「OK」を列と見誤らないため）。"""
+    total = tall = 0
+    for l in lines:
+        n = sum(1 for c in str(l["text"]) if not c.isspace())
+        total += n
+        height = float(l["y1"]) - float(l["y0"])
+        width = (float(l["x1"]) - float(l["x0"])) * aspect
+        if n >= 2 and height >= _TATE_RATIO * width:
+            tall += n
+    if tall * 2 <= total:
+        return lines
+    return [dict(l, x0=float(l["y0"]), x1=float(l["y1"]),
+                 y0=1.0 - float(l["x1"]), y1=1.0 - float(l["x0"])) for l in lines]
 
 
 def reflow_ocr_lines(lines: list) -> str:
@@ -895,11 +939,18 @@ def clean_text(raw: str, mode: str = "sentence",
         text = text.replace("\n\n\n", "\n\n")
 
     # 文字間スペース除去。ただし章見出し行（第N章 タイトル）の区切り空白は保護する
-    # （消すと detect_chapters が効かず、M4Bのチャプターが典型的な見出しで作れない）
-    text = "\n".join(
-        ln if is_chapter_heading(ln)
-        else remove_cjk_spaces(ln, keep_ascii_spaces=keep_ascii_spaces).strip(" \t　")
-        for ln in text.split("\n"))
+    # （消すと detect_chapters が効かず、M4Bのチャプターが典型的な見出しで作れない）。
+    # 行頭の字下げ（全角スペース）は段落の始まりの印。空行を消しても段落の間を長めに
+    # 取れるよう（paragraph_ids）、下の連結・文分割を見えない印で通り抜け、最後に
+    # 全角スペース1つに戻す
+    def _tidy_line(ln):
+        if is_chapter_heading(ln):
+            return ln
+        body = remove_cjk_spaces(ln, keep_ascii_spaces=keep_ascii_spaces).strip(" \t　")
+        if body and ln.lstrip(" \t").startswith("　"):
+            return _PARA_MARK + body
+        return body
+    text = "\n".join(_tidy_line(ln) for ln in text.split("\n"))
 
     if mode == "sentence":
         if join_wrapped:
@@ -926,7 +977,7 @@ def clean_text(raw: str, mode: str = "sentence",
         lines = [ln for ln in text.split("\n") if ln.strip()]
         text = "\n".join(lines)
 
-    return text.strip()
+    return text.replace(_PARA_MARK, "　").strip()
 
 
 # ============================================================
@@ -1165,6 +1216,118 @@ def normalize_ascii(text: str) -> str:
     return text.translate(_Z2H)
 
 
+# ============================================================
+#  読み上げる直前に、読み方を直す（画面の本文は変えない）
+# ============================================================
+# VOICEVOX が読み違える書き方だけを、エンジンへ渡す直前に読める形へ直す。本文の文字は
+# そのまま。エンジンへ文を渡す関数（vv_audio_query・vv_reading・vv_synthesize_with_kana）
+# がここを通すので、連続再生・試し聴き・音声の保存・ふりがなが同じ読みになる
+# （ふりがなと音がずれない）。実際のエンジン（VOICEVOX 0.26.1）の読み:
+#   25℃→ニジュウゴドシイ  ㈱・①②③→読まない  10〜20人→ジュウ、ニジュウ
+#   2026/11/7→ニセンニジュウロク、ジュウイチ、ナナ  2026-11-07→ニイゼロニイロク、…
+#   10:30→ジュウ、サンジュウ  10時〜12時→ジュウジ、ジュウニジ  10-20人→イチゼロ、ニジュウニン
+#   100m→ヒャクエム  10g→ジュウジイ  -5℃→ゴド（マイナスが消える）  +3→タスサン
+#   ver.2→ヴァア、ニ  1st→イチショオトトン  いいねw→イイネダブリュウ
+# もともと正しく読める物（iPhone・YouTube・1,280円・50%・5km・3×4・文中の――）には触らない。
+# どちらとも取れる物は直さない（「1/3」「11/7」は分数か日付か分からない。曜日が付けば日付）。
+_RF_DATE = re.compile(
+    r"(?<![\d/.\-])((?:1[89]|2[01])\d\d)([/.\-])(0?[1-9]|1[0-2])\2"
+    r"(0?[1-9]|[12]\d|3[01])(?!\d|[/\-]|\.\d)")
+_RF_MD_WEEK = re.compile(
+    r"(?<![\d/.])(0?[1-9]|1[0-2])/(0?[1-9]|[12]\d|3[01])"
+    r"(?=\s*[(（][月火水木金土日](?:曜日?)?[)）])")
+_RF_TIME = re.compile(r"(?<![\d:.])([01]?\d|2\d):([0-5]\d)(?::([0-5]\d))?(?![\d:])")
+# 範囲の「〜」「-」のあとに来る、数の単位（10時〜12時・3-5日・10%〜20%）
+_RF_COUNTER = "時分秒日月年円人歳才個回件枚冊本台匹頭羽週度号階位点章話巻頁"
+_RF_RANGE_WAVE = re.compile(
+    rf"(?:(?<=[\d%])|(?<=\d[{_RF_COUNTER}]))\s*[〜~∼]\s*(?=\d)")
+# 「10-20人」。電話番号（03-1234-5678）・型番（ABC-10）・点数（3-1で）は直さない:
+# 左の数の前に数字・-・英字が無く、右の数のすぐあとに単位があるときだけ
+_RF_RANGE_HYPHEN = re.compile(
+    rf"(?<![\d\-‐−–A-Za-z.])(\d+)\s*[-‐−–]\s*(\d+)"
+    rf"(?=[{_RF_COUNTER}%]|ページ|(?:km|cm|mm|m|kg|mg|g|ml)(?![a-zA-Z]))")
+_RF_RANGE_HYPHEN2 = re.compile(rf"(?<=\d[{_RF_COUNTER}])\s*[-‐−–]\s*(?=\d)")
+# 「-5℃」「前年比-3%」のマイナス。引き算（10-5）と範囲は前に数字があるので除く
+_RF_MINUS = re.compile(r"(?<![0-9A-Za-z)\]])[-−‐](?=\d+(?:\.\d+)?\s*(?:度|%|°))")
+_RF_PLUS = re.compile(r"(?<![0-9A-Za-z)\]])\+(?=\d)")
+_RF_DEGREE = re.compile(r"(?<=\d)\s*°C?")
+_RF_M2 = re.compile(r"(?<=[\d万千])m²")
+_RF_M3 = re.compile(r"(?<=[\d万千])m³")
+_RF_METER = re.compile(r"(?<=[\d万千])m(?![a-zA-Z0-9²³/])")
+_RF_GRAM = re.compile(r"(?<=[\d万千])g(?![a-zA-Z0-9])")
+_RF_FIRST = re.compile(r"(?<![0-9A-Za-z])1st(?![A-Za-z])")
+_RF_VER = re.compile(r"(?<![A-Za-z])(?i:ver)\.?\s*(?=\d)")
+# 笑いの「w」（いいねw・草www）。日本語のすぐあとで、文の終わりか、2つ以上続くとき
+# だけ消す（「幅wと高さh」の w は残す）。URL（www.～）は日本語のあとに来ないので残る
+_RF_JP = "ぁ-ゖァ-ヺー一-鿿々〆！？!?。、」』）)…・"
+_RF_W_END = re.compile(rf"(?<=[{_RF_JP}])w+(?=$|[\s。、！？!?」』）)…・])", re.M)
+_RF_W_RUN = re.compile(rf"(?<=[{_RF_JP}])w{{2,}}(?![A-Za-z0-9.])")
+
+
+def _rf_time(m):
+    hour, minute, sec = int(m.group(1)), int(m.group(2)), m.group(3)
+    out = f"{hour}時"
+    if minute:
+        out += f"{minute}分"
+    if sec is not None and int(sec):
+        out += f"{int(sec)}秒"
+    return out
+
+
+def fix_readings(text: str) -> str:
+    """VOICEVOX が読み違える書き方を、読める形に直した文を返す（読み上げ用。上の説明）。
+    2回かけても同じ結果になる（直した後の文には、直す対象が残らない）。"""
+    text = normalize_ascii(text)
+    text = normalize_halfwidth_kana(text)
+    text = expand_readable_chars(text)
+    text = _THOUSANDS_RE.sub("", text)
+    text = _RF_DEGREE.sub("度", text)
+    text = _RF_DATE.sub(lambda m: f"{m.group(1)}年{int(m.group(3))}月{int(m.group(4))}日",
+                        text)
+    text = _RF_MD_WEEK.sub(lambda m: f"{int(m.group(1))}月{int(m.group(2))}日", text)
+    text = _RF_TIME.sub(_rf_time, text)
+    text = _RF_RANGE_HYPHEN.sub(r"\1から\2", text)
+    text = _RF_RANGE_HYPHEN2.sub("から", text)
+    text = _RF_RANGE_WAVE.sub("から", text)
+    text = _RF_MINUS.sub("マイナス", text)
+    text = _RF_PLUS.sub("プラス", text)
+    text = text.replace("±", "プラスマイナス")
+    text = _RF_M2.sub("平方メートル", text)
+    text = _RF_M3.sub("立方メートル", text)
+    text = _RF_METER.sub("メートル", text)
+    text = _RF_GRAM.sub("グラム", text)
+    text = _RF_FIRST.sub("ファースト", text)
+    text = _RF_VER.sub("バージョン", text)
+    text = _RF_W_RUN.sub("", text)
+    text = _RF_W_END.sub("", text)
+    return _NAKAGURO_RUN_RE.sub("…", text)
+
+
+# 読み方を直すか（読み方辞書の窓の「数字・日付・記号の読み方を直す」。既定はオン）。
+# 画面からは UI のスレッドで set_read_fix を呼ぶだけで、合成のスレッドは値を読むだけ
+_READ_FIX = True
+
+
+def set_read_fix(on):
+    global _READ_FIX
+    _READ_FIX = bool(on)
+
+
+def read_fix_on():
+    return _READ_FIX
+
+
+def speech_text(text, read_fix=None):
+    """エンジンへ渡す文。read_fix が None なら set_read_fix の設定に従う。
+    直した結果に読む字が残らないとき（まず無い）は、元の文をそのまま渡す。"""
+    if read_fix is None:
+        read_fix = _READ_FIX
+    if not read_fix or not text:
+        return text
+    fixed = fix_readings(text)
+    return fixed if fixed.strip() else text
+
+
 # ファイル名に使えない文字（Windowsの禁止文字。macは / のみだが持ち運びを考え共通で除く）
 _FILENAME_BAD = set('<>:"/\\|?*')
 
@@ -1208,6 +1371,19 @@ def fmt_duration(sec: float) -> str:
         return f"約{m}分{s:02d}秒"
     h, m = divmod(m, 60)
     return f"約{h}時間{m:02d}分"
+
+
+def fmt_left(sec: float) -> str:
+    """再生バーの「あと◯分」の長さ。行ごとに変わるので、細かい数字は出さない
+    （1分未満は10秒きざみ、1時間未満は分まで、10時間からは時間だけ）。"""
+    sec = max(0, int(round(sec)))
+    if sec < 55:
+        return f"約{max(10, (sec + 5) // 10 * 10)}秒"
+    m = (sec + 30) // 60
+    if m < 60:
+        return f"約{m}分"
+    h, m = divmod(m, 60)
+    return f"約{h}時間" if h >= 10 or not m else f"約{h}時間{m}分"
 
 
 def read_txt(path: str) -> str:
@@ -1528,16 +1704,23 @@ def _ocr_text_score(text: str):
 
 # 英語の読み取り（OCR）が入っていないPCで、英文の多い画像を読んだときの一言。
 # ファイルからの抽出とクリップボードOCRで同じ文面を使う
-# 英語の読み取り部品は、欲しい人だけが入れる（入れるとアプリが約240MB大きくなるため）。
 # 入っていないPCで英文の多い画像を読んだら、この2つの道を案内する
 OCR_ENGLISH_MISSING_MSG = (
     "英語の多い画像がありました。英語を読み取る部品が入っていないため、"
     "英文が崩れて読み取られています。次のどちらかで読めるようになります。\n\n"
     "・Windows の［設定］→［時刻と言語］→［言語と地域］で"
     "「英語（米国）」を追加する（アプリは大きくなりません）\n"
-    "・アプリのフォルダにある「英語OCRを入れる.pyw」を開く"
-    "（約88MBのダウンロード・アプリが約240MB大きくなります。"
-    "64bit の Windows・Python 3.12 まで）")
+    "・① の「設定 ▷」にある「読み取りを強くする」から部品を入れる"
+    "（約122MBのダウンロード。日本語も、ずっと正しく読めるようになります）")
+
+# 強い文字読み取りを入れるときの重さ（案内の窓と黒い窓で同じ言葉を使う）
+OCR_ENGINE_SIZE_NOTE = ("約122MBのダウンロードで（python.orgとPyPIから）、"
+                        "アプリが約100MB大きくなります。")
+
+# 強い文字読み取りが動かなかったときの一言（そのときは Windows の読み取りで読み直す）
+OCR_STRONG_FAILED_MSG = (
+    "強い文字読み取りが動かなかったので、今回は Windows の読み取りで読みました。"
+    "直らないときは、「読み取りを強くする」からもう一度入れてください。")
 
 
 def ocr_looks_english(text: str) -> bool:
@@ -1584,7 +1767,8 @@ def _english_ocr_better(ja_text: str, en_text: str) -> bool:
 
 import threading as _threading
 
-# 同梱の英語OCR（RapidOCR）。読み込みは重い（インストール直後の初回はウイルス
+# 英語OCR（RapidOCR。以前の版の「英語OCRを入れる.pyw」で入れた人だけが持っている。
+# 今は強い文字読み取りを勧める）。読み込みは重い（インストール直後の初回はウイルス
 # 検査で15秒かかった。2回目以降は0.2秒）ので、英文の多い画像が来たときに
 # 初めて読み込み、以後は使い回す
 _RAPIDOCR = {"engine": None}
@@ -1597,7 +1781,6 @@ def rapidocr_available() -> bool:
     try:
         import importlib
         import importlib.util
-        # アプリを開いたまま「英語OCRを入れる.pyw」で入れた場合にも気づけるように、
         # インポートの探し先の覚えを捨ててから探す（呼ばれるのは英文の画像のときだけ）
         importlib.invalidate_caches()
         return importlib.util.find_spec("rapidocr_onnxruntime") is not None
@@ -1757,12 +1940,365 @@ def ocr_retry_if_poor(text, img, tmpdir, lang="ja", strip_labels=True):
     return best
 
 
+# ============================================================
+#  強い文字読み取り（PP-OCRv6。Windows）
+# ============================================================
+# 初回セットアップ（winsetup.py）が ocr_engine/ に部品を入れる。入らなかったPCは、
+# これまでの Windows の読み取りで読む。
+# アプリの Python とは別の Python で ocr_helper.py を動かし、1枚ずつ読んでもらう
+# （アプリの Python が新しすぎると、読み取りの部品が入らないため）。
+# 字の正解率の実測（2026-11-05。Windows の読み取り → これ）:
+#   試験の画像258枚 0.887 → 0.997 / 写真の上の白い字 0.58〜0.78 → 0.99 /
+#   ゲームの文字窓 0.88〜0.93 → 0.99 / 白地の本のページ 0.97〜0.99 → 0.99〜1.00 /
+#   英語（日本語だけの Windows）0.94〜0.97 → 1.00 / 縦書き 0.965 → 0.977（_merge_tate_reading）
+class StrongOcrFailed(Exception):
+    """強い文字読み取りが動かない（部品が消された・検査ソフトに止められた等）。"""
+
+
+def _strong_python():
+    return os.path.join(OCR_ENGINE_DIR, "python", "python.exe")
+
+
+def _strong_mark():
+    # 入れ終わって、試しに読めたときだけ winsetup.py が置く印
+    return os.path.join(OCR_ENGINE_DIR, "ok.txt")
+
+
+_STRONG_BROKEN = {"mark_time": None}   # 動かなかったときの印の時刻（入れ直すと変わる）
+
+
+def strong_ocr_available() -> bool:
+    """強い文字読み取りが使えるか。軽いので読むたびに調べる（アプリを開いたまま入れても、
+    次に読むときから使える）。動かなかった部品は、入れ直すまで使わない。"""
+    if not IS_WIN:
+        return False
+    try:
+        stamp = os.path.getmtime(_strong_mark())
+    except OSError:
+        return False
+    return (stamp != _STRONG_BROKEN["mark_time"]
+            and os.path.isfile(_strong_python()) and os.path.isfile(OCR_HELPER))
+
+
+def _note_strong_broken():
+    try:
+        _STRONG_BROKEN["mark_time"] = os.path.getmtime(_strong_mark())
+    except OSError:
+        pass
+
+
+def prepare_for_ocr(img, enable=True):
+    """読み取りに渡す前の下ごしらえ（preprocess_image）を、読み手に合わせてする。
+    強い読み取りはカラーのまま読むほうが正しい（実測 258枚 0.997 / 灰色にすると 0.995。
+    写真の上の字ほど差が出る）。大きさの上限も Windows の読み取りに合わせなくてよい。"""
+    if strong_ocr_available():
+        return preprocess_image(img, enable=False, max_side=4000)
+    return preprocess_image(img, enable=enable)
+
+
+class _StrongOcrHelper:
+    """裏方（ocr_helper.py）を1つだけ動かして、1枚ずつ頼む。どのスレッドから呼んでもよい。
+    アプリが閉じれば標準入力が切れるので、裏方も終わる（残らない）。"""
+    START_TIMEOUT = 240   # 入れた直後の初回はウイルス検査で長くかかることがある
+    READ_TIMEOUT = 300    # 固まった裏方を、アプリがいつまでも待たないように
+
+    def __init__(self):
+        self._lock = _threading.Lock()
+        self._proc = None
+        self._replies = None
+
+    def _command(self):
+        return [_strong_python(), OCR_HELPER]
+
+    def _stop(self):
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            proc.kill()
+            proc.stdin.close()
+            proc.wait(5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    def _next_reply(self, timeout):
+        try:
+            line = self._replies.get(timeout=timeout)
+        except queue.Empty:
+            self._stop()
+            raise StrongOcrFailed("応答がありません")
+        if line is None:
+            raise EOFError   # 裏方が終わった
+        return json.loads(line.decode("ascii"))
+
+    def _ensure_running(self):
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        self._stop()
+        try:
+            # 少し低い優先度で動かす（遊んでいるゲームや、読み上げの音を邪魔しないように）
+            proc = subprocess.Popen(
+                self._command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, cwd=APP_DIR,
+                creationflags=(CREATE_NO_WINDOW
+                               | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)))
+        except OSError as e:
+            raise StrongOcrFailed(str(e))
+        replies = queue.Queue()
+
+        def pump():
+            for line in proc.stdout:
+                replies.put(line)
+            replies.put(None)
+        _threading.Thread(target=pump, daemon=True).start()
+        self._proc, self._replies = proc, replies
+        try:
+            first = self._next_reply(self.START_TIMEOUT)
+        except (EOFError, ValueError):
+            self._stop()
+            raise StrongOcrFailed("起動できませんでした")
+        if not first.get("ready"):
+            self._stop()
+            raise StrongOcrFailed(str(first.get("fatal", "起動できませんでした")))
+
+    def wake(self):
+        with self._lock:
+            self._ensure_running()
+
+    def read(self, path):
+        """1枚読んでもらい、返事（ocr_helper.py の先頭を参照）を返す。"""
+        with self._lock:
+            for last_try in (False, True):
+                self._ensure_running()
+                try:
+                    self._proc.stdin.write(json.dumps({"path": path}).encode("ascii") + b"\n")
+                    self._proc.stdin.flush()
+                    return self._next_reply(self.READ_TIMEOUT)
+                except (OSError, EOFError, ValueError):
+                    # 裏方がちょうど休みに入った（または落ちた）。起こし直して、もう一度だけ頼む
+                    self._stop()
+                    if last_try:
+                        raise StrongOcrFailed("途中で止まりました")
+
+
+_STRONG_HELPER = _StrongOcrHelper()
+
+
+def strong_ocr_shutdown():
+    """裏方を止める（アプリを閉じるとき）。アプリが終われば裏方も終わるが、閉じたあとで
+    アプリのプロセスが少し残っても、裏方（約140MB）を待たせたままにしないように。"""
+    try:
+        with _STRONG_HELPER._lock:
+            _STRONG_HELPER._stop()
+    except Exception:
+        pass
+
+
+def strong_ocr_prewarm():
+    """裏方を先に起こしておく（読み込みに1秒ほどかかるので、範囲を選んでいるあいだに）。
+    待たない。失敗しても何もしない（読むときに改めて試して、だめなら知らせる）。"""
+    if not strong_ocr_available():
+        return
+
+    def wake():
+        try:
+            _STRONG_HELPER.wake()
+        except Exception:
+            pass
+    _threading.Thread(target=wake, daemon=True).start()
+
+
+def _strong_ocr_boxes(items):
+    """裏方の返事を、文字の箱の並びに直す（座標はピクセル）。"""
+    boxes = []
+    for item in items:
+        try:
+            pts, text = item[0], str(item[1]).strip()
+            xs = [float(p[0]) for p in pts]
+            ys = [float(p[1]) for p in pts]
+            # 字の太さは箱の短い辺で測る（傾いたページでは、外接矩形が行より太るため）
+            thick = min(math.hypot(xs[1] - xs[0], ys[1] - ys[0]),
+                        math.hypot(xs[3] - xs[0], ys[3] - ys[0]))
+        except (IndexError, TypeError, ValueError):
+            continue
+        if text:
+            boxes.append({"text": text, "x0": min(xs), "x1": max(xs),
+                          "y0": min(ys), "y1": max(ys), "thick": max(thick, 1.0)})
+    return boxes
+
+
+def _is_tate_box(b):
+    return (len(b["text"]) >= 2
+            and b["y1"] - b["y0"] >= _TATE_RATIO * (b["x1"] - b["x0"]))
+
+
+_TATE_SMALL = str.maketrans("つやゆよあいうえおツヤユヨアイウエオ",
+                            "っゃゅょぁぃぅぇぉッャュョァィゥェォ")
+_TATE_FILL = set("っゃゅょぁぃぅぇぉッャュョァィゥェォ、。ー「」『』（）()…！？!?")
+_TATE_CHOON = re.compile(r"(?<=[ァ-ヺー])一(?![一-鿿々])")
+
+
+def _merge_tate_reading(base: str, other: str) -> str:
+    """縦書きの1列を、PP-OCRv6 の読み（base）を土台に、Windows の読み（other）で補う。
+    PP-OCRv6 は漢字に強いが、列を回して読むので小さいかな・句読点・長音を落とす
+    （あった→あた）。Windows は縦書きの小さい字に強いが、漢字を読み違える。そこで
+    base に無い字のうち、落としやすい種類の字だけを足す。実測（本物の縦書き10ページ）:
+        字の正解率 / 小さいかな / 句読点
+        PP-OCRv6 0.908 / 0.47 / 0.13    Windows 0.965 / 0.96 / 0.95    合わせる 0.977 / 0.98 / 0.93
+    PP-OCRv6 が落とすのは小さい字だけなので、Windows が「しよう」と大きく読んでいても、
+    足すのは「ょ」にする（Windows は「よ」と「ょ」を読み分けるのが苦手）。"""
+    import difflib
+    other = "".join(other.split())
+    out = []
+    matcher = difflib.SequenceMatcher(None, base, other, autojunk=False)
+    for op, a0, a1, b0, b1 in matcher.get_opcodes():
+        if op == "insert":
+            out.append("".join(c for c in other[b0:b1].translate(_TATE_SMALL)
+                               if c in _TATE_FILL))
+        elif op == "replace" and base[a0:a1] == "一" and other[b0:b1] == "ー":
+            out.append("ー")
+        else:
+            out.append(base[a0:a1])
+    return "".join(out)
+
+
+def _tidy_tate(text: str) -> str:
+    """縦書きの列でだけ起きる読み違いを直す（回して読むので、「。」が「°」、長音が「一」に
+    なる）。カタカナのあとの「一」は、後ろが漢字でなければ長音（スーと / ページ一覧）。"""
+    return _TATE_CHOON.sub("ー", text.replace("°", "。"))
+
+
+def _windows_lines(path):
+    """Windows の読み取りで画像を読み、行の並びを返す。失敗したら空。"""
+    tmpdir = tempfile.mkdtemp(prefix="t2v_tate_")
+    try:
+        from PIL import Image
+        png = os.path.join(tmpdir, "page.png")
+        with Image.open(path) as im:
+            preprocess_image(im, enable=True).save(png, compress_level=1)
+        data = _windows_ocr_json([png])
+        item = data[0] if isinstance(data, list) else data
+        lines = item.get("lines") or []
+        if isinstance(lines, dict):
+            lines = [lines]   # PS5.1のConvertTo-Jsonは1要素配列をオブジェクトに畳む
+        return [{"text": str(l["text"]), "x0": float(l["x0"]), "x1": float(l["x1"]),
+                 "y0": float(l["y0"]), "y1": float(l["y1"])} for l in lines]
+    except Exception:
+        return []
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _fill_tate_columns(boxes, path, width, height):
+    """縦書きの列があれば、抜けやすい字を Windows の読みで補う（無ければ何もしない）。"""
+    tall = [b for b in boxes if _is_tate_box(b)]
+    if not tall:
+        return boxes
+    columns = [l for l in _windows_lines(path)
+               if (l["y1"] - l["y0"]) * height > (l["x1"] - l["x0"]) * width]
+    for b in tall:
+        x0, x1, y0, y1 = b["x0"] / width, b["x1"] / width, b["y0"] / height, b["y1"] / height
+        near = [l for l in columns
+                if min(x1, l["x1"]) - max(x0, l["x0"]) > 0.4 * min(x1 - x0, l["x1"] - l["x0"])
+                and min(y1, l["y1"]) > max(y0, l["y0"])]
+        near.sort(key=lambda l: l["y0"])
+        b["text"] = _tidy_tate(_merge_tate_reading(b["text"], "".join(l["text"] for l in near)))
+    return boxes
+
+
+def _strong_ocr_lines(boxes, width, height):
+    """文字の箱を、アプリ共通の行の形（text と 正規化した x0/x1/y0/y1）に直す。
+    横に並ぶ断片のうち、近いものだけを1行につなぐ。離れていれば別の行のまま（2段組の
+    左右や、表の欄をつないでしまうと、読み順が壊れて段組の判定にもかからない）。
+    高さは字の太さから作る（傾いた写真でも行が太らず、行間の判定が狂わない）。"""
+    total = sum(len(b["text"]) for b in boxes)
+    tall = sum(len(b["text"]) for b in boxes if _is_tate_box(b))
+    if tall * 2 > total:
+        # 縦書きのページ。座標を回して横書きと同じに扱う（tate_to_yoko と同じ考え方）
+        boxes = [dict(b, x0=b["y0"], x1=b["y1"], y0=width - b["x1"], y1=width - b["x0"])
+                 for b in boxes]
+        width, height = height, width
+    rows = []
+    for b in sorted(boxes, key=lambda b: b["x0"]):
+        center = (b["y0"] + b["y1"]) / 2
+        best, best_off = None, None
+        for parts in rows:
+            last = parts[-1]
+            t = max(b["thick"], last["thick"])
+            off = abs(center - (last["y0"] + last["y1"]) / 2)
+            if (off <= 0.5 * t and -0.5 * t <= b["x0"] - last["x1"] <= 1.5 * t
+                    and (best is None or off < best_off)):
+                best, best_off = parts, off
+        if best is None:
+            rows.append([b])
+        else:
+            best.append(b)
+    lines = []
+    for parts in rows:
+        text = parts[0]["text"]
+        for prev, cur in zip(parts, parts[1:]):
+            spaced = (cur["x0"] - prev["x1"] > cur["thick"]
+                      or (text[-1].isascii() and cur["text"][0].isascii()))
+            text += (" " if spaced else "") + cur["text"]
+        center = sum((p["y0"] + p["y1"]) / 2 for p in parts) / len(parts)
+        half = sum(p["thick"] for p in parts) / len(parts) / 2
+        lines.append({"text": text, "x0": parts[0]["x0"] / width,
+                      "x1": max(p["x1"] for p in parts) / width,
+                      "y0": (center - half) / height, "y1": (center + half) / height})
+    lines.sort(key=lambda l: l["y0"] + l["y1"])
+    # 同じ高さに並ぶ行は上下をそろえる（reflow_ocr_lines は上端→左端の順に並べるので、
+    # わずかな傾きで右の塊が先に来ないように）
+    for prev, cur in zip(lines, lines[1:]):
+        if abs(cur["y0"] + cur["y1"] - prev["y0"] - prev["y1"]) / 2 <= 0.25 * (prev["y1"] - prev["y0"]):
+            cur["y0"], cur["y1"] = prev["y0"], prev["y1"]
+    lines.sort(key=lambda l: (l["y0"], l["x0"]))
+    return lines
+
+
+def _strong_ocr_text(reply, path, strip_labels):
+    width, height = max(int(reply["width"]), 1), max(int(reply["height"]), 1)
+    boxes = _strong_ocr_boxes(reply["items"])
+    if not reply.get("turned"):   # 回して読んだ画像は、Windows の読みと座標が合わない
+        boxes = _fill_tate_columns(boxes, path, width, height)
+    lines = _strong_ocr_lines(boxes, width, height)
+    if strip_labels and lines:
+        lines = strip_overlay_labels(lines)
+    return reflow_ocr_lines(lines) if lines else ""
+
+
+def run_strong_ocr(image_paths, strip_labels=True, errors=None, progress_cb=None,
+                   cancel_event=None, done=None):
+    """強い文字読み取りで画像を読み、{path: text} を返す。日本語も英語も一緒に読む。
+    1枚の失敗は他を止めない（errors に理由を足す）。裏方そのものが動かなくなったら
+    StrongOcrFailed を投げる（そこまでに読めた分は done に残っている）。"""
+    done = {} if done is None else done
+    total = len(image_paths)
+    for i, path in enumerate(image_paths):
+        if cancel_event is not None and cancel_event.is_set():
+            return done
+        if progress_cb:
+            progress_cb(i, total)
+        reply = _STRONG_HELPER.read(path)
+        try:
+            if not reply.get("ok"):
+                raise ValueError(reply.get("error", "読めませんでした"))
+            done[path] = _strong_ocr_text(reply, path, strip_labels)
+        except Exception as e:
+            done[path] = ""
+            if errors is not None:
+                errors.append(f"{os.path.basename(path)}: {e}")
+    if progress_cb:
+        progress_cb(total, total)
+    return done
+
+
 def run_ocr(image_paths, lang="ja", strip_labels=True, errors=None,
             progress_cb=None, cancel_event=None, notices=None):
     """
-    画像パスのリストをOS標準のオフラインOCRに渡し、{path: text} を返す。
-    Windows: Windows.Media.Ocr（PowerShellヘルパー） / macOS: Apple Vision（pyobjc）
-    どちらも行の外接矩形を使った折り返し連結(reflow_ocr_lines)を適用し、
+    画像パスのリストをオフラインOCRに渡し、{path: text} を返す。
+    Windows: 強い文字読み取りが入っていればそれ（run_strong_ocr）、無ければ
+    Windows.Media.Ocr（PowerShellヘルパー） / macOS: Apple Vision（pyobjc）
+    どれも行の外接矩形を使った折り返し連結(reflow_ocr_lines)を適用し、
     strip_labels=True のときは“映像内オーバーレイ・ラベル行”（局ロゴ・番組名・
     日時・カテゴリ）を座標で除去する。denoise と同じON/OFFで効かせる想定。
     errors: list を渡すと、一部ファイルのOCR失敗理由（"ファイル名: 理由"）を
@@ -1773,11 +2309,24 @@ def run_ocr(image_paths, lang="ja", strip_labels=True, errors=None,
     if not image_paths:
         return {}
     if IS_WIN:
+        done = {}
+        if strong_ocr_available():
+            try:
+                return run_strong_ocr(image_paths, strip_labels=strip_labels, errors=errors,
+                                      progress_cb=progress_cb, cancel_event=cancel_event,
+                                      done=done)
+            except StrongOcrFailed:
+                # 読めた分は活かし、残りをこれまでの読み取りで読む。入れ直すまで試さない
+                _note_strong_broken()
+                if notices is not None:
+                    notices.append("strong_ocr_failed")
+                image_paths = [p for p in image_paths if p not in done]
         # notices: 「英語のOCRが入っていない」などの知らせを受け取るリスト。
         # macOS の Vision は日本語と英語を一緒に読むので、この問題は起きない
-        return run_windows_ocr(image_paths, lang=lang, strip_labels=strip_labels,
-                               errors=errors, progress_cb=progress_cb,
-                               cancel_event=cancel_event, notices=notices)
+        done.update(run_windows_ocr(image_paths, lang=lang, strip_labels=strip_labels,
+                                    errors=errors, progress_cb=progress_cb,
+                                    cancel_event=cancel_event, notices=notices))
+        return done
     if IS_MAC:
         if APP_DIR not in sys.path:
             sys.path.insert(0, APP_DIR)  # 他ディレクトリからのimportでも ocr_mac を見つける
@@ -1786,7 +2335,7 @@ def run_ocr(image_paths, lang="ja", strip_labels=True, errors=None,
                                        strip_labels=strip_labels, errors=errors,
                                        progress_cb=progress_cb,
                                        cancel_event=cancel_event)
-    raise RuntimeError("この環境ではオフラインOCRを利用できません（Windows / macOS のみ対応）。")
+    raise RuntimeError("このパソコンでは、画像から文字を読む機能を使えません（Windows と Mac だけです）。")
 
 
 def _parse_windows_ocr_result(data, strip_labels=True, errors=None, meta=None):
@@ -1831,6 +2380,7 @@ def _parse_windows_ocr_result(data, strip_labels=True, errors=None, meta=None):
                     break
             if valid:
                 try:
+                    valid = tate_to_yoko(valid, image_aspect(path))
                     if strip_labels:
                         valid = strip_overlay_labels(valid)
                     text = reflow_ocr_lines(valid) if valid else ""
@@ -1953,6 +2503,12 @@ def _english_second_pass(result, meta, strip_labels, notices, cancel_event,
 def _run_windows_ocr_chunk(image_paths, lang="ja", strip_labels=True,
                            errors=None, meta=None):
     """PowerShellヘルパーを1回起動して image_paths を処理する（チャンク実体）。"""
+    return _parse_windows_ocr_result(_windows_ocr_json(image_paths, lang=lang),
+                                     strip_labels=strip_labels, errors=errors, meta=meta)
+
+
+def _windows_ocr_json(image_paths, lang="ja"):
+    """PowerShellヘルパーを1回起動して、その出力JSONを返す。"""
     tmpdir = tempfile.mkdtemp(prefix="t2v_ocr_")
     try:
         manifest = os.path.join(tmpdir, "manifest.txt")
@@ -1974,10 +2530,10 @@ def _run_windows_ocr_chunk(image_paths, lang="ja", strip_labels=True,
                                   creationflags=CREATE_NO_WINDOW)
         except subprocess.TimeoutExpired:
             raise RuntimeError(
-                f"OCRが応答しませんでした（{len(image_paths)}枚待機）。"
+                f"画像の読み取りが返事をしませんでした（{len(image_paths)}枚待ちました）。"
                 "枚数を減らすか、PCを再起動してお試しください。")
         if not os.path.exists(out_json):
-            raise RuntimeError("OCR失敗: " + (proc.stderr or proc.stdout or "出力なし"))
+            raise RuntimeError("読み取りに失敗: " + (proc.stderr or proc.stdout or "出力なし"))
 
         # utf-8-sig: PS5.1のOut-File -Encoding utf8はBOM付きで書くことがある
         # （fatal経路）。BOMなしも読めるため常にこちらで開く。
@@ -1985,8 +2541,7 @@ def _run_windows_ocr_chunk(image_paths, lang="ja", strip_labels=True,
             data = json.load(f)
         if isinstance(data, dict) and "fatal" in data:
             raise RuntimeError(data["fatal"])
-        return _parse_windows_ocr_result(data, strip_labels=strip_labels,
-                                         errors=errors, meta=meta)
+        return data
     finally:
         # OCRが済めばmanifest.txt/result.json（＝抽出全文）は不要。%TEMP%に残さない。
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -2091,10 +2646,93 @@ def apply_ocr_corrections(text, fix_confusables=False, denoise=False):
     return text, conf_pairs, removed
 
 
+# ============================================================
+#  PDF の柱（毎ページの上や下に出る、本や章の名前）とページ番号
+# ============================================================
+# PDF の本は、ページの上か下に、本の名前や章の名前（柱）とページ番号が入っている。
+# そのまま読むと、ページが変わるたびに「吾輩は猫である」と読み上げる。柱が
+# 「第一章　猫の一日」なら章の見出しと見なされ、毎ページの前に長い間が入り、
+# M4B の章もページごとにできていた。そこで、多くのページの最初か最後の数行に同じ形で
+# 出てくる短い行を柱として外す（ページ番号の数字は違ってよい）。章の見出しの形
+# （第一章 など）の柱は、最初の1回（章の始まりの見出し）を残す。1ページ目（扉）のものも
+# 残す。それ以外（2ページ目から出る本の名前など）は全部外す。ページ番号だけの行も外す。
+_HEAD_ZONE = 2           # ページの最初と最後の、この行数だけを見る
+_HEAD_MIN_PAGES = 3      # これだけのページに出てきたら柱
+_HEAD_MAX_CHARS = 40     # 柱は短い
+_HEAD_MIN_DOC_PAGES = 4  # これより少ないページの PDF には何もしない
+_HEAD_SENTENCE_END = tuple("。．！？!?」』…、.")
+_PAGE_NUM_DECOR = re.compile(r"[\s\-–—―‐・·.()（）\[\]［］/／|｜pP頁ページ第]")
+
+
+def _is_page_number(line):
+    """ページ番号だけの行か（12・- 12 -・p.12・12/300・xii など）。"""
+    s = _PAGE_NUM_DECOR.sub("", unicodedata.normalize("NFKC", line))
+    if not s:
+        return False
+    # ローマ数字は i〜xxxix の正しい形だけ（civil のような英単語を数字と見ない）
+    return s.isdigit() or bool(re.fullmatch(r"(?i)(?=[ivx])x{0,3}(ix|iv|v?i{0,3})", s))
+
+
+def _head_key(line):
+    """柱の見分け用。空白を詰め、数字（ページ番号）はどれも同じに扱う。"""
+    s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", line))
+    return re.sub(r"\d+", "#", s)
+
+
+def _head_candidate(line):
+    """柱になりうる行か（短く、文の終わりの形でない。「はい。」や「」で終わるセリフは違う）。"""
+    s = line.strip()
+    return 0 < len(s) <= _HEAD_MAX_CHARS and not s.endswith(_HEAD_SENTENCE_END)
+
+
+def strip_running_heads(pages):
+    """1冊の PDF のページの文（ページ順）から、柱とページ番号を外す。
+    戻り値: (外したあとのページの文のリスト, 外した行のリスト)"""
+    if len(pages) < _HEAD_MIN_DOC_PAGES:
+        return list(pages), []
+    split = [str(p).split("\n") for p in pages]
+    zones = []
+    counts = {}
+    for lines in split:
+        filled = [i for i, ln in enumerate(lines) if ln.strip()]
+        zone = set(filled[:_HEAD_ZONE] + filled[-_HEAD_ZONE:])
+        zones.append(zone)
+        seen = set()
+        for i in zone:
+            ln = lines[i].strip()
+            if _is_page_number(ln) or not _head_candidate(ln):
+                continue
+            key = _head_key(ln)
+            if key not in seen:
+                seen.add(key)
+                counts[key] = counts.get(key, 0) + 1
+    heads = {k for k, n in counts.items() if n >= _HEAD_MIN_PAGES}
+    removed, kept_once, out = [], set(), []
+    for page_no, (lines, zone) in enumerate(zip(split, zones)):
+        keep = []
+        for i, ln in enumerate(lines):
+            s = ln.strip()
+            if i in zone and s:
+                if _is_page_number(s):
+                    removed.append(s)
+                    continue
+                key = _head_key(s)
+                if key in heads and _head_candidate(s):
+                    # 最初の1回を残すのは、章の見出し（章の始まり）と1ページ目（扉）だけ
+                    first_ok = page_no == 0 or is_chapter_heading(s)
+                    if key in kept_once or not first_ok:
+                        removed.append(s)
+                        continue
+                    kept_once.add(key)
+            keep.append(ln)
+        out.append("\n".join(keep))
+    return out, removed
+
+
 def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                   lang="ja", progress_cb=None, strip_labels=True,
                   fix_confusables=False, report=None, denoise=False,
-                  cancel_event=None, pdf_pages=None):
+                  cancel_event=None, pdf_pages=None, strip_heads=True):
     """
     複数ファイル（PDF/画像/テキスト/Word/EPUB）からテキストを抽出して結合文字列を返す。
     pdf_mode: "auto"（テキスト層→無ければOCR） / "ocr"（常にOCR）
@@ -2113,6 +2751,9 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                   中断時はそれまでの部分結果と警告を返す。
     pdf_pages: parse_page_ranges() の結果（None=全ページ）。PDFの読み取り範囲を
                1始まりで制限する（表紙・目次・索引の読み飛ばし用。全PDFに同適用）。
+    strip_heads: True で PDF の柱（毎ページの本や章の名前）とページ番号を外す
+                 （strip_running_heads。テキスト層・OCR のどちらのページにも効く）。
+                 外した行は report["heads"] に入れる。
     戻り値: (text, warnings:list)
     """
     from PIL import Image
@@ -2170,7 +2811,7 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                                 scale = 4000.0 / max(w_pt, h_pt)
                             bitmap = page.render(scale=scale)
                             pil = bitmap.to_pil()
-                            pil = preprocess_image(pil, enable=preprocess)
+                            pil = prepare_for_ocr(pil, enable=preprocess)
                             png = os.path.join(tmpdir, f"pdf_{idx}_{pi}.png")
                             pil.save(png)
                             # (path, ページ番号) を持たせ、低品質時は再レンダリングして
@@ -2187,7 +2828,7 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                     key = path
                     order.append(key)
                     img = Image.open(path)
-                    img = preprocess_image(img, enable=preprocess)
+                    img = prepare_for_ocr(img, enable=preprocess)
                     png = os.path.join(tmpdir, f"img_{idx}.png")
                     img.save(png)
                     ocr_jobs.append((key, png, path, False))
@@ -2212,7 +2853,7 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                 # 1冊だけ入れたときは分母が1で、十数分かかっても 0% で止まって
                 # 見える（「固まった」と誤解される一番の原因だった）
                 progress_cb(0, len(ocr_jobs),
-                            f"OCR実行中... 0/{len(ocr_jobs)}枚")
+                            f"画像から文字を読んでいます… 0/{len(ocr_jobs)}枚")
             png_paths = [p for _, p, _o, _lb in ocr_jobs]
             ocr_errors = []
             ocr_failed = False
@@ -2234,7 +2875,7 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                         if eta > 5:
                             note = f"（残り{fmt_duration(eta)}）"
                     label = ("英語を読み直しています…" if phase == "english"
-                             else "OCR実行中...")
+                             else "画像から文字を読んでいます…")
                     progress_cb(i, n, f"{label} {i}/{n}枚{note}")
             ocr_notices = []
             try:
@@ -2246,17 +2887,19 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
             except Exception as e:
                 # 全滅時の例外メッセージに理由は集約済み。個別エラーと空ページ警告を
                 # 重ねると同じ障害が三重に表示されるため、ここで抑止する
-                warnings.append(f"OCRエラー: {e}")
+                warnings.append(f"読み取りのエラー: {e}")
                 ocr_result = {}
                 ocr_errors = []
                 ocr_failed = True
             if "english_ocr_missing" in ocr_notices:
                 warnings.append(OCR_ENGLISH_MISSING_MSG)
+            if "strong_ocr_failed" in ocr_notices:
+                warnings.append(OCR_STRONG_FAILED_MSG)
             # 一部ファイルの失敗理由を警告として表示（従来は無言で空になっていた）
             for e in ocr_errors[:5]:
-                warnings.append(f"OCR失敗 {e}")
+                warnings.append(f"読み取りに失敗 {e}")
             if len(ocr_errors) > 5:
-                warnings.append(f"…ほか{len(ocr_errors) - 5}件のOCR失敗")
+                warnings.append(f"…ほか{len(ocr_errors) - 5}件の読み取りの失敗")
             empty = 0
             for retry_done, (key, png, orig, layer_backed) in enumerate(ocr_jobs):
                 t = ocr_result.get(png, "")
@@ -2270,7 +2913,7 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
                             else f"{os.path.basename(orig[0])} {orig[1]+1}p")
                     if progress_cb:
                         progress_cb(retry_done, len(ocr_jobs),
-                                    f"再OCR中（画像補正）: {name}")
+                                    f"画像を見やすくして読み直しています: {name}")
                     try:
                         src = (Image.open(orig) if isinstance(orig, str)
                                else _render_pdf_page(orig[0], orig[1], dpi))
@@ -2308,6 +2951,18 @@ def extract_files(paths, pdf_mode="auto", dpi=300, preprocess=True,
         if cancel_event is not None and cancel_event.is_set():
             warnings.append("抽出をキャンセルしました（そこまでの結果を表示しています）")
 
+        # PDF ごとに、柱（毎ページの本や章の名前）とページ番号を外す
+        if strip_heads:
+            books = {}
+            for key in order:
+                if "#p" in key:
+                    books.setdefault(key.rsplit("#p", 1)[0], []).append(key)
+            for keys in books.values():
+                pages, gone = strip_running_heads([text_parts.get(k, "") for k in keys])
+                for k, t in zip(keys, pages):
+                    text_parts[k] = t
+                if gone and report is not None:
+                    report.setdefault("heads", []).extend(gone)
         # 出力順に結合（ファイル/ページ境界は空行）
         chunks = []
         for key in order:
@@ -2518,19 +3173,60 @@ def find_voicevox(user_path=None, refresh=False):
     return found
 
 
-def find_voicevox_engine(user_path=None):
-    """VOICEVOX本体に同梱されている「エンジンだけ」の実行ファイルを返す。
+def find_voicevox_engine(user_path=None, data_dir=None):
+    """VOICEVOX の「エンジンだけ」の実行ファイルを返す。
     これを直接動かすと、エディタ画面（重いElectron）を立ち上げずに
-    読み上げだけができる。見つからなければ None。"""
+    読み上げだけができる。見つからなければ None。
+    探す所は2つ。本体に同梱のエンジン（vv-engine）と、VOICEVOX が自分の設定
+    フォルダに入れたエンジン（vvpp-engines）。最近の VOICEVOX は後者にしか
+    置かないことがあり、以前はそれを探さず「エンジンのみ」が使えなかった。"""
     app = find_voicevox(user_path)
-    if not app:
-        return None
+    if app:
+        if IS_MAC:
+            # ※Mac側は未検証（このパスに無ければ vvpp-engines を探す）
+            run = os.path.join(app, "Contents", "Resources", "vv-engine", "run")
+        else:
+            run = os.path.join(os.path.dirname(app), "vv-engine", "run.exe")
+        if os.path.exists(run):
+            return run
+    return _find_vvpp_engine(data_dir)
+
+
+def _vv_data_dir():
+    """VOICEVOX（エディタ）が設定やエンジンを置くフォルダ。"""
+    if IS_WIN:
+        base = os.environ.get("APPDATA")
+        return os.path.join(base, "voicevox") if base else None
     if IS_MAC:
-        # ※Mac側は未検証（このパスに無ければ「エンジンのみ起動」は使えないだけ）
-        run = os.path.join(app, "Contents", "Resources", "vv-engine", "run")
-    else:
-        run = os.path.join(os.path.dirname(app), "vv-engine", "run.exe")
-    return run if os.path.exists(run) else None
+        return os.path.expanduser("~/Library/Application Support/voicevox")
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "voicevox")
+
+
+def _find_vvpp_engine(data_dir=None):
+    """VOICEVOX が vvpp-engines に入れた、公式の VOICEVOX ENGINE の実行ファイル。
+    ほかのエンジン（別の会社の声など）は使わない。目印は engine_manifest.json の
+    uuid（公式エンジンの uuid と同じもの）で、実行ファイルの名前もそこに書いてある。"""
+    base = os.path.join(data_dir or _vv_data_dir() or "", "vvpp-engines")
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return None
+    for name in names:
+        folder = os.path.join(base, name)
+        try:
+            with open(os.path.join(folder, "engine_manifest.json"),
+                      encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(manifest, dict) or manifest.get("uuid") != VV_ENGINE_ID:
+            continue
+        command = str(manifest.get("command") or "")
+        run = os.path.join(folder, command) if command else ""
+        if command and os.path.basename(command) == command and os.path.isfile(run):
+            return run
+    return None
 
 
 def free_port(host="127.0.0.1"):
@@ -2555,16 +3251,96 @@ def launch_voicevox(user_path=None):
     return path
 
 
+# ============================================================
+#  GPU を使うか（このアプリが VOICEVOX を画面なしで起こすとき）
+# ============================================================
+# VOICEVOX の GPU 版（Windows は DirectML。読み上げの部分のフォルダに DirectML.dll が
+# ある）は、--use_gpu で GPU を使える。RTX 5060 Laptop・Ryzen 9 8940HX の PC で測ると、
+# 1文が 0.46秒 → 0.12秒（30万字の本で 約86分 → 約22分）。かわりに起こすのに約3秒
+# 長くかかり、最初の1文も遅い（つないだあとに温めておく）。CPU に入っている小さな GPU
+# では、かえって遅いことがあるので、自分のメモリが 2GB 以上ある GPU があるときだけ使う。
+_GPU_MIN_MEMORY = 2 * 1024 ** 3
+_GPU_CLASS_KEY = (r"SYSTEM\CurrentControlSet\Control\Class"
+                  r"\{4d36e968-e325-11ce-bfc1-08002be10318}")
+
+
+def engine_supports_gpu(run_path):
+    """この VOICEVOX（読み上げの部分）が、GPU を使える版か。"""
+    if not run_path:
+        return False
+    try:
+        names = {n.lower() for n in os.listdir(os.path.dirname(run_path))}
+    except OSError:
+        return False
+    return "directml.dll" in names
+
+
+def gpu_memory_sizes():
+    """この PC の GPU の [(名前, 自分のメモリのバイト数)]（Windows。レジストリを読むだけ）。"""
+    if not IS_WIN:
+        return []
+    import winreg
+    out = []
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _GPU_CLASS_KEY)
+    except OSError:
+        return []
+    with root:
+        for i in range(64):
+            try:
+                sub = winreg.EnumKey(root, i)
+            except OSError:
+                break
+            try:
+                with winreg.OpenKey(root, sub) as k:
+                    size = 0
+                    for name in ("HardwareInformation.qwMemorySize",
+                                 "HardwareInformation.MemorySize"):
+                        try:
+                            v = winreg.QueryValueEx(k, name)[0]
+                        except OSError:
+                            continue
+                        if isinstance(v, bytes):
+                            v = int.from_bytes(v[:8], "little")
+                        try:
+                            size = max(size, int(v))
+                        except (TypeError, ValueError):
+                            pass
+                    try:
+                        desc = str(winreg.QueryValueEx(k, "DriverDesc")[0])
+                    except OSError:
+                        desc = ""
+            except OSError:
+                continue
+            if desc or size:
+                out.append((desc, size))
+    return out
+
+
+def want_gpu(run_path, sizes=None):
+    """このアプリが VOICEVOX を起こすとき、GPU を使うか。GPU を使える版で、
+    自分のメモリが 2GB 以上ある GPU があるときだけ使う（小さな GPU では遅いことがある）。"""
+    if not engine_supports_gpu(run_path):
+        return False
+    if sizes is None:
+        sizes = gpu_memory_sizes()
+    return any(size >= _GPU_MIN_MEMORY for _name, size in sizes)
+
+
 def launch_voicevox_engine(host="127.0.0.1", port=50021, use_gpu=False,
                            user_path=None):
     """エンジンだけを起動して (プロセス, URL) を返す。
     渡す引数は、VOICEVOX本体が自分で使っているものと同じ3つだけにしてある
-    （--host / --port / --use_gpu）。素性の分からないオプションは使わない。"""
+    （--host / --port / --use_gpu）。素性の分からないオプションは使わない。
+    use_gpu: True / False / "auto"（want_gpu で決める）。返すプロセスの uses_gpu に
+    GPU で起こしたか、run_path に起こした実行ファイルを入れておく（だめなら CPU で起こし直すため）。"""
     run = find_voicevox_engine(user_path)
     if not run:
         raise FileNotFoundError(
-            "VOICEVOXのエンジン(vv-engine)が見つかりませんでした。\n"
-            "VOICEVOX本体から起動してください。")
+            "VOICEVOX の読み上げの部分（vv-engine）が見つかりませんでした。\n"
+            "VOICEVOX を起動してください。")
+    if use_gpu == "auto":
+        use_gpu = want_gpu(run)
     argv = [run, "--host", str(host), "--port", str(int(port))]
     if use_gpu:
         argv.append("--use_gpu")
@@ -2579,6 +3355,8 @@ def launch_voicevox_engine(host="127.0.0.1", port=50021, use_gpu=False,
                             stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, **kw)
+    proc.uses_gpu = bool(use_gpu)
+    proc.run_path = run
     return proc, f"http://{host}:{int(port)}"
 
 
@@ -2717,21 +3495,73 @@ def _remove_play_tmp(path, tries=6):
         _PLAY_TMP_PENDING.append(path)
 
 
+# Windows の非同期 PlaySound は鳴り始めが少し遅れるため、WAVの長さぶん待って
+# すぐ次の行を PlaySound すると、前の行の語尾が上書きされて切れる。
+# 再生するときだけ末尾に無音を足し、さらに少し長く待って語尾を鳴り切らせる
+# （保存用WAV・キャッシュ・字幕の秒数は変えない）。ふだんの連続再生は1本の音の
+# 流れ（下の LineStream）で鳴らすので、これを使うのは試聴と、音の流れを開けなかった
+# ときの行ごとの再生。
+_PLAY_TAIL_SILENCE_SEC = 0.25
+_WIN_PLAY_TAIL_PAD = 0.12
+# 1行の再生で、音声の後ろに実際に入る無音の秒数。行ごとの連続再生では「間」から
+# 差し引いて、行間の無音が保存ファイルと同じ長さになるようにする
+PLAY_TAIL_SEC = (_PLAY_TAIL_SILENCE_SEC + _WIN_PLAY_TAIL_PAD) if IS_WIN else 0.0
+
+
+def _pad_wav_for_play(wav_bytes, tail_sec=_PLAY_TAIL_SILENCE_SEC):
+    """再生用に、WAV末尾へ短いフェードアウト(10ms)と無音を足したバイト列を返す。
+    末尾が0でないと急に途切れて「ぷつっ」と鳴りうるので、最後の値から0へ下げる。
+    非圧縮PCMでないときや読めないときは、元のバイト列をそのまま返す。"""
+    if not wav_bytes or tail_sec <= 0:
+        return wav_bytes
+    try:
+        import struct
+        with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+            params = w.getparams()
+            if (params.comptype != "NONE" or params.framerate <= 0
+                    or params.nchannels <= 0 or params.sampwidth <= 0):
+                return wav_bytes
+            frames = w.readframes(params.nframes)
+        n_pad = int(params.framerate * tail_sec)
+        if n_pad <= 0:
+            return wav_bytes
+        fw = params.sampwidth * params.nchannels
+        fade = b""
+        if params.sampwidth == 2 and len(frames) >= fw:
+            last = struct.unpack(f"<{params.nchannels}h", frames[-fw:])
+            if any(last):
+                fade_n = min(n_pad, max(1, int(params.framerate * 0.01)))
+                vals = [int(round(s * (1.0 - i / fade_n)))
+                        for i in range(1, fade_n + 1) for s in last]
+                fade = struct.pack(f"<{len(vals)}h", *vals)
+        pad = fade + b"\x00" * (n_pad * fw - len(fade))
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setparams(params)
+            w.writeframes(frames + pad)
+        return out.getvalue()
+    except Exception:
+        return wav_bytes
+
+
 def play_wav_blocking(wav_bytes, stop_event=None):
     """WAVバイト列を同期再生する（ワーカースレッドから呼ぶ想定）。
-    stop_event (threading.Event) がセットされたら途中で再生を打ち切る。"""
+    stop_event (threading.Event) がセットされたら途中で再生を打ち切る。
+    声を最後まで鳴らせたら True、声の途中で止めた（または鳴らさなかった）ら False。
+    Windows で末尾に足した無音の間に止めたときは、声は聞き終えているので True。"""
     if stop_event is not None and stop_event.is_set():
         # もう止められた再生。ここで PlaySound を出すと、Windows は再生を
         # プロセスに1本しか持てないので、今鳴っている「次の再生」の音を
         # 差し替えたうえ直後の PURGE で黙らせてしまう（停止→すぐ別の行を
         # 試聴、で音が消えていた）
-        return
+        return False
     if IS_WIN:
         import winsound
+        play_bytes = _pad_wav_for_play(wav_bytes)
         if stop_event is None:
             # SND_MEMORY 同期再生（止める必要がないときはこれで足りる）
-            winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
-            return
+            winsound.PlaySound(play_bytes, winsound.SND_MEMORY)
+            return True
         # 途中で止められるようにするには非同期再生が要るが、winsound は
         # 「メモリから非同期」を受け付けない（SND_MEMORY|SND_ASYNC は必ず
         # RuntimeError: Cannot play asynchronously from memory になる。
@@ -2743,16 +3573,23 @@ def play_wav_blocking(wav_bytes, stop_event=None):
         stopped = False
         try:
             with os.fdopen(fd, "wb") as f:
-                f.write(wav_bytes)
+                f.write(play_bytes)
             try:
-                dur = wav_duration(wav_bytes)
+                dur = wav_duration(play_bytes)
+                speech = wav_duration(wav_bytes)
             except Exception:
-                dur = 0.0   # 長さが読めなくても再生自体は試す
+                dur = speech = 0.0   # 長さが読めなくても再生自体は試す
+            started = time.monotonic()
             winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            deadline = time.monotonic() + dur
+            # 鳴り始めの遅れぶん長めに待つ（無音を足してあるので次の行に語尾を潰されない）
+            pad = _WIN_PLAY_TAIL_PAD if dur > 0 else 0.0
+            deadline = started + dur + pad
             while time.monotonic() < deadline:
                 if stop_event.is_set():
-                    stopped = True
+                    # 声が鳴り終わったあと（足した無音の間）に止められたら、鳴らし切った
+                    # 扱いにする。ここで PURGE すると、鳴り始めの遅れのぶんまだ残って
+                    # いる語尾まで切ってしまう。連続再生も、この行を読み直さずに次へ進む
+                    stopped = time.monotonic() - started < speech
                     break
                 time.sleep(0.05)
         finally:
@@ -2764,9 +3601,10 @@ def play_wav_blocking(wav_bytes, stop_event=None):
                 except Exception:
                     pass
             _remove_play_tmp(path)
-        return
+        return not stopped
     if IS_MAC:
         fd, path = tempfile.mkstemp(prefix="t2v_prev_", suffix=".wav")
+        stopped = False
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(wav_bytes)
@@ -2778,6 +3616,7 @@ def play_wav_blocking(wav_bytes, stop_event=None):
                     if stop_event.is_set():
                         proc.terminate()
                         proc.wait()
+                        stopped = True
                         break
                     time.sleep(0.05)
         finally:
@@ -2785,8 +3624,317 @@ def play_wav_blocking(wav_bytes, stop_event=None):
                 os.remove(path)
             except OSError:
                 pass
-        return
+        return not stopped
     raise RuntimeError("この環境では再生を利用できません。")
+
+
+# ============================================================
+#  連続再生（Windows）: 1本の音の流れに、行の音声を順に足していく
+# ============================================================
+# 行ごとに PlaySound を呼ぶやり方には、聞き心地の面で限界があった。
+#  - 鳴り始めが少し遅れるので、次の行の PlaySound が前の行の語尾を潰す。
+#    語尾の後ろに無音を足して避けると、そのぶん行間が「間」の秒数より延びる
+#  - 一時停止は「止めて、再開したら行の頭から読み直す」しかできない
+# 連続再生では winmm の waveOut を1つ開き、行の音声と行間の無音を、同じ流れの
+# 後ろへ順に足していく。前の音を上書きしないので語尾は切れず、行間は「間」の
+# 秒数ちょうど（保存するファイルと同じ）になり、一時停止はその場で止まって続きから
+# 鳴る。標準の ctypes だけで動く。音の出力を開けない環境（出力機器の無いPC・CI）
+# では OSError になるので、呼び出し側は行ごとの再生に戻す。
+
+_WINMM = None
+
+
+def _winmm():
+    """winmm の関数と構造体を用意する（Windows で初めて使うときに1回だけ）。"""
+    global _WINMM
+    if _WINMM is not None:
+        return _WINMM
+    import ctypes
+    from types import SimpleNamespace
+
+    class WAVEFORMATEX(ctypes.Structure):
+        _fields_ = [("wFormatTag", ctypes.c_uint16), ("nChannels", ctypes.c_uint16),
+                    ("nSamplesPerSec", ctypes.c_uint32),
+                    ("nAvgBytesPerSec", ctypes.c_uint32),
+                    ("nBlockAlign", ctypes.c_uint16), ("wBitsPerSample", ctypes.c_uint16),
+                    ("cbSize", ctypes.c_uint16)]
+
+    class WAVEHDR(ctypes.Structure):
+        pass
+    WAVEHDR._fields_ = [("lpData", ctypes.c_void_p), ("dwBufferLength", ctypes.c_uint32),
+                        ("dwBytesRecorded", ctypes.c_uint32), ("dwUser", ctypes.c_size_t),
+                        ("dwFlags", ctypes.c_uint32), ("dwLoops", ctypes.c_uint32),
+                        ("lpNext", ctypes.POINTER(WAVEHDR)), ("reserved", ctypes.c_size_t)]
+
+    class MMTIME(ctypes.Structure):
+        # wType と共用体（いちばん大きい SMPTE が8バイト）
+        _fields_ = [("wType", ctypes.c_uint32), ("u", ctypes.c_uint32),
+                    ("pad", ctypes.c_uint32)]
+
+    dll = ctypes.WinDLL("winmm")
+    h = ctypes.c_void_p
+    sigs = {
+        "waveOutOpen": [ctypes.POINTER(h), ctypes.c_uint32, ctypes.POINTER(WAVEFORMATEX),
+                        ctypes.c_size_t, ctypes.c_size_t, ctypes.c_uint32],
+        "waveOutPrepareHeader": [h, ctypes.POINTER(WAVEHDR), ctypes.c_uint32],
+        "waveOutUnprepareHeader": [h, ctypes.POINTER(WAVEHDR), ctypes.c_uint32],
+        "waveOutWrite": [h, ctypes.POINTER(WAVEHDR), ctypes.c_uint32],
+        "waveOutGetPosition": [h, ctypes.POINTER(MMTIME), ctypes.c_uint32],
+        "waveOutPause": [h], "waveOutRestart": [h], "waveOutReset": [h],
+        "waveOutClose": [h],
+    }
+    for name, args in sigs.items():
+        fn = getattr(dll, name)
+        fn.argtypes = args
+        fn.restype = ctypes.c_uint32
+    _WINMM = SimpleNamespace(dll=dll, ctypes=ctypes, WAVEFORMATEX=WAVEFORMATEX,
+                             WAVEHDR=WAVEHDR, MMTIME=MMTIME)
+    return _WINMM
+
+
+class WaveOutStream:
+    """waveOut の出力を1つ開き、PCM を後ろへ足していく音の流れ（Windows専用）。
+    position() で鳴らし終えた量（フレーム数）が分かる。1つのスレッドから使うこと。"""
+
+    _WAVE_MAPPER = 0xFFFFFFFF   # 既定の出力機器
+    _WHDR_DONE = 0x1
+    _TIME_MS, _TIME_SAMPLES, _TIME_BYTES = 1, 2, 4
+
+    def __init__(self, rate, channels=1, sampwidth=2):
+        if not IS_WIN:
+            raise OSError("waveOut は Windows でだけ使えます")
+        w = _winmm()
+        c = w.ctypes
+        self._w = w
+        self.fmt = (int(rate), int(channels), int(sampwidth))
+        self.rate = int(rate)
+        self.frame_bytes = int(channels) * int(sampwidth)
+        wfx = w.WAVEFORMATEX(1, int(channels), self.rate, self.rate * self.frame_bytes,
+                             self.frame_bytes, int(sampwidth) * 8, 0)
+        handle = c.c_void_p()
+        r = w.dll.waveOutOpen(c.byref(handle), self._WAVE_MAPPER, c.byref(wfx), 0, 0, 0)
+        if r:
+            raise OSError(f"音の出力を開けませんでした（waveOutOpen={r}）")
+        self._h = handle
+        self._bufs = []        # 出力に渡して、まだ返ってきていない (データ, ヘッダ)
+        self.written = 0       # 足したフレーム数
+        self.paused = False
+        self._pos = 0
+        self._last_raw = 0
+        self._wraps = 0        # 位置（32bit）の折り返し回数
+        self._closed = False
+
+    def write(self, pcm):
+        """PCM を流れの後ろへ足す（前の音が鳴り終わるのを待たずに戻る）。"""
+        n = len(pcm) - len(pcm) % self.frame_bytes
+        if n <= 0 or self._closed:
+            return
+        w = self._w
+        c = w.ctypes
+        buf = c.create_string_buffer(bytes(pcm[:n]), n)
+        hdr = w.WAVEHDR()
+        hdr.lpData = c.cast(buf, c.c_void_p)
+        hdr.dwBufferLength = n
+        size = c.sizeof(hdr)
+        r = w.dll.waveOutPrepareHeader(self._h, c.byref(hdr), size)
+        if r:
+            raise OSError(f"音の出力に渡せませんでした（waveOutPrepareHeader={r}）")
+        r = w.dll.waveOutWrite(self._h, c.byref(hdr), size)
+        if r:
+            w.dll.waveOutUnprepareHeader(self._h, c.byref(hdr), size)
+            raise OSError(f"音の出力に渡せませんでした（waveOutWrite={r}）")
+        self._bufs.append((buf, hdr))   # 鳴り終わるまで手放さない
+        self.written += n // self.frame_bytes
+        self._reap()
+
+    def _reap(self):
+        """鳴らし終えて返ってきたバッファを片づける。"""
+        c = self._w.ctypes
+        keep = []
+        for buf, hdr in self._bufs:
+            if hdr.dwFlags & self._WHDR_DONE:
+                self._w.dll.waveOutUnprepareHeader(self._h, c.byref(hdr), c.sizeof(hdr))
+            else:
+                keep.append((buf, hdr))
+        self._bufs = keep
+
+    def position(self):
+        """これまでに鳴らし終えたフレーム数（足した量を超えない）。"""
+        if self._closed:
+            return self._pos
+        w = self._w
+        c = w.ctypes
+        t = w.MMTIME(self._TIME_SAMPLES, 0, 0)
+        if w.dll.waveOutGetPosition(self._h, c.byref(t), c.sizeof(t)):
+            return self._pos   # 読めなかったときは前回の値
+        raw = t.u
+        if self._last_raw - raw > 1 << 31:
+            self._wraps += 1   # 32bit の折り返し（24kHz なら約50時間ごと）
+        self._last_raw = raw
+        raw += self._wraps << 32
+        if t.wType == self._TIME_BYTES:
+            frames = raw // self.frame_bytes
+        elif t.wType == self._TIME_MS:
+            frames = raw * self.rate // 1000
+        else:
+            frames = raw
+        self._reap()
+        self._pos = max(self._pos, min(frames, self.written))
+        return self._pos
+
+    def pause(self):
+        """その場で止める（あとから足した音も、resume まで鳴らさない）。"""
+        if not self.paused and not self._closed:
+            self._w.dll.waveOutPause(self._h)
+            self.paused = True
+
+    def resume(self):
+        if self.paused and not self._closed:
+            self._w.dll.waveOutRestart(self._h)
+            self.paused = False
+
+    def close(self):
+        """すぐ音を止めて、出力を閉じる。"""
+        if self._closed:
+            return
+        w = self._w
+        c = w.ctypes
+        w.dll.waveOutReset(self._h)   # 鳴っている音を止め、渡したバッファを返してもらう
+        for buf, hdr in self._bufs:
+            w.dll.waveOutUnprepareHeader(self._h, c.byref(hdr), c.sizeof(hdr))
+        self._bufs = []
+        w.dll.waveOutClose(self._h)
+        self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+class LineStream:
+    """連続再生用: 行の音声を、行間の無音をはさみながら1本の音の流れに並べる。
+    open_stream(rate, channels, sampwidth) は WaveOutStream と同じ形のものを返す
+    （既定は WaveOutStream。テストでは偽物を渡す）。1つのスレッドから使うこと。
+    poll() を小まめに呼ぶと、鳴り始めた行・鳴り終えた行を ("start"|"end", tag) で返す。
+    行の形式（サンプリング周波数など）が変わったら、前の音を鳴らし終えてから開き直す。"""
+
+    def __init__(self, open_stream=None, clock=time.monotonic):
+        self._open = open_stream or WaveOutStream
+        self._clock = clock
+        self._stream = None
+        self._pending = []     # まだ流れに足していない行 (tag, fmt, pcm, gap秒)
+        self._segs = []        # 流れに足した行 [tag, 始まり, 終わり, 始まった, 終わった]
+        self._events = []      # poll() で返す、鳴り始め・鳴り終わり
+        self._paused = False
+        self._idle_since = None   # 流れが鳴り終えて空になった時刻
+
+    def add(self, tag, wav_bytes, gap_sec=0.0):
+        """行を予約する。gap_sec は、この行の前に入れる無音の秒数。"""
+        with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+            p = w.getparams()
+            if p.comptype != "NONE":
+                raise ValueError("非圧縮のPCMではないWAVは連続再生できません")
+            pcm = w.readframes(p.nframes)
+        fmt = (p.framerate, p.nchannels, p.sampwidth)
+        self._pending.append((tag, fmt, pcm, max(0.0, float(gap_sec))))
+        self._feed()
+
+    def _feed(self):
+        """予約した行を、鳴らせるものから流れの後ろへ足す。"""
+        while self._pending:
+            tag, fmt, pcm, gap = self._pending[0]
+            s = self._stream
+            if s is not None and s.fmt != fmt:
+                pos = s.position()
+                if pos < s.written:
+                    return   # 形式の違う行は、今の音を鳴らし終えてから
+                self._collect(pos)   # 閉じる前に、鳴り終わりを取りこぼさない
+                self._close_stream()
+            if self._stream is None:
+                self._stream = s = self._open(*fmt)
+                if self._paused:
+                    s.pause()
+            self._pending.pop(0)
+            if self._idle_since is not None:
+                # 合成を待つあいだ流れが空だった時間は、行間の無音に数える
+                gap = max(0.0, gap - (self._clock() - self._idle_since))
+                self._idle_since = None
+            frame_bytes = fmt[1] * fmt[2]
+            n_gap = int(round(gap * fmt[0]))
+            if n_gap > 0:
+                # 8bit PCM は 0x80 が無音（16bit 以上は 0）
+                s.write((b"\x80" if fmt[2] == 1 else b"\x00") * (n_gap * frame_bytes))
+            start = s.written
+            s.write(pcm)
+            self._segs.append([tag, start, s.written, False, False])
+
+    def _collect(self, pos):
+        """鳴らした位置 pos までに始まった行・終わった行を、返す分にためる。"""
+        for seg in self._segs:
+            tag, start, end, began, ended = seg
+            if not began and (pos > start or pos >= end):
+                seg[3] = began = True
+                self._events.append(("start", tag))
+            if began and not ended and pos >= end:
+                seg[4] = True
+                self._events.append(("end", tag))
+        self._segs = [seg for seg in self._segs if not seg[4]]
+
+    def poll(self):
+        """鳴り始めた行・鳴り終えた行を返す。予約した行の流し込みもここで進める。"""
+        s = self._stream
+        if s is not None:
+            self._collect(s.position())
+        self._feed()
+        s = self._stream
+        if s is not None:
+            pos = s.position()
+            self._collect(pos)
+            if pos >= s.written and not self._pending:
+                if self._idle_since is None:
+                    self._idle_since = self._clock()
+            else:
+                self._idle_since = None
+        events, self._events = self._events, []
+        return events
+
+    def remaining(self):
+        """まだ鳴らしていない音の秒数（予約しただけの行も含む）。"""
+        s = self._stream
+        left = (s.written - s.position()) / s.rate if s is not None else 0.0
+        for _tag, fmt, pcm, gap in self._pending:
+            left += gap + len(pcm) / float(fmt[0] * fmt[1] * fmt[2])
+        return left
+
+    def done(self):
+        """予約した行を全部鳴らし終えたか。"""
+        s = self._stream
+        return not self._pending and (s is None or s.position() >= s.written)
+
+    def pause(self):
+        self._paused = True
+        if self._stream is not None:
+            self._stream.pause()
+
+    def resume(self):
+        self._paused = False
+        if self._stream is not None:
+            self._stream.resume()
+
+    def _close_stream(self):
+        if self._stream is not None:
+            try:
+                self._stream.close()
+            finally:
+                self._stream = None
+                self._segs = []
+
+    def close(self):
+        """すぐ音を止めて片づける（予約した行も捨てる）。"""
+        self._pending = []
+        self._close_stream()
 
 
 # ============================================================
@@ -2986,7 +4134,35 @@ def vv_speaker_sample(base_url, speaker_uuid, style_id, timeout=15):
     for si in r.json().get("style_infos", []):
         if si.get("id") == style_id and si.get("voice_samples"):
             return base64.b64decode(si["voice_samples"][0])
-    raise RuntimeError("この話者のサンプル音声が見つかりませんでした。")
+    raise RuntimeError("この声の見本が見つかりませんでした。")
+
+
+def vv_style_icon(base_url, speaker_uuid, style_id, timeout=10):
+    """話者スタイルの公式の顔アイコン（PNG のバイト列・256×256）を返す。無ければ None。
+    resource_format=url で受け取ると、音声サンプルや立ち絵まで base64 で丸ごと受け取らずに
+    済む（ずんだもんで 10MB → 4KB と、アイコン1枚 約90KB）。古いエンジンはこの指定を
+    知らずに base64 で返すので、どちらでも読む。アイコンは、つないでいるエンジンからだけ
+    取る。画像はアプリの中で表示するだけで、保存も書き出しもしない（立ち絵と同じく、
+    公式素材を配らない）。"""
+    import base64
+    from urllib.parse import urlsplit
+    import requests
+    r = requests.get(base_url + "/speaker_info",
+                     params={"speaker_uuid": speaker_uuid, "resource_format": "url"},
+                     timeout=timeout)
+    r.raise_for_status()
+    for si in r.json().get("style_infos", []):
+        if si.get("id") != style_id:
+            continue
+        icon = si.get("icon") or ""
+        if not icon:
+            return None
+        if icon.startswith(("http://", "https://")):
+            got = requests.get(base_url.rstrip("/") + urlsplit(icon).path, timeout=timeout)
+            got.raise_for_status()
+            return got.content
+        return base64.b64decode(icon)
+    return None
 
 
 def _format_kana(kana: str) -> str:
@@ -2996,10 +4172,11 @@ def _format_kana(kana: str) -> str:
                 .replace("/", " ").replace("？", "?"))
 
 
-def vv_reading(base_url, text, speaker_id, timeout=15):
+def vv_reading(base_url, text, speaker_id, timeout=15, read_fix=None):
     """VOICEVOXがこのテキストを“どう読むか”（カナ）を返す（誤読チェック用）。
-    誤読を見つけたら「読み方辞書...」で直せる。"""
+    誤読を見つけたら「読み方辞書...」で直せる。read_fix は speech_text と同じ。"""
     import requests
+    text = speech_text(text, read_fix)
     q = requests.post(base_url + "/audio_query",
                       params={"text": text, "speaker": speaker_id},
                       timeout=timeout)
@@ -3007,10 +4184,12 @@ def vv_reading(base_url, text, speaker_id, timeout=15):
     return _format_kana(q.json().get("kana", ""))
 
 
-def vv_audio_query(base_url, text, speaker_id, timeout=None):
+def vv_audio_query(base_url, text, speaker_id, timeout=None, read_fix=None):
     """1文ぶんの audio_query（読み・アクセント・調整値の入れ物）をそのまま返す。
-    合成はせず、.vvproj にエディタと同じ形の query を埋めるために使う。"""
+    合成はせず、.vvproj にエディタと同じ形の query を埋めるために使う。
+    文は speech_text で読み方を直してから渡す（read_fix=False で、そのまま）。"""
     import requests
+    text = speech_text(text, read_fix)
     if timeout is None:
         timeout = max(30, 15 + len(text) // 20)
     q = requests.post(base_url + "/audio_query",
@@ -3018,6 +4197,335 @@ def vv_audio_query(base_url, text, speaker_id, timeout=None):
                       timeout=timeout)
     q.raise_for_status()
     return q.json()
+
+
+# ============================================================
+#  ふりがな（VOICEVOX が実際に読む読みを、本文の漢字の上に出す）
+# ============================================================
+# 読みはエンジンの audio_query（実際に読み上げる発音）から作るので、ふりがなと音は
+# 必ず一致する。発音は「トオキョオ」「ツズク」のように書き方と違うことがあるので、
+# 辞書（Janome。入れたい人だけが入れる）の読みと照らし、同じ音なら辞書の書き方
+# （とうきょう・つづく）をひらがなで出す。違えばエンジンの発音をカタカナで出す
+# （誤読かもしれない印）。どの漢字にどの読みが付くかは、本文のかなとエンジンの発音を
+# 突き合わせて決め、1通りに決まらない所には出さない（違う所に出すくらいなら出さない）。
+
+FURI_OK = "ok"        # 辞書の書き方と、エンジンの発音が一致（ひらがなで出す）
+FURI_DIFF = "diff"    # 辞書と違う読み（エンジンの発音をカタカナで。誤読かもしれない）
+FURI_RAW = "raw"      # 辞書が無い・辞書に読みが無い（数字・英字など。エンジンの発音）
+# これより長い行には出さない（PDF の段落が丸ごと1行のときなど。突き合わせが重くなる）
+FURIGANA_MAX_CHARS = 1500
+
+# かな（ヵ・ヶは「三ヶ月」のように漢字の仲間として読むので除く）
+_FURI_KANA_RE = re.compile(r"[ぁ-ゖァ-ヴヷ-ヺー]")
+# 数字・英字にくっついていると読まれる記号（20% → パーセント、1920×1200 → カケル）
+_FURI_READ_SYMBOLS = set("%％×＋+＆&=＝°℃")
+# 数字・英字のあいだにあるときだけ、かたまりの一部になる記号（1.25・7/14・10:30）
+_FURI_SEPARATORS = set(".．,，:：/／-－_~〜～")
+_FURI_VOWEL = {}
+for _row, _v in (("アカサタナハマヤラワガザダバパァャ", "ア"),
+                 ("イキシチニヒミリギジヂビピィ", "イ"),
+                 ("ウクスツヌフムユルグズヅブプゥュヴ", "ウ"),
+                 ("エケセテネヘメレゲゼデベペェ", "エ"),
+                 ("オコソトノホモヨロヲゴゾドボポォョ", "オ")):
+    for _ch in _row:
+        _FURI_VOWEL[_ch] = _v
+for _v in "アイウエオ":
+    _FURI_VOWEL[_v] = _v
+_FURI_PAUSE = "、"    # エンジンが記号のところで入れる「間」
+
+
+def kata_to_hira(s: str) -> str:
+    """全角カタカナをひらがなにする（ー などはそのまま）。"""
+    return "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in s)
+
+
+def _furi_is_alnum(ch):
+    """数字・英字か（漢字やかなは含めない）。"""
+    return ch.isascii() and ch.isalnum() or "０" <= ch <= "９" or "Ａ" <= ch <= "ｚ"
+
+
+def furigana_segments(text):
+    """本文を「かな」「読まない記号」「その他（漢字・数字・英字など）」の区間
+    [種類, 開始, 終了] に分ける。数字や英字にくっついた記号（20%・1.25・2026-10-03）は、
+    そのかたまりの一部として読まれうるので「その他」に含める。"""
+    n = len(text)
+    kinds = []
+    for i, ch in enumerate(text):
+        if _FURI_KANA_RE.match(ch):
+            kinds.append("kana")
+        elif ch in _FURI_READ_SYMBOLS:
+            near = ((i > 0 and _furi_is_alnum(text[i - 1]))
+                    or (i + 1 < n and _furi_is_alnum(text[i + 1])))
+            kinds.append("wild" if near else "silent")
+        elif ch in _FURI_SEPARATORS:
+            between = (0 < i < n - 1 and _furi_is_alnum(text[i - 1])
+                       and _furi_is_alnum(text[i + 1]))
+            kinds.append("wild" if between else "silent")
+        elif ch.isalnum():
+            kinds.append("wild")
+        else:
+            kinds.append("silent")
+    segs = []
+    for i, kind in enumerate(kinds):
+        if segs and segs[-1][0] == kind and kind != "kana":
+            segs[-1][2] = i + 1
+        else:
+            segs.append([kind, i, i + 1])
+    return segs
+
+
+def _furi_kana_options(ch, prev_vowel, particles):
+    """本文のかな1文字が、エンジンの発音ではどう出うるか（候補）。"""
+    c = hira_to_kata(ch)
+    if not particles:
+        return [c]               # 辞書の読みは書き方どおり（ー もそのまま）
+    if c == "ー":
+        return [prev_vowel] if prev_vowel else ["ー"]
+    if c == "ハ":
+        return ["ハ", "ワ"]      # 助詞の「は」
+    if c == "ヘ":
+        return ["ヘ", "エ"]      # 助詞の「へ」
+    if c == "ヲ":
+        return ["オ", "ヲ"]
+    if c == "ヂ":
+        return ["ジ", "ヂ"]
+    if c == "ヅ":
+        return ["ズ", "ヅ"]
+    if c == "ウ" and prev_vowel == "オ":
+        return ["ウ", "オ"]      # そう → ソオ
+    if c == "イ" and prev_vowel == "エ":
+        return ["イ", "エ"]      # ていねい → テエネエ
+    return [c]
+
+
+def _furi_items(text, base=0, particles=True):
+    """突き合わせ用の並び: ("k", 候補) / ("s", 間の有無) / ("w", (開始, 終了, 記号入り))。"""
+    items = []
+    prev_v = None
+    for kind, a, b in furigana_segments(text):
+        if kind == "silent":
+            if particles:
+                items.append(("s", [_FURI_PAUSE, ""]))
+            prev_v = None
+        elif kind == "wild":
+            items.append(("w", (base + a, base + b,
+                                any(not c.isalnum() for c in text[a:b]))))
+            prev_v = None
+        else:
+            for ch in text[a:b]:
+                opts = _furi_kana_options(ch, prev_v, particles)
+                items.append(("k", opts))
+                last = opts[0][-1] if opts[0] else ""
+                prev_v = _FURI_VOWEL.get(last)
+    return items
+
+
+def furigana_assign(items, pron, score=None):
+    """並び items を発音 pron に当てはめ、読みが1通りに決まる漢字などの区間だけを
+    {(開始, 終了): 発音} で返す。当てはめ方が1つも無ければ None。
+    当てはめ方が何通りもあるときは、全部を調べて（列挙はしない）、どの当てはめ方でも
+    同じ区切りになる区間だけを残す。score(区間, 発音) を渡すと、その合計がいちばん
+    大きい当てはめ方だけで考える（辞書の読みと合う区切りを優先するため）。
+    漢字の区間に「間」（、）は入らない（間は記号からしか生まれない。記号入りの数字の
+    かたまりは別）。"""
+    n = len(pron)
+    K = len(items)
+
+    def ends(k, p):
+        t, v = items[k]
+        if t != "w":
+            for o in dict.fromkeys(v):
+                if pron.startswith(o, p):
+                    yield p + len(o)
+        else:
+            if score is not None:
+                yield p   # 読まれない字（OCRで混ざる「丿」など）。辞書と照らすときだけ考える
+            for q in range(p + 1, n + 1):
+                if pron[q - 1] == _FURI_PAUSE and not v[2]:
+                    break
+                yield q
+
+    def gain(k, p, q):
+        t, v = items[k]
+        if t != "w" or score is None:
+            return 0
+        if q == p:
+            return -1   # 読まれない、は最後の手段（辞書と合う区間が増えるときだけ選ばれる）
+        return score(v[:2], pron[p:q].replace(_FURI_PAUSE, ""))
+
+    # 長い行でも深い再帰にしない（前から届く位置 → 後ろから点数、の2回で求める）
+    reach = [set() for _ in range(K + 1)]
+    reach[0].add(0)
+    for k in range(K):
+        for p in reach[k]:
+            reach[k + 1].update(ends(k, p))
+    if n not in reach[K]:
+        return None
+    best = [dict() for _ in range(K + 1)]   # best[k][p]: (k, p) から最後までの最高点
+    best[K][n] = 0
+    for k in range(K - 1, -1, -1):
+        row, after = best[k], best[k + 1]
+        for p in reach[k]:
+            top = None
+            for q in ends(k, p):
+                if q in after:
+                    total = after[q] + gain(k, p, q)
+                    if top is None or total > top:
+                        top = total
+            if top is not None:
+                row[p] = top
+    if 0 not in best[0]:
+        return None
+    # いちばん点の高い当てはめ方に乗る (k, p) を前から順にたどり、
+    # 区間ごとに「通りうる区切り」を集める
+    here = {0}
+    cuts = {}
+    for k in range(K):
+        nxt = set()
+        after = best[k + 1]
+        for p in here:
+            for q in ends(k, p):
+                if q in after and after[q] + gain(k, p, q) == best[k][p]:
+                    nxt.add(q)
+                    if items[k][0] == "w":
+                        cuts.setdefault(k, set()).add((p, q))
+        here = nxt
+    out = {}
+    for k, pairs in cuts.items():
+        if len(pairs) == 1:
+            (p, q), = pairs
+            out[items[k][1][:2]] = pron[p:q].replace(_FURI_PAUSE, "")
+    return out
+
+
+def furigana_norm(kata):
+    """同じ音になる書き分けをそろえる（比べる用）: ー→前の母音、エイ→エエ、オウ→オオ、
+    ヅ→ズ、ヂ→ジ、ヲ→オ。辞書の書き方（トウキョウ）とエンジンの発音（トオキョオ）を
+    「同じ音か」で比べるため。"""
+    out = []
+    for ch in kata.replace("ヅ", "ズ").replace("ヂ", "ジ").replace("ヲ", "オ"):
+        prev = _FURI_VOWEL.get(out[-1]) if out else None
+        if ch == "ー" and prev:
+            out.append(prev)
+        elif ch == "イ" and prev == "エ":
+            out.append("エ")
+        elif ch == "ウ" and prev == "オ":
+            out.append("オ")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def engine_pronunciation(query):
+    """audio_query の結果から、エンジンが実際に読む発音（カタカナ）を作る。
+    記号のところで入れる「間」は 、 として残す（どこで区切れるかの目印になる）。"""
+    out = []
+    for ap in query.get("accent_phrases") or []:
+        out.extend(m.get("text", "") for m in ap.get("moras") or [])
+        if ap.get("pause_mora"):
+            out.append(_FURI_PAUSE)
+    return "".join(out)
+
+
+_FURI_DICT = None          # Janome の Tokenizer（入っていなければ False）
+_FURI_DICT_LOCK = _threading.Lock()
+
+
+def furigana_dictionary():
+    """ふりがなの表記に使う辞書（Janome）。入っていなければ None。
+    初回だけ読み込む（数百ms）。入れ直したあとは reset_furigana_dictionary() で読み直す。"""
+    global _FURI_DICT
+    with _FURI_DICT_LOCK:
+        if _FURI_DICT is None:
+            try:
+                from janome.tokenizer import Tokenizer
+                _FURI_DICT = Tokenizer()
+            except Exception:
+                _FURI_DICT = False
+        return _FURI_DICT or None
+
+
+def reset_furigana_dictionary():
+    """辞書を入れたあと、次に使うときに読み込み直させる。"""
+    global _FURI_DICT
+    with _FURI_DICT_LOCK:
+        _FURI_DICT = None
+    import importlib
+    importlib.invalidate_caches()
+
+
+def furigana_dict_spans(text, tokenizer):
+    """辞書で引いた読み（書き方どおりのカタカナ）を、本文の区間 {(開始, 終了): 読み} で返す。
+    1語の中に漢字のかたまりが複数あれば、送り仮名を目印に分ける（取り出す → 取|出）。"""
+    out = {}
+    pos = 0
+    with _FURI_DICT_LOCK:
+        tokens = [(t.surface, t.reading) for t in tokenizer.tokenize(text)]
+    for surf, reading in tokens:
+        a0 = pos
+        pos += len(surf)
+        if not reading or reading == "*":
+            continue
+        items = _furi_items(surf, a0, particles=False)
+        if not any(t == "w" for t, _ in items):
+            continue
+        out.update(furigana_assign(items, reading) or {})
+    return out
+
+
+def _furi_dict_reading(span, dict_spans):
+    """本文の区間 span を、すき間なくちょうど覆う辞書の読みのつながり（無ければ ""）と、その区切り。"""
+    a, b = span
+    parts = sorted(x for x in dict_spans if a <= x[0] and x[1] <= b)
+    if not parts or parts[0][0] != a or parts[-1][1] != b:
+        return "", []
+    for x, y in zip(parts, parts[1:]):
+        if x[1] != y[0]:
+            return "", []
+    return "".join(dict_spans[x] for x in parts), parts
+
+
+def furigana(text, query, dict_spans=None):
+    """本文 text と、その audio_query の結果から、ふりがなの一覧
+    [(開始, 終了, 読み, 種類)] を作る。種類は FURI_OK / FURI_DIFF / FURI_RAW。
+    dict_spans は furigana_dict_spans の結果（辞書が無ければ None。すべてカタカナになる）。
+    読みが1通りに決まらない区間には出さない。"""
+    if len(text) > FURIGANA_MAX_CHARS:
+        return []
+    pron = engine_pronunciation(query)
+    dict_spans = dict_spans or {}
+
+    def agrees(span, got):
+        want, _ = _furi_dict_reading(span, dict_spans)
+        # 辞書と合う区間1つは、読まれない字1つ（-1）より重い
+        return 2 if want and furigana_norm(want) == furigana_norm(got) else 0
+
+    # 区切り方が何通りもあるときは、辞書の読みと合う区間が多い区切り方を選ぶ。
+    # それでも区切り方しだいで読みが変わる区間には出さない
+    spans = furigana_assign(_furi_items(text), pron, agrees if dict_spans else None)
+    out = []
+    for span in sorted(spans or {}):
+        got = spans[span]
+        if not got:
+            continue   # 読まれない字には出さない
+        want, parts = _furi_dict_reading(span, dict_spans)
+        if want and furigana_norm(want) == furigana_norm(got):
+            # 辞書の語ごとに分けて出す（連続再生 → れんぞく｜さいせい）
+            out.extend((x[0], x[1], kata_to_hira(dict_spans[x]), FURI_OK) for x in parts)
+        else:
+            out.append((span[0], span[1], got, FURI_DIFF if want else FURI_RAW))
+    return out
+
+
+def vv_furigana(base_url, text, speaker_id, use_dictionary=True, timeout=15,
+                read_fix=None):
+    """1行ぶんのふりがなを作る（エンジンに audio_query を1回だけ問い合わせる）。
+    エンジンには読み方を直した文を聞き、その読みを本文の字に合わせる（音と同じ読みになる）。"""
+    query = vv_audio_query(base_url, text, speaker_id, timeout=timeout,
+                           read_fix=read_fix)
+    tok = furigana_dictionary() if use_dictionary else None
+    spans = furigana_dict_spans(text, tok) if tok else None
+    return furigana(text, query, spans)
 
 
 def estimate_read_seconds(text: str, speed: float = 1.0) -> float:
@@ -3060,12 +4568,15 @@ def voicevox_credit(speaker_labels) -> str:
 
 
 def vv_synthesize_with_kana(base_url, text, speaker_id, speed=1.0,
-                            pitch=0.0, intonation=1.0, volume=1.0, timeout=None):
+                            pitch=0.0, intonation=1.0, volume=1.0, timeout=None,
+                            read_fix=None):
     """1文を合成し (WAVバイト列, 読みカナ) を返す。audio_query は1回だけ実行し、
     その kana を読み確認（vv_reading 相当）に再利用する（試聴の往復削減）。
     timeout 省略時は文長に比例（整形で生まれた数千字の1行が60秒固定で全滅しない保険）。
-    speed=話速(0.5〜2) / pitch=音高(-0.15〜0.15) / intonation=抑揚(0〜2) / volume=音量(0〜2)"""
+    speed=速さ(0.5〜2) / pitch=高さ(-0.15〜0.15) / intonation=抑揚(0〜2) / volume=音量(0〜2)
+    文は speech_text で読み方を直してから渡す（read_fix=False で、そのまま）。"""
     import requests
+    text = speech_text(text, read_fix)
     if timeout is None:
         timeout = max(60, 30 + len(text) // 10)
     q = requests.post(base_url + "/audio_query",
@@ -3091,11 +4602,13 @@ def vv_synthesize_with_kana(base_url, text, speaker_id, speed=1.0,
 
 
 def vv_synthesize_one(base_url, text, speaker_id, speed=1.0,
-                      pitch=0.0, intonation=1.0, volume=1.0, timeout=None):
+                      pitch=0.0, intonation=1.0, volume=1.0, timeout=None,
+                      read_fix=None):
     """1文を合成してWAVバイト列を返す（vv_synthesize_with_kana の音声のみ版）。"""
     return vv_synthesize_with_kana(base_url, text, speaker_id, speed=speed,
                                    pitch=pitch, intonation=intonation,
-                                   volume=volume, timeout=timeout)[0]
+                                   volume=volume, timeout=timeout,
+                                   read_fix=read_fix)[0]
 
 
 # ============================================================
@@ -3314,13 +4827,16 @@ def _synth_cache_evict(max_bytes=None):
 
 def vv_synthesize_cached(base_url, text, speaker_id, speed=1.0, pitch=0.0,
                          intonation=1.0, volume=1.0, timeout=None,
-                         engine_ver="", dict_hash=""):
+                         engine_ver="", dict_hash="", read_fix=None):
     """vv_synthesize_one のキャッシュ付き版。engine_ver / dict_hash が空のときは
-    キーの精度が担保できないためキャッシュせず素通しする。"""
+    キーの精度が担保できないためキャッシュせず素通しする。
+    キーは読み方を直した後の文（エンジンへ実際に渡す文）で作る。直しのオン・オフを
+    切り替えたときに、前の読みの声が出てこないように。"""
+    text = speech_text(text, read_fix)
     if not engine_ver or not dict_hash:
         return vv_synthesize_one(base_url, text, speaker_id, speed=speed,
                                  pitch=pitch, intonation=intonation,
-                                 volume=volume, timeout=timeout)
+                                 volume=volume, timeout=timeout, read_fix=False)
     key = synth_cache_key(text, speaker_id, speed, pitch, intonation, volume,
                           engine_ver, dict_hash)
     wav = synth_cache_get(key)
@@ -3328,7 +4844,7 @@ def vv_synthesize_cached(base_url, text, speaker_id, speed=1.0, pitch=0.0,
         return wav
     wav = vv_synthesize_one(base_url, text, speaker_id, speed=speed,
                             pitch=pitch, intonation=intonation,
-                            volume=volume, timeout=timeout)
+                            volume=volume, timeout=timeout, read_fix=False)
     synth_cache_put(key, wav)
     return wav
 
@@ -3342,6 +4858,7 @@ def concat_wavs_to_file(sources, out_path, gap_sec=0.4, chunk_frames=1 << 18,
                         progress_cb=None):
     """WAV（bytes または ファイルパス）の列を無音を挟んで out_path へ逐次連結し、
     各ソースの再生秒のリストを返す（SRT・チャプター計算にそのまま使える）。
+    gap_sec は全部の行で同じ秒数か、行ごとのリスト（line_gaps。i 番目の行の前の無音）。
     全体をメモリに持たないため、10時間級の本でもメモリは1チャンク分で済む。
     合計が4GB（RIFF上限）を超える場合は書く前に RuntimeError（保存フェーズ全損防止）。"""
     durations = []
@@ -3359,14 +4876,15 @@ def concat_wavs_to_file(sources, out_path, gap_sec=0.4, chunk_frames=1 << 18,
                     params = w.getparams()
                     out.setparams(params)
                     fw = params.sampwidth * params.nchannels
-                    silence = b"\x00" * (int(params.framerate * gap_sec) * fw)
+                if i:
+                    silence = b"\x00" * (int(params.framerate * _gap_at(gap_sec, i)) * fw)
                 n = w.getnframes()
                 durations.append(n / float(params.framerate))
                 need = (n * params.sampwidth * params.nchannels
                         + (len(silence) if i else 0))
                 if written + need > _WAV_MAX_DATA:
                     raise RuntimeError(
-                        "結合WAVが4GB（WAV形式の上限）を超えます。"
+                        "1つにまとめたWAVが4GB（WAV形式の上限）を超えます。"
                         "M4A/M4B/MP3にするか、まとめ方を分割にしてください。")
                 if i and silence:
                     # 無音は「各ソースの前（先頭以外）」＝従来の「各ソースの後
@@ -3385,7 +4903,8 @@ def concat_wavs_to_file(sources, out_path, gap_sec=0.4, chunk_frames=1 << 18,
 
 
 def concat_wavs(wav_bytes_list, gap_sec=0.4):
-    """同一フォーマットのWAVバイト列を無音を挟んで連結し、WAVバイト列を返す。"""
+    """同一フォーマットのWAVバイト列を無音を挟んで連結し、WAVバイト列を返す。
+    gap_sec は全部の行で同じ秒数か、行ごとのリスト（line_gaps）。"""
     if not wav_bytes_list:
         return b""
     params = None
@@ -3395,15 +4914,91 @@ def concat_wavs(wav_bytes_list, gap_sec=0.4):
             if params is None:
                 params = w.getparams()
             frames.append(w.readframes(w.getnframes()))
-    silence = b"\x00" * int(params.framerate * gap_sec) * params.sampwidth * params.nchannels
+    fw = params.sampwidth * params.nchannels
     out = io.BytesIO()
     with wave.open(out, "wb") as w:
         w.setparams(params)
         for i, fr in enumerate(frames):
+            if i:
+                w.writeframes(b"\x00" * int(params.framerate * _gap_at(gap_sec, i)) * fw)
             w.writeframes(fr)
-            if i < len(frames) - 1:
-                w.writeframes(silence)
     return out.getvalue()
+
+
+# ---- 行と行のあいだの無音（段落・章の切れ目は長め） ----
+# 本を聴くとき、話の区切りで一息つけるように、段落が変わる所（空行のあと）と章の
+# 見出しの前は、文と文のあいだより長く空ける。どちらも「文の間」に比例させ、間を
+# 0 にしている人（動画の素材づくりなど）では、どこも 0 のまま。足す分には上限を付け、
+# 文の間を長くしている人で伸びすぎないようにする
+PARA_GAP_FACTOR = 2.5       # 段落の切れ目は、文の間の何倍か（0.4秒 → 1.0秒）
+CHAPTER_GAP_FACTOR = 5.0    # 章の見出しの前は、文の間の何倍か（0.4秒 → 2.0秒）
+PARA_GAP_MAX_EXTRA = 2.0    # 段落の切れ目で足す秒数の上限
+CHAPTER_GAP_MAX_EXTRA = 4.0  # 章の見出しの前で足す秒数の上限
+
+
+def paragraph_ids(lines):
+    """各行の段落番号。空行のあとと、行頭の字下げ（全角スペース。小説や Web 小説の段落の
+    頭）で次の段落になる。字下げも見るので、空行を消した本（「空行を削除」は最初からオン）
+    でも、段落の切れ目で長めの間を取れる（以前は空行だけを見ていて、取り出した本では
+    章の前しか長くならなかった）。空行は読まないので、空行の番号は使われない。"""
+    out = []
+    para = 0
+    prev_text = False   # 直前の行に文字があるか（空行のあとの字下げで2回数えない）
+    for ln in lines:
+        if not ln.strip():
+            para += 1
+            prev_text = False
+        else:
+            if prev_text and ln.lstrip(" \t").startswith("　"):
+                para += 1
+            prev_text = True
+        out.append(para)
+    return out
+
+
+def line_breaks(lines, para_ids):
+    """各行の前の切れ目の種類のリスト。""＝文と文（同じ段落）／"para"＝段落が変わる
+    （空行のあと・行頭の字下げ）／"chapter"＝章の見出し（第一章・プロローグ など）。
+    先頭の行は ""。para_ids は各行の段落番号（paragraph_ids で作る）。"""
+    out = []
+    for i, ln in enumerate(lines):
+        if i == 0:
+            out.append("")
+        elif is_chapter_heading(ln):
+            out.append("chapter")
+        elif para_ids[i] != para_ids[i - 1]:
+            out.append("para")
+        else:
+            out.append("")
+    return out
+
+
+def break_gap(kind, gap):
+    """切れ目の種類 kind（line_breaks）の前に入れる無音の秒数。文と文は gap のまま。"""
+    gap = max(0.0, float(gap))
+    if kind == "chapter":
+        return gap + min(gap * (CHAPTER_GAP_FACTOR - 1), CHAPTER_GAP_MAX_EXTRA)
+    if kind == "para":
+        return gap + min(gap * (PARA_GAP_FACTOR - 1), PARA_GAP_MAX_EXTRA)
+    return gap
+
+
+def line_gaps(lines, para_ids, gap, longer=True):
+    """各行の前に入れる無音（秒）のリスト（先頭の行の前は 0）。longer なら段落・章の
+    切れ目を長めにし、longer=False なら、どこも gap（以前と同じ）。結合・字幕・章の
+    時刻（concat_wavs_to_file・make_srt・build_chapters）に、そのまま渡せる。"""
+    kinds = line_breaks(lines, para_ids) if longer else [""] * len(lines)
+    return [0.0 if i == 0 else break_gap(k, gap) for i, k in enumerate(kinds)]
+
+
+def _gap_at(gap_sec, i):
+    """i 番目の行の前に入れる無音（秒）。gap_sec は全部の行で同じ秒数か、行ごとの
+    リスト（line_gaps）。先頭の行の前には入れない。"""
+    if i <= 0:
+        return 0.0
+    if isinstance(gap_sec, (list, tuple)):
+        return float(gap_sec[i])
+    return float(gap_sec)
 
 
 # ============================================================
@@ -3708,12 +5303,14 @@ def build_chapters(lines, durations, gap=0.0):
     """M4Bチャプター列を構築して (chapters, kind) を返す（GUI/CLIで共有）。
     kind: "heads"=章見出し検出（1個でも埋め込む・冒頭補完あり） /
           "auto"=約10分ごとの自動チャプター（2個以上のときだけ） / "none"=なし。
-    durations: 各行の再生秒。開始時刻は durations[i]+gap の累積で刻む。"""
+    durations: 各行の再生秒。開始時刻は「前の行の長さ＋その行の前の無音」の累積で
+    刻む。gap は全部の行で同じ秒数か、行ごとのリスト（line_gaps）。"""
     starts = []
     t = 0.0
-    for d in durations:
+    for i, d in enumerate(durations):
+        t += _gap_at(gap, i)
         starts.append(t)
-        t += d + gap
+        t += d
     heads = detect_chapters(lines)
     if heads:
         chapters = [(title, starts[k]) for title, k in heads]
@@ -3758,12 +5355,14 @@ def _srt_ts(sec: float) -> str:
 
 def make_srt(lines, durations, gap_sec=0.0) -> str:
     """行テキストと各行の音声長(秒)から SRT 字幕文字列を作る。
-    結合音声と同じ並び・同じ無音間隔(gap_sec)を前提にタイミングを刻む。"""
+    結合音声と同じ並び・同じ無音間隔(gap_sec)を前提にタイミングを刻む。gap_sec は
+    全部の行で同じ秒数か、行ごとのリスト（line_gaps。段落・章の切れ目は長い）。"""
     cues = []
     t = 0.0
-    for i, (ln, dur) in enumerate(zip(lines, durations), start=1):
-        cues.append(f"{i}\n{_srt_ts(t)} --> {_srt_ts(t + dur)}\n{ln}\n")
-        t += dur + gap_sec
+    for i, (ln, dur) in enumerate(zip(lines, durations)):
+        t += _gap_at(gap_sec, i)
+        cues.append(f"{i + 1}\n{_srt_ts(t)} --> {_srt_ts(t + dur)}\n{ln}\n")
+        t += dur
     return "\n".join(cues)
 
 
@@ -3997,3 +5596,79 @@ def make_vvproj(lines, style_id, speaker_uuid, engine_id=VV_ENGINE_ID):
         },
     }
     return json.dumps(proj, ensure_ascii=False, indent=2)
+
+
+# ============================================================
+#  新しい版のお知らせ（開いたときに1日1回、GitHub の最新リリースの版だけを見る）
+# ============================================================
+REPO = "rakuyou211-blip/TextToVoicevox"
+RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
+# Windows の1行導入（install.ps1）。もう一度動かすと、設定はそのままで新しい版に入れ替わる
+INSTALL_ONE_LINER = f"irm https://raw.githubusercontent.com/{REPO}/main/install.ps1 | iex"
+INSTALL_ONE_LINER_MAC = f"curl -fsSL https://raw.githubusercontent.com/{REPO}/main/install.sh | bash"
+UPDATE_CHECK_EVERY = 24 * 3600   # 聞くのは1日1回まで（秒）
+
+
+def parse_version(text):
+    """'v1.26.0' / '1.26' → (1, 26, 0)。版の形でなければ None。"""
+    m = re.match(r"^\s*v?(\d+)\.(\d+)(?:\.(\d+))?", str(text or ""))
+    if not m:
+        return None
+    return tuple(int(x or 0) for x in m.groups())
+
+
+def is_newer(latest, current=None):
+    """latest が今の版（current。既定は APP_VERSION）より新しいか。読めない版は新しくない。"""
+    a = parse_version(latest)
+    b = parse_version(APP_VERSION if current is None else current)
+    return bool(a and b and a > b)
+
+
+def update_due(last_checked, now=None, every=UPDATE_CHECK_EVERY):
+    """前に聞いた時刻（秒）から every 秒たったか。まだ聞いたことが無い・時計が戻っていたら聞く。"""
+    now = time.time() if now is None else now
+    try:
+        last = float(last_checked or 0)
+    except (TypeError, ValueError):
+        return True
+    return last <= 0 or now - last >= every or now < last
+
+
+def fetch_latest_release(timeout=5.0, urlopen=None):
+    """GitHub の最新リリースの (版のタグ, ページの URL)。取れなければ (None, None)。
+    送るのはアプリの名前と版（User-Agent）だけ。下書き・お試しの版は知らせない。"""
+    import urllib.request
+    req = urllib.request.Request(RELEASES_API, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"TextToVoicevox/{APP_VERSION}"})
+    try:
+        with (urlopen or urllib.request.urlopen)(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None, None
+    if not isinstance(data, dict) or data.get("draft") or data.get("prerelease"):
+        return None, None
+    tag = data.get("tag_name")
+    if not parse_version(tag):
+        return None, None
+    return tag, data.get("html_url") or RELEASES_PAGE
+
+
+def install_kind(app_dir, is_win=None, local_appdata=None):
+    """新しい版への入れ替え方。
+    "oneline" … Windows の1行導入で入れた（もう一度動かせば、押すだけで入れ替わる）
+    "zip"     … Windows の zip（新しい zip を落として上書きで展開する）
+    "mac"     … Mac（ターミナルの1行をもう一度、または新しい zip）
+    "dev"     … GitHub から取ってきた中身（git）。お知らせは出さない"""
+    if os.path.isdir(os.path.join(app_dir, ".git")):
+        return "dev"
+    if not (IS_WIN if is_win is None else is_win):
+        return "mac"
+    if os.path.isdir(os.path.join(app_dir, "runtime")):
+        return "oneline"   # Python 入りの版は1行導入でしか入らない
+    base = os.environ.get("LOCALAPPDATA", "") if local_appdata is None else local_appdata
+    if base and (os.path.normcase(os.path.abspath(app_dir))
+                 == os.path.normcase(os.path.abspath(os.path.join(base, "TextToVoicevox")))):
+        return "oneline"   # 1行導入の前からの入れ方（venv）
+    return "zip"

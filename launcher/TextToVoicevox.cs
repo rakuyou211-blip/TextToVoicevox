@@ -29,13 +29,20 @@ static class Launcher
     const string Title = "TextToVoicevox";
 
     // 印を外さないフォルダ（中身は自分で作ったもの・数が多くて時間がかかる）
-    static readonly string[] SkipDirs = { "venv", ".git", "__pycache__" };
+    static readonly string[] SkipDirs = { "venv", ".git", "__pycache__", "ocr_engine", "runtime" };
 
     [STAThread]
     static int Main()
     {
         string dir = AppDomain.CurrentDomain.BaseDirectory;
-        if (!File.Exists(Path.Combine(dir, "main.py")))
+        // zip では、プログラムや部品は隣の app フォルダに入っている（開いたときに見える物を
+        // 減らすため）。起動.pyw も、1回開いたあとは app の中にしまわれる
+        string app = Path.Combine(dir, "app");
+        if (!File.Exists(Path.Combine(app, "main.py")))
+        {
+            app = dir;
+        }
+        if (!File.Exists(Path.Combine(app, "main.py")))
         {
             // zip を開いた中身のまま .exe だけを実行すると、Windows は .exe だけを
             // 一時フォルダへ取り出して動かすので、隣のファイルが見つからない
@@ -52,6 +59,10 @@ static class Launcher
         // v1.24.0 から zip に .bat は無く、起動.pyw が入口（セットアップも起動も Python）。
         // 起動.pyw が無い古い形のフォルダだけ、従来どおり 起動.bat を動かす
         string pyw = Path.Combine(dir, "起動.pyw");
+        if (!File.Exists(pyw))
+        {
+            pyw = Path.Combine(app, "起動.pyw");
+        }
         string bat = Path.Combine(dir, "起動.bat");
         if (!File.Exists(pyw) && !File.Exists(bat))
         {

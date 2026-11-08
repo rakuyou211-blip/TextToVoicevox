@@ -57,7 +57,7 @@ def test_first_readme_txt_covers_both_os():
 # コントロールが拡張子だけで落とす。v1.23 では「起動.bat」と「起動.pyw」が並んでいて、
 # 拡張子を隠す Windows ではどちらも「起動」に見え、.bat を選んだ人が止められた
 # （2026-10-03、本人の実機で再発）。v1.24.0 から zip に .bat は1つも入れない。
-PYW_ENTRIES = {"起動.pyw": "launch", "デバッグ起動.pyw": "debug", "英語OCRを入れる.pyw": "ocr"}
+PYW_ENTRIES = {"起動.pyw": "launch", "デバッグ起動.pyw": "debug"}
 
 # 印が付いていると、スマート アプリ コントロールが拡張子だけで止める種類
 # （2026-09-27 に .bat/.cmd/.vbs/.js/.lnk を実測。残りは同じ「スクリプト・ショートカット」側）
@@ -88,10 +88,12 @@ def test_pyw_launcher_unblocks_before_starting():
     body = _read("winlaunch.py")
     assert "Zone.Identifier" in body, "winlaunch.py に印の除去がありません"
     run = body[body.index("def run("):]
+    # 印を外すのも古い .bat を片付けるのも、いちばん上（zip の並びでは app の1つ上）から
+    assert run.index("top = top_of(here)") < run.index("unblock(top)")
     for call in ("start_app(here)", "open_console(here"):
-        assert run.index("unblock(here)") < run.index(call), (
+        assert run.index("unblock(top)") < run.index(call), (
             f"winlaunch.run が {call} の前に印を外していません")
-        assert run.index("remove_legacy(here)") < run.index(call), (
+        assert run.index("remove_legacy(top)") < run.index(call), (
             f"winlaunch.run が {call} の前に古い .bat を片付けていません")
 
 
@@ -258,12 +260,105 @@ def test_release_zips_are_split_by_os():
         assert not any(f.startswith(("tests/", "tools/", ".github/")) for f in files)
         assert "install.ps1" not in files and "install.sh" not in files
     assert "ocr_win.ps1" in win
-    for need in ("起動.pyw", "デバッグ起動.pyw", "英語OCRを入れる.pyw", "winlaunch.py", "winsetup.py"):
+    for need in ("起動.pyw", "デバッグ起動.pyw", "winlaunch.py", "winsetup.py"):
         assert need in win, f"SAC に止められない起動口 {need} が Windows 用 zip にありません"
+    assert "assets/app-icon.ico" in win, "アプリの絵のショートカット（winlaunch.ensure_shortcut）が使う絵"
     assert "winlaunch.py" not in mac and "winsetup.py" not in mac, "winlaunch / winsetup は Windows 専用です"
+    for need in ("ocr_helper.py", "requirements-ocr-engine.txt"):
+        assert need in win and need not in mac, f"{need} は Windows 用の zip にだけ入れます"
     assert not any(f.endswith((".command", ".sh")) for f in win) and "ocr_mac.py" not in win
     assert "起動.command" in mac and "ocr_mac.py" in mac and "setup_mac.sh" in mac
     assert not any(f.endswith((".bat", ".ps1", ".pyw")) for f in mac)
+
+
+def test_windows_zip_shows_only_the_entry_on_top():
+    """Windows 用 zip を開いたときに見えるのは、起動.pyw と説明だけ。ほかは app フォルダの中
+    （デバッグ起動・LICENSE・README も）。Mac 用は今までどおり1段。"""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    try:
+        import make_release
+    finally:
+        sys.path.pop(0)
+    import winlaunch
+    assert make_release.zip_name("windows", "起動.pyw") == "TextToVoicevox/起動.pyw"
+    for f in ("How to use (日本語).html", "はじめにお読みください.txt"):
+        assert make_release.zip_name("windows", f) == "TextToVoicevox/" + f
+    for f in ("main.py", "デバッグ起動.pyw", "LICENSE", "README.md", "assets/app-icon.ico"):
+        assert make_release.zip_name("windows", f) == "TextToVoicevox/app/" + f
+    assert make_release.zip_name("mac", "main.py") == "TextToVoicevox/main.py"
+    try:
+        tracked = make_release.tracked_files(ROOT)
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("git が使えない環境")
+    top = {make_release.zip_name("windows", f).split("/")[1] for f in make_release.files_for("windows", tracked)}
+    assert top == set(winlaunch.TOP_FILES) | {winlaunch.APP_SUBDIR}
+
+
+def test_one_line_install_from_the_update_button():
+    """アプリの「更新する」から動いたとき（T2V_FROM_APP）: アプリが閉じるのを待ってから入れ替え、
+    VOICEVOX のページを開くかは聞かず、失敗したら黒い窓がすぐ消えないように待つ。"""
+    body = _read("install.ps1")
+    wait = body.split("function Wait-AppClosed", 1)[1].split("function ", 1)[0]
+    assert "$env:T2V_FROM_APP" in wait and "Start-Sleep" in wait
+    assert "-not $env:T2V_FROM_APP -and (Ask '  VOICEVOX" in body
+    catch = body.rsplit("} catch {", 1)[1]
+    assert "if ($env:T2V_FROM_APP) { [void](Read-Host" in catch
+
+
+def test_one_line_install_flattens_the_new_zip():
+    """1行導入の前からの入れ方は、新しい zip の app フォルダの中身と、いちばん上の 起動.pyw などを
+    1つのフォルダに並べる（入れた先は今までどおりの並び）。"""
+    body = _read("install.ps1")
+    assert "(Split-Path $src -Leaf) -eq 'app'" in body
+    assert "foreach ($f in $topFiles) { Copy-Item" in body
+
+
+def test_ocr_engine_parts_are_all_pinned():
+    """強い文字読み取りの部品は、版とハッシュを全部決めてある（pip --require-hashes は、
+    1つでも欠けると全部入らない。入れる瞬間まで気づけないので、ここで見る）。"""
+    lines = [l for l in _read("requirements-ocr-engine.txt").splitlines()
+             if l.strip() and not l.startswith("#")]
+    assert len(lines) >= 20
+    for line in lines:
+        assert re.fullmatch(r"[A-Za-z0-9_.-]+==[0-9][^ ]* --hash=sha256:[0-9a-f]{64}", line), line
+    names = [l.split("==")[0].lower() for l in lines]
+    for need in ("rapidocr", "onnxruntime", "opencv-python-headless", "numpy", "pillow", "shapely", "pyclipper"):
+        assert need in names
+
+
+def test_ocr_engine_size_note_is_the_same_everywhere():
+    """案内の窓と黒い窓で、ダウンロードの大きさが違うと信用を失う。"""
+    import core
+    import winsetup
+    assert core.OCR_ENGINE_SIZE_NOTE == winsetup.ENGINE_SIZE_NOTE
+    assert "約122MB" in core.OCR_ENGINE_SIZE_NOTE and "約122MB" in core.OCR_ENGLISH_MISSING_MSG
+
+
+def test_ocr_engine_is_not_tracked_or_packed():
+    """部品のフォルダは配らない。"""
+    body = _read(".gitignore")
+    for name in ("ocr_engine/", "ocr_engine.new/", "ocr_engine.old/"):
+        assert name in body
+
+
+def test_docs_do_not_send_people_to_a_removed_entry():
+    """文字を読む部品は最初のセットアップで入るので、入れるための入口を説明に残さない
+    （変更履歴の昔の版の記述は、その時の事実なので残す）。"""
+    for name in ("README.md", "README.en.md", "README.zh-TW.md", "README.zh-CN.md", "はじめにお読みください.txt"):
+        body = _read(name)
+        assert ".pyw` … 文字" not in body and "英語OCRを入れる" not in body, name
+        assert "文字読み取りを強くする.pyw" not in body, name
+
+
+def test_one_line_install_also_brings_the_engine():
+    """1行導入でも押すものを増やさない。入らなくても導入は止めない。アイコンを作る前に入れる。"""
+    body = _read("install.ps1")
+    call = "'winsetup.py'), 'engine')"
+    assert call in body
+    before, after = body.split(call, 1)
+    assert before.rstrip().rsplit("try {", 1)[1].strip().startswith("Invoke-Native"), "try の中で呼んでいません"
+    assert "catch" in after.split("}", 1)[1][:40]
+    assert "CreateShortcut" not in before and "CreateShortcut" in after
 
 
 def test_download_links_match_release_zip_names():

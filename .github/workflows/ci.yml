@@ -26,7 +26,7 @@ jobs:
         run: pip install pypdfium2 pillow requests pytest
 
       - name: Syntax check
-        run: python -m py_compile main.py core.py ocr_mac.py
+        run: python -m py_compile main.py core.py ocr_mac.py ocr_helper.py
 
       - name: Run tests
         if: runner.os != 'macOS'
@@ -98,7 +98,8 @@ jobs:
           if (-not (Select-String -LiteralPath (Join-Path $d 'settings.json') -Pattern 'keep' -Quiet)) { throw 'settings.json was lost' }
           Write-Host 'update kept settings.json'
 
-      # 利用者と同じ道：GitHub の最新リリースの zip を取ってきて入れる（T2V_SRC なし）。
+      # 利用者と同じ道：GitHub の最新リリースを取ってきて入れる（T2V_SRC なし）。
+      # そのリリースに Python 入りの版があればそれを、無ければ zip と venv で入れる。
       # zip の展開で日本語のファイル名（起動.pyw）が崩れないことも確かめる。
       - name: One-line installer from the latest release
         shell: powershell
@@ -109,13 +110,82 @@ jobs:
         run: |
           irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex
           $d = $env:T2V_DIR
-          foreach ($f in @('main.py', 'core.py', 'venv\Scripts\pythonw.exe')) {
-            if (-not (Test-Path -LiteralPath (Join-Path $d $f))) { throw "missing: $f" }
+          $py = Join-Path $d 'runtime\python.exe'
+          if (-not (Test-Path -LiteralPath $py)) { $py = Join-Path $d 'venv\Scripts\python.exe' }
+          foreach ($f in @((Join-Path $d 'main.py'), (Join-Path $d 'core.py'), $py)) {
+            if (-not (Test-Path -LiteralPath $f)) { throw "missing: $f" }
           }
           # \u8d77\u52d5.pyw is the launcher (checked from Python to keep this script ASCII-only)
-          & (Join-Path $d 'venv\Scripts\python.exe') -c "import os,sys; sys.exit(0 if '\u8d77\u52d5.pyw' in os.listdir(sys.argv[1]) else 1)" $d
+          & $py -c "import os,sys; sys.exit(0 if '\u8d77\u52d5.pyw' in os.listdir(sys.argv[1]) else 1)" $d
           if ($LASTEXITCODE) { throw 'Japanese file names were broken when extracting the release zip' }
-          Write-Host 'release install ok'
+          Write-Host "release install ok ($py)"
+
+  # 1行導入が入れる「Python 入りの版」を、この commit の中身で作って入れてみる
+  # （Release では release.yml が同じ物を作って添付する）。作るときに python.org と PyPI から落とす。
+  # 入れる人の PC には Python が要らない。ブラウザ用の zip にしない理由は tools/make_bundle.py
+  bundle-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the Python-included app
+        run: python tools/make_bundle.py dist
+
+      - name: One-line installer with that build
+        shell: powershell
+        env:
+          T2V_BUNDLE: ${{ github.workspace }}\dist\TextToVoicevox_OneLine_Win64.zip
+          T2V_DIR: ${{ runner.temp }}\t2v
+          T2V_NO_LAUNCH: "1"
+          T2V_YES: "1"
+        run: irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex
+
+      - name: Check the installed app
+        shell: powershell
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 't2v'
+          foreach ($f in @('main.py', 'runtime\pythonw.exe', 'ocr_engine\ok.txt', 'assets\app-icon.ico', 'THIRD-PARTY-NOTICES.txt')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $d $f))) { throw "missing: $f" }
+          }
+          if (Test-Path -LiteralPath (Join-Path $d 'venv')) { throw 'the Python-included app should not make a venv' }
+          & (Join-Path $d 'runtime\python.exe') -c "import sys, tkinter, PIL, pypdfium2, requests, janome, core; tkinter.Tcl(); assert sys.flags.isolated; print(sys.version)"
+          if ($LASTEXITCODE) { throw 'the bundled Python cannot load the app parts' }
+          & (Join-Path $d 'ocr_engine\python\python.exe') (Join-Path $d 'ocr_helper.py') --selftest
+          if ($LASTEXITCODE) { throw 'the bundled OCR engine cannot read' }
+          $shell = New-Object -ComObject WScript.Shell
+          foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+            $lnk = $shell.CreateShortcut((Join-Path $folder 'TextToVoicevox.lnk'))
+            if ($lnk.TargetPath -ne (Join-Path $d 'runtime\pythonw.exe')) { throw "bad target: $($lnk.TargetPath)" }
+          }
+          # Open it the same way as the icon, and see that it keeps running
+          $p = Start-Process -FilePath (Join-Path $d 'runtime\pythonw.exe') -ArgumentList ('"' + (Join-Path $d 'main.py') + '"') -WorkingDirectory $d -PassThru
+          Start-Sleep -Seconds 20
+          if ($p.HasExited) {
+            Get-ChildItem -LiteralPath $d -Filter '*.log' | ForEach-Object { Get-Content -LiteralPath $_.FullName }
+            throw "the app exited early ($($p.ExitCode))"
+          }
+          Stop-Process -Id $p.Id -Force
+          Write-Host 'bundle install ok'
+
+      - name: Re-run keeps user data (update)
+        shell: powershell
+        env:
+          T2V_BUNDLE: ${{ github.workspace }}\dist\TextToVoicevox_OneLine_Win64.zip
+          T2V_DIR: ${{ runner.temp }}\t2v
+          T2V_NO_LAUNCH: "1"
+          T2V_YES: "1"
+        run: |
+          $d = $env:T2V_DIR
+          Set-Content -LiteralPath (Join-Path $d 'settings.json') -Value '{"keep": true}' -Encoding UTF8
+          irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex
+          if (-not (Select-String -LiteralPath (Join-Path $d 'settings.json') -Pattern 'keep' -Quiet)) { throw 'settings.json was lost' }
+          if (-not (Test-Path -LiteralPath (Join-Path $d 'runtime\pythonw.exe'))) { throw 'runtime missing after update' }
+          Write-Host 'update kept settings.json'
 
   # Mac の「1行でかんたん導入」を、この commit の install.sh で実際に流す。
   # 利用者と同じく raw.githubusercontent から curl | bash で読む。
