@@ -521,6 +521,67 @@ def _dark_title_bar(win, dark, tries=10):
         return False
 
 
+def _win_monitor_pairs():
+    """Windows: 画面ごとの [(アプリから見た範囲, 本当の画素での範囲)]（どちらも 左, 上, 右, 下）。
+    このアプリは「システムDPI対応」なので、メインとちがう倍率の画面の座標は、Windows が
+    倍率の比で直して見せる（250% がメインなら、125% の画面は位置も大きさも2倍に見える）。
+    画面を撮った画像は本当の画素なので、この対応を知らないと切り抜く場所がずれる。
+    取れないとき（古い Windows など）は None。"""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    proc_t = ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HMONITOR, wintypes.HDC,
+                                ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+    def rects():
+        out = {}
+
+        def cb(mon, _dc, rc, _lp):
+            r = rc.contents
+            out[mon] = (r.left, r.top, r.right, r.bottom)
+            return 1
+        keep = proc_t(cb)   # 呼んでいるあいだ、手放さない
+        return out if user32.EnumDisplayMonitors(None, None, keep, 0) else None
+
+    seen = rects()
+    try:
+        set_ctx = user32.SetThreadDpiAwarenessContext   # Windows 10 (1607) から
+    except AttributeError:
+        return None
+    set_ctx.restype = ctypes.c_void_p
+    set_ctx.argtypes = [ctypes.c_void_p]
+    # このスレッドだけ、少しのあいだ「画面ごとのDPI対応」（V2。だめなら V1）にして聞き直す
+    old = set_ctx(ctypes.c_void_p(-4)) or set_ctx(ctypes.c_void_p(-3))
+    if not old:
+        return None
+    try:
+        real = rects()
+    finally:
+        set_ctx(ctypes.c_void_p(old))
+    if not seen or not real or set(seen) != set(real):
+        return None
+    return [(seen[m], real[m]) for m in seen]
+
+
+def _screen_layout_from(region, pairs, image_size):
+    """撮った画像と、アプリから見た画面の対応（core.screen_selection_box_multi の layout）。
+    画面が1台のとき・どの画面も座標と画素が同じとき・対応が取れないときは、全体を1枚として
+    扱う（これまでと同じ）。倍率のちがう画面が混ざるときだけ、画面ごとに分ける。"""
+    rx, ry, rw, rh = region
+    iw, ih = image_size
+    whole = [(rx, ry, rw, rh, 0, 0, iw, ih)]
+    if not pairs or all(v == r for v, r in pairs):
+        return whole
+    left = min(r[0] for _v, r in pairs)
+    top = min(r[1] for _v, r in pairs)
+    if (max(r[2] for _v, r in pairs) - left, max(r[3] for _v, r in pairs) - top) != (iw, ih):
+        return whole   # 画像の大きさが、画面の画素の合計と合わない（想定していない撮り方）
+    # メイン画面（座標 0,0 のある画面）を先頭に（選ぶ窓の1枚目になり、キー入力を受ける）
+    pairs = sorted(pairs, key=lambda p: not (p[0][0] <= 0 < p[0][2] and p[0][1] <= 0 < p[0][3]))
+    return [(v[0], v[1], v[2] - v[0], v[3] - v[1],
+             r[0] - left, r[1] - top, r[2] - r[0], r[3] - r[1]) for v, r in pairs]
+
+
 # レイアウトの余白定数（全セクションで統一し、バラバラなpadx/padyを解消する）
 PAD_X = _px(8)   # セクション外周の水平余白
 PAD_Y = _px(6)   # セクション外周の垂直余白
@@ -877,6 +938,7 @@ class App(tk.Tk):
             first = (f"{hello}、はじめまして！ ファイルを入れると文字を取り出すよ。"
                      "あとは ▶ 再生で聴くだけ")
         self.status_var = tk.StringVar(value=first)
+        self._first_msg = first   # 本文が入ったら、次の一手の案内に替える（_update_step_highlight）
         # 画面は2列に組む:
         #   上の帯 … アプリ名・状態の文・テーマ・感想を送る（窓の幅いっぱい）
         #   左の列 … 手順 ①取り込む ②声 ③保存。いちばん下に VOICEVOX との接続
@@ -1057,7 +1119,7 @@ class App(tk.Tk):
 
     def _step_sep(self):
         ttk.Separator(self._steps, orient="horizontal").pack(
-            fill="x", pady=(GAPY + 2, GAPY))
+            fill="x", pady=(GAPY * 2, GAPY + 2))   # ①②③ の区切りは少し広めに
 
     def _sync_steps_view(self, event=None):
         """左の列の幅を中身に合わせ、入りきらないときだけスクロールバーを出す。"""
@@ -1294,7 +1356,8 @@ class App(tk.Tk):
         self._extract_row = run
         self.report_btn = ttk.Button(run, text="直した所", width=7, style="Quiet.TButton",
                                      command=self.show_shape_report, state="disabled")
-        self.report_btn.pack(side="right", fill="y", padx=(GAPX, 0))
+        # 見せる物があるときだけ出す（_merge_report）。前は、取り出す前から押せない
+        # 灰色のボタンが大きく出ていて、① が重く見えた
         _Tooltip(self.report_btn, lambda: (
             "取り出すときに外した行（ノイズ・ページの見出し）と、直した読み取りの誤字を確かめられます。"
             if (self._shape_report.get("removed")
@@ -1559,6 +1622,10 @@ class App(tk.Tk):
         Primary⇄Secondary は同じ寸法なので、切り替えても並びは動かない。"""
         try:
             has_text = bool(self.text.get("1.0", "end-1c").strip())
+            # 本文があるのに「まずは ① にファイルを追加してね」のままにしない
+            # （貼り付けた・打ち込んだとき。取り出したときは、その結果の文が出る）
+            if has_text and self.status_var.get() == getattr(self, "_first_msg", None):
+                self.status_var.set("本文が入ったよ。▶ 再生で聴けます")   # 帯の1行に収まる長さで
             self.extract_btn.config(style="Primary.TButton")
             self.synth_btn.config(style="Primary.TButton" if has_text
                                   else "Secondary.TButton")
@@ -1574,10 +1641,15 @@ class App(tk.Tk):
         hint = getattr(self, "_text_hint", None)
         if hint is None:
             return
+        btn = getattr(self, "_text_hint_btn", None)
         if has_text:
             hint.place_forget()
+            if btn is not None:
+                btn.place_forget()
         else:
             hint.place(relx=0.5, rely=0.4, anchor="center")
+            if btn is not None:
+                btn.place(relx=0.5, rely=0.4, y=_px(44), anchor="n")
 
     # ---------------- ② 声 ----------------
     def _build_voice_section(self):
@@ -1757,10 +1829,16 @@ class App(tk.Tk):
             f"本文を音声ファイルに書き出します（{mod}G）。"))
 
         # VOICEVOX（エディタ）で続きをするための書き出し
-        ttk.Label(self._steps, text="VOICEVOXで仕上げる", style="Cluster.TLabel").pack(
-            anchor="w", pady=(GAPY, 0))
+        # 使う人が限られるので畳んでおく（③ を短くして、主役の「音声を生成」を目立たせる。
+        # 開いたかどうかは覚えておく。_set_finish）
+        self._finish_btn = ttk.Button(self._steps, text="VOICEVOXで仕上げる ▷",
+                                      style="Tool.TButton", command=self._toggle_finish)
+        self._finish_btn.pack(anchor="w", pady=(GAPY, 0))
+        _Tooltip(self._finish_btn, "VOICEVOX のエディタで続きをするための保存\n"
+                                   "（.txt・本文のコピー・プロジェクト .vvproj）を開きます。")
         ob = ttk.Frame(self._steps)
-        ob.pack(fill="x")
+        self._finish_frame = ob
+        self._finish_open = False
         ttk.Button(ob, text="VOICEVOX用に保存(.txt)", style="Quiet.TButton",
                    command=self.save_txt).grid(row=0, column=0, sticky="ew", pady=1)
         copy_btn = ttk.Button(ob, text="本文をコピー", style="Quiet.TButton",
@@ -1784,6 +1862,19 @@ class App(tk.Tk):
                  "行数が多いと少し時間がかかります"
                  "（調整していないときは何も待ちません）。")
         ob.columnconfigure((0, 1), weight=1, uniform="out")
+
+    def _toggle_finish(self):
+        self._set_finish(not self._finish_open)
+
+    def _set_finish(self, show):
+        """③ の「VOICEVOXで仕上げる」（.txt・コピー・.vvproj）を開く/畳む。"""
+        self._finish_open = bool(show)
+        if self._finish_open:
+            self._finish_frame.pack(fill="x", after=self._finish_btn)
+            self._finish_btn.config(text="VOICEVOXで仕上げる ▽")
+        else:
+            self._finish_frame.pack_forget()
+            self._finish_btn.config(text="VOICEVOXで仕上げる ▷")
 
     # ---------------- 接続（左の列のいちばん下・いつも見える） ----------------
     def _build_connection_section(self):
@@ -2034,6 +2125,11 @@ class App(tk.Tk):
                  "左の ① にファイルを入れるか、文字をそのまま貼り付けてね。")
         self._text_hint.bind("<Button-1>",
                              lambda e: (self.text.focus_set(), "break")[1])
+        # 案内のすぐ下に、最初の一手のボタンを置く（広い空の面の真ん中で、左上の
+        # 「ファイル追加」を探さなくて済むように）
+        self._text_hint_btn = ttk.Button(self.text, text="ファイルを選ぶ…",
+                                         style="Secondary.TButton", cursor="arrow",
+                                         command=self.add_files)
         def by_hand(*args):   # スクロールバーを動かした（読んでいる行へ引き戻さない）
             self._note_user_scroll()
             return self.text.yview(*args)
@@ -2162,6 +2258,7 @@ class App(tk.Tk):
         self._resume_row = ttk.Frame(bar)
         self._resume_var = tk.StringVar()
         ttk.Label(self._resume_row, textvariable=self._resume_var).pack(side="left")
+        self._resume_what = None   # (行番号, その行の文)。幅に合わせて切り詰め直す（_fit_resume）
         self.resume_btn = ttk.Button(self._resume_row, text="▶ 続きを聴く",
                                      command=self.play_from_bookmark, state="disabled")
         self.resume_btn.pack(side="left", padx=GAPX)
@@ -2171,8 +2268,10 @@ class App(tk.Tk):
                 return "VOICEVOX につながると押せます。"
             return "前回の続き（しおりの行）から読み上げます。"
         _Tooltip(self.resume_btn, _resume_tip)
-        ttk.Button(self._resume_row, text="×", width=3, style="Mini.Quiet.TButton",
-                   command=self._hide_resume).pack(side="left")
+        self._resume_close = ttk.Button(self._resume_row, text="×", width=3,
+                                        style="Mini.Quiet.TButton", command=self._hide_resume)
+        self._resume_close.pack(side="left")
+        self._resume_row.bind("<Configure>", lambda e: self._fit_resume(), add="+")
 
         ctl = ttk.Frame(bar)
         ctl.pack(fill="x")
@@ -2506,11 +2605,37 @@ class App(tk.Tk):
 
     def _show_resume(self, line):
         """「前回の続き：◯行目「…」から ▶ 続きを聴く」を再生バーの上に出す。"""
-        snippet = self.text.get(f"{line}.0", f"{line}.end").strip()
-        if len(snippet) > 20:
-            snippet = snippet[:20] + "…"
-        self._resume_var.set(f"前回の続き：{line}行目「{snippet}」から")
+        self._resume_what = (line, self.text.get(f"{line}.0", f"{line}.end").strip())
+        self._fit_resume()
         self._resume_row.pack(fill="x", pady=(0, GAPY), before=self._player_ctl)
+
+    def _fit_resume(self):
+        """「前回の続き」の文を、行の幅に入る長さにする（その行の文は20字まで。入らなければ
+        もっと短く）。長いままだと、いちばん狭い窓では「▶ 続きを聴く」が切れ、× は行の外へ
+        押し出されて見えなかった。窓の幅を変えたら、もう一度合わせる。"""
+        if not self._resume_what:
+            return
+        line, full = self._resume_what
+        try:
+            width = self._resume_row.winfo_width()
+            if width <= 1:   # まだ出していない。すぐ下のボタンの行と同じ幅になる
+                width = self._player_ctl.winfo_width()
+            room = (width - self.resume_btn.winfo_reqwidth()
+                    - self._resume_close.winfo_reqwidth() - 2 * GAPX - _px(4))
+            n = min(20, len(full))
+            while True:
+                snippet = full if n >= len(full) else full[:n] + "…"
+                text = f"前回の続き：{line}行目「{snippet}」から"
+                # 幅がまだ分からないとき（窓を出す前）は、20字のまま
+                if n <= 0 or width <= 1 or self._text_width(text) <= room:
+                    break
+                n -= 1
+            if n <= 0 and full:
+                text = f"前回の続き：{line}行目から"
+        except tk.TclError:
+            return
+        if self._resume_var.get() != text:
+            self._resume_var.set(text)
 
     def _hide_resume(self):
         self._resume_row.pack_forget()
@@ -3493,8 +3618,11 @@ class App(tk.Tk):
             w.lift()
 
     def _text_width(self, text):
-        """ふつうの字体で text を書いたときの幅（ピクセル）。"""
-        return int(self.tk.call("font", "measure", "TkDefaultFont", text))
+        """ふつうの字体で text を書いたときの幅（ピクセル）。部品の字体と同じ字体で測る:
+        Windows の部品は UI_FONT（10pt）で、TkDefaultFont（OS の 9pt）ではない。前は
+        TkDefaultFont で測っていて、実際より1割ほど狭く見積もっていた（入ると見た文が
+        少し切れた。125%表示のいちばん狭い窓で、長い本の「12,345行・約25時間12分」など）。"""
+        return int(self.tk.call("font", "measure", UI_FONT or "TkDefaultFont", text))
 
     def _fit_stats(self, room):
         """行数・文字数・めやすを、置かれた場所に入る長さで出す（全部は吹き出しで読める）。
@@ -5319,7 +5447,7 @@ class App(tk.Tk):
             messagebox.showerror("同じ範囲を読む", f"画面を撮れませんでした: {e}")
             return
         p0, p1 = self._screen_last
-        box = core.screen_selection_box(p0, p1, region, shot.size)
+        box = core.screen_selection_box_multi(p0, p1, self._screen_layout(shot.size), shot.size)
         if box is None:
             # モニタを外した等で、前の場所が画面の外になった → 囲み直してもらう
             self._screen_last = None
@@ -5337,6 +5465,22 @@ class App(tk.Tk):
             return self._virtual_screen(), True
         return (0, 0, self.winfo_screenwidth(), self.winfo_screenheight()), False
 
+    def _screen_pairs(self):
+        """（Windows）画面ごとの、アプリから見た範囲と本当の画素での範囲（_win_monitor_pairs）。
+        取れなければ None。Tk には触らない。"""
+        if not core.IS_WIN:
+            return None
+        try:
+            return _win_monitor_pairs()
+        except Exception:
+            return None
+
+    def _screen_layout(self, image_size):
+        """撮った画像と、アプリから見た画面の対応（_screen_layout_from）。倍率のちがう画面が
+        混ざるときだけ画面ごとに分かれ、ほかは全体を1枚として扱う。"""
+        region, _all = self._screen_region()
+        return _screen_layout_from(region, self._screen_pairs(), image_size)
+
     def _screen_grab(self):
         self._ticks.pop("screen", None)
         if isinstance(self._screen_win, tk.Toplevel):
@@ -5347,7 +5491,7 @@ class App(tk.Tk):
             from PIL import ImageGrab
             shot = (ImageGrab.grab(all_screens=True) if all_screens
                     else ImageGrab.grab())
-            self._open_screen_picker(shot, region)
+            self._open_screen_picker(shot, region, self._screen_layout(shot.size))
         except Exception as e:
             self._close_screen_picker()
             hint = ("\n\nMacでは「システム設定 → プライバシーとセキュリティ → 画面収録」で、"
@@ -5355,105 +5499,143 @@ class App(tk.Tk):
                     if core.IS_MAC else "")
             messagebox.showerror("スクリーンショット", f"画面を撮れませんでした: {e}{hint}")
 
-    def _open_screen_picker(self, shot, region):
-        """撮った画面を全面に暗めに映し、ドラッグで範囲を選ばせる窓を出す。"""
+    def _open_screen_picker(self, shot, region, layout=None):
+        """撮った画面を暗めに映し、ドラッグで範囲を選ばせる窓を出す。
+        layout（core.screen_selection_box_multi と同じ形）が画面ごとに分かれていれば、
+        窓も画面ごとに1枚ずつ出す。倍率のちがう画面が混ざっていると（250% と 125% の2台
+        など）、アプリから見た座標と撮った画像の画素は、画面ごとに別の比でずれる。全部の
+        画面を1枚の窓で覆っていた前の作りでは、写真が引き伸ばされて本物の画面とずれ、
+        囲んだ所とちがう場所を読んでいた。"""
         from PIL import Image, ImageEnhance, ImageTk
-        rx, ry, rw, rh = region
+        if not layout:
+            rx, ry, rw, rh = region
+            layout = [(rx, ry, rw, rh, 0, 0, shot.size[0], shot.size[1])]
         # 画像のコピーは最小限に（多画面・4Kでは1枚で数十MBになる。古いPCでも軽く）
-        view = shot if shot.mode == "RGB" else shot.convert("RGB")
-        if view.size != (rw, rh):
-            view = view.resize((rw, rh), Image.BILINEAR)   # 高解像度画面は縮めて映す
-        # 暗くして「いまは選ぶ時間」と分かるようにする。選んだ所だけ元の明るさで見せる
-        bright = view
-        dim = ImageEnhance.Brightness(view).enhance(0.5)
-
-        win = tk.Toplevel(self)
-        self._screen_win = win
-        win.overrideredirect(True)
-        win.geometry(f"{rw}x{rh}+{rx}+{ry}")
-        try:
-            win.attributes("-topmost", True)
-        except tk.TclError:
-            pass
-        cv = tk.Canvas(win, width=rw, height=rh, highlightthickness=0,
-                       bd=0, cursor="crosshair", bg="black")
-        cv.pack(fill="both", expand=True)
-        # 画像は、どの窓のものかを必ず渡す（渡さないと最初に作った Tk のものになり、
-        # 窓が複数あると「image does not exist」で映らないことがある）
-        photo = ImageTk.PhotoImage(dim, master=win)
-        bg_item = cv.create_image(0, 0, image=photo, anchor="nw")
-        lit_item = cv.create_image(0, 0, anchor="nw")
-        rect = cv.create_rectangle(0, 0, 0, 0, outline="#ffcc33", width=2,
-                                   state="hidden")
+        base = shot if shot.mode == "RGB" else shot.convert("RGB")
         tip = ("読みたい所をドラッグで囲んでください　"
                + ("（やめる：右クリック か Ctrl+クリック）" if core.IS_MAC
                   else "（やめる：Esc か 右クリック）"))
-        tip_bg = cv.create_rectangle(0, 0, 0, 0, fill="#222222",
-                                     outline="#ffcc33")
-        tip_item = cv.create_text(0, 0, text=tip, fill="white",
-                                  font=self._heading_font, anchor="n")
-        # PhotoImage はGC防止に保持。lit_t は明るく見せる処理の間引き用（古いPCでも軽く）
-        st = {"photo": photo, "lit": None, "p0": None, "lit_t": 0.0}
+        # 案内はメイン画面（座標0,0の画面）の上の中央に出す。その点のある窓に置く
+        tip_at = (self.winfo_screenwidth() // 2, 24)
+        # p0 は囲み始めた点、pane はその窓。lit_t は明るく見せる処理の間引き用（古いPCでも軽く）
+        st = {"p0": None, "pane": None, "lit_t": 0.0}
+        panes = []
+        first = None
+        for vx, vy, vw, vh, ix, iy, iw, ih in layout:
+            view = base
+            if (ix, iy, iw, ih) != (0, 0, base.size[0], base.size[1]):
+                view = base.crop((ix, iy, ix + iw, iy + ih))   # この画面に写っている所だけ
+            if view.size != (vw, vh):
+                view = view.resize((vw, vh), Image.BILINEAR)   # 高解像度画面は縮めて映す
+            # 暗くして「いまは選ぶ時間」と分かるようにする。選んだ所だけ元の明るさで見せる
+            dim = ImageEnhance.Brightness(view).enhance(0.5)
+            # 2枚目からは1枚目の子にする（1枚目を閉じれば、全部いっしょに閉じる）
+            win = tk.Toplevel(self if first is None else first)
+            if first is None:
+                first = win
+                self._screen_win = win
+            win.overrideredirect(True)
+            # 位置と大きさは、-topmost より先に決めること。-topmost を言うと Tk はその場で
+            # 窓を作る。先に作ってから動かすと、倍率のちがう画面へは正しく動かない
+            # （Windows は、動かす前にいた画面の倍率で座標を読む。2026-11-13 に実測:
+            # メイン画面で作った窓を 125% の画面の座標へ動かすと、画面の外に出た）
+            win.geometry(f"{vw}x{vh}+{vx}+{vy}")
+            try:
+                win.attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            cv = tk.Canvas(win, width=vw, height=vh, highlightthickness=0,
+                           bd=0, cursor="crosshair", bg="black")
+            cv.pack(fill="both", expand=True)
+            # 画像は、どの窓のものかを必ず渡す（渡さないと最初に作った Tk のものになり、
+            # 窓が複数あると「image does not exist」で映らないことがある）
+            photo = ImageTk.PhotoImage(dim, master=win)
+            panes.append({
+                "win": win, "cv": cv, "v": (vx, vy, vw, vh), "bright": view,
+                "photo": photo, "lit": None,   # PhotoImage はGC防止に保持
+                "bg": cv.create_image(0, 0, image=photo, anchor="nw"),
+                "lit_item": cv.create_image(0, 0, anchor="nw"),
+                "rect": cv.create_rectangle(0, 0, 0, 0, outline="#ffcc33", width=2,
+                                            state="hidden"),
+                "tip": None})
+        tip_pane = next((q for q in panes
+                         if q["v"][0] <= tip_at[0] < q["v"][0] + q["v"][2]
+                         and q["v"][1] <= tip_at[1] < q["v"][1] + q["v"][3]), panes[0])
+        tip_pane["tip"] = (
+            tip_pane["cv"].create_rectangle(0, 0, 0, 0, fill="#222222", outline="#ffcc33"),
+            tip_pane["cv"].create_text(0, 0, text=tip, fill="white",
+                                       font=self._heading_font, anchor="n"))
 
-        def origin():
+        def origin(pane):
             # 窓が本当に置かれた位置からずれを求める（Macはメニューバーの下へ
             # ずらされることがある）。写真は画面と同じ位置に来るよう逆にずらす
-            return win.winfo_rootx(), win.winfo_rooty()
+            return pane["win"].winfo_rootx(), pane["win"].winfo_rooty()
 
-        def layout(_e=None):
-            ox, oy = origin()
-            cv.coords(bg_item, rx - ox, ry - oy)
-            # 案内はメイン画面（座標0,0の画面）の上の中央に出す
-            cx, cy = self.winfo_screenwidth() // 2 - ox, 24 - oy
-            cv.coords(tip_item, cx, cy + 8)
-            x0, y0, x1, y1 = cv.bbox(tip_item)
-            cv.coords(tip_bg, x0 - 12, y0 - 8, x1 + 12, y1 + 8)
-            cv.tag_raise(tip_bg)
-            cv.tag_raise(tip_item)
+        def place(pane, _e=None):
+            cv = pane["cv"]
+            vx, vy, vw, vh = pane["v"]
+            ox, oy = origin(pane)
+            cv.coords(pane["bg"], vx - ox, vy - oy)
+            if pane["tip"]:
+                tip_bg, tip_item = pane["tip"]
+                cx, cy = tip_at[0] - ox, tip_at[1] - oy
+                if not (vx <= tip_at[0] < vx + vw and vy <= tip_at[1] < vy + vh):
+                    cx, cy = vx + vw // 2 - ox, vy + 24 - oy   # メイン画面の無い並び: この窓の上の中央
+                cv.coords(tip_item, cx, cy + 8)
+                x0, y0, x1, y1 = cv.bbox(tip_item)
+                cv.coords(tip_bg, x0 - 12, y0 - 8, x1 + 12, y1 + 8)
+                cv.tag_raise(tip_bg)
+                cv.tag_raise(tip_item)
 
-        def show_lit(box_canvas):
+        def show_lit(pane, box_canvas):
             # 囲んだ所だけ元の明るさで重ねる（どこを読むかが一目で分かる）
-            ox, oy = origin()
+            cv = pane["cv"]
+            vx, vy, vw, vh = pane["v"]
+            ox, oy = origin(pane)
             x0, y0, x1, y1 = box_canvas
-            sx0, sy0 = x0 + ox - rx, y0 + oy - ry
-            sx1, sy1 = x1 + ox - rx, y1 + oy - ry
+            sx0, sy0 = x0 + ox - vx, y0 + oy - vy
+            sx1, sy1 = x1 + ox - vx, y1 + oy - vy
             sx0, sy0 = max(0, sx0), max(0, sy0)
-            sx1, sy1 = min(rw, sx1), min(rh, sy1)
+            sx1, sy1 = min(vw, sx1), min(vh, sy1)
             if sx1 - sx0 < 1 or sy1 - sy0 < 1:
-                cv.itemconfigure(lit_item, image="")
+                cv.itemconfigure(pane["lit_item"], image="")
                 return
-            st["lit"] = ImageTk.PhotoImage(bright.crop((sx0, sy0, sx1, sy1)), master=win)
-            cv.itemconfigure(lit_item, image=st["lit"])
-            cv.coords(lit_item, sx0 + rx - ox, sy0 + ry - oy)
+            pane["lit"] = ImageTk.PhotoImage(pane["bright"].crop((sx0, sy0, sx1, sy1)),
+                                             master=pane["win"])
+            cv.itemconfigure(pane["lit_item"], image=pane["lit"])
+            cv.coords(pane["lit_item"], sx0 + vx - ox, sy0 + vy - oy)
 
-        def press(e):
+        def press(e, pane):
             st["p0"] = (e.x_root, e.y_root, e.x, e.y)
-            cv.coords(rect, e.x, e.y, e.x, e.y)
-            cv.itemconfigure(rect, state="normal")
+            st["pane"] = pane
+            pane["cv"].coords(pane["rect"], e.x, e.y, e.x, e.y)
+            pane["cv"].itemconfigure(pane["rect"], state="normal")
 
-        def motion(e):
-            if st["p0"] is None:
+        def motion(e, pane):
+            if st["p0"] is None or st["pane"] is not pane:
                 return
+            cv = pane["cv"]
             _, _, x0, y0 = st["p0"]
             box = (min(x0, e.x), min(y0, e.y), max(x0, e.x), max(y0, e.y))
-            cv.coords(rect, *box)
+            cv.coords(pane["rect"], *box)
             now = time.monotonic()
             if now - st["lit_t"] >= 0.04:   # 画像の切り出しは毎回だと重いので間引く
                 st["lit_t"] = now
-                show_lit(box)
-            cv.tag_raise(rect)
+                show_lit(pane, box)
+            cv.tag_raise(pane["rect"])
 
-        def release(e):
-            if st["p0"] is None:
+        def release(e, pane):
+            if st["p0"] is None or st["pane"] is not pane:
                 return
+            cv = pane["cv"]
             xr0, yr0, _, _ = st["p0"]
-            st["p0"] = None
-            box = core.screen_selection_box((xr0, yr0), (e.x_root, e.y_root),
-                                            region, shot.size)
+            st["p0"] = st["pane"] = None
+            box = core.screen_selection_box_multi((xr0, yr0), (e.x_root, e.y_root),
+                                                  layout, shot.size)
             if box is None:
                 # ほぼクリックだけ＝囲めていない。やめずに選び直してもらう
-                cv.itemconfigure(rect, state="hidden")
-                cv.itemconfigure(lit_item, image="")
+                cv.itemconfigure(pane["rect"], state="hidden")
+                cv.itemconfigure(pane["lit_item"], image="")
                 return
             try:
                 img = shot.crop(box)
@@ -5474,25 +5656,27 @@ class App(tk.Tk):
             self._screen_selected(None)
             return "break"
 
-        cv.bind("<ButtonPress-1>", press)
-        cv.bind("<B1-Motion>", motion)
-        cv.bind("<ButtonRelease-1>", release)
-        # 右クリック（Macは Button-2 / Ctrl+クリック、Win は Button-3）でやめる
-        for seq in ("<Button-2>", "<Button-3>") + (
-                ("<Control-Button-1>",) if core.IS_MAC else ()):
-            cv.bind(seq, cancel)
-        win.bind("<Escape>", cancel)
-        cv.bind("<Escape>", cancel)
-        # Alt+F4 などで閉じられたときも「やめた」扱いにする。何もしないと窓だけが
-        # 壊れ、隠した本体の窓が戻らない（アプリが画面から消えたように見える）
-        win.protocol("WM_DELETE_WINDOW", cancel)
+        for pane in panes:
+            cv, win = pane["cv"], pane["win"]
+            cv.bind("<ButtonPress-1>", lambda e, q=pane: press(e, q))
+            cv.bind("<B1-Motion>", lambda e, q=pane: motion(e, q))
+            cv.bind("<ButtonRelease-1>", lambda e, q=pane: release(e, q))
+            # 右クリック（Macは Button-2 / Ctrl+クリック、Win は Button-3）でやめる
+            for seq in ("<Button-2>", "<Button-3>") + (
+                    ("<Control-Button-1>",) if core.IS_MAC else ()):
+                cv.bind(seq, cancel)
+            win.bind("<Escape>", cancel)
+            cv.bind("<Escape>", cancel)
+            # Alt+F4 などで閉じられたときも「やめた」扱いにする。何もしないと窓だけが
+            # 壊れ、隠した本体の窓が戻らない（アプリが画面から消えたように見える）
+            win.protocol("WM_DELETE_WINDOW", cancel)
+            win.bind("<Configure>", lambda e, q=pane: place(q))
+            place(pane)
 
         def on_destroy(e):
-            if e.widget is win and self._screen_win is win:
+            if e.widget is first and self._screen_win is first:
                 self._close_screen_picker()
-        win.bind("<Destroy>", on_destroy, add="+")
-        win.bind("<Configure>", layout)
-        layout()
+        first.bind("<Destroy>", on_destroy, add="+")
 
         def grab_keys(_e=None):
             # Esc を受け取れるよう、枠なし窓にも入力を向ける（映った後でないと効かない）。
@@ -5500,11 +5684,11 @@ class App(tk.Tk):
             # Mac では強制しない（やめるのは右クリック／Ctrl+クリックでもできる）
             try:
                 if not core.IS_MAC:
-                    win.focus_force()
-                cv.focus_set()
+                    first.focus_force()
+                panes[0]["cv"].focus_set()
             except tk.TclError:
                 pass
-        win.bind("<Map>", grab_keys)
+        first.bind("<Map>", grab_keys)
         grab_keys()
 
     def _screen_read_aloud(self, first_line, nchars):
@@ -5621,19 +5805,22 @@ class App(tk.Tk):
                     region, all_screens = self._screen_region()
                     self._auto_grabbing = True
                     threading.Thread(target=self._auto_page_worker,
-                                     args=(region, all_screens, self._screen_last),
+                                     args=(region, all_screens, self._screen_last,
+                                           self._screen_pairs()),
                                      daemon=True).start()
         finally:
             self._tick("auto_page", self.AUTO_PAGE_MS, self._auto_page_tick)
 
-    def _auto_page_worker(self, region, all_screens, last):
-        """（別スレッド）囲んだ範囲だけを撮って UI スレッドへ渡す。Tk には触らない。"""
+    def _auto_page_worker(self, region, all_screens, last, pairs=None):
+        """（別スレッド）囲んだ範囲だけを撮って UI スレッドへ渡す。Tk には触らない。
+        pairs は画面ごとの対応（_screen_pairs。UI スレッドで取っておいたもの）。"""
         img = None
         try:
             from PIL import ImageGrab
             shot = (ImageGrab.grab(all_screens=True) if all_screens
                     else ImageGrab.grab())
-            box = core.screen_selection_box(last[0], last[1], region, shot.size)
+            box = core.screen_selection_box_multi(
+                last[0], last[1], _screen_layout_from(region, pairs, shot.size), shot.size)
             if box is not None:
                 img = shot.crop(box)
         except Exception:
@@ -6555,7 +6742,8 @@ class App(tk.Tk):
     # Tk のテキスト欄にはルビの仕組みが無いため。最初からオン。余白はエンジンに
     # つながっている間だけ取る（つながる前から行間だけ空くと、壊れて見えるため）。
     _FURI_COLORS = {   # (辞書と一致・数字など, 辞書と違う読み＝誤読かも)
-        "dark": ("#a89b89", "#f2a65a"),
+        # 暗い地の小さい字なので、控えめな文字の色（#a89b89）より一段明るくする
+        "dark": ("#c9bba7", "#f2a65a"),
     }
     _FURI_COLORS_DEFAULT = ("#5e7685", "#c2410c")
     _FURI_CACHE_MAX = 4000   # 覚えておく行の数
@@ -6830,7 +7018,7 @@ class App(tk.Tk):
             look = (reading, warn if kind == core.FURI_DIFF else plain, bg,
                     kind != core.FURI_OK)
             want.append(((ln, a, reading), look, (x, b0[1] - rise), (ln, a, b, kind)))
-        want = self._furi_drop_overlaps(want)
+        want = self._furi_spread(self._furi_drop_overlaps(want), width)
         # スクロールしても、同じふりがなは同じラベルのまま位置だけ動かす。ラベルの文字を
         # 書き換えると Windows が描き直すので、それが一番重い（64個で約20ms）
         owner = {s.get("key"): i for i, s in enumerate(self._furi_states)
@@ -6869,6 +7057,42 @@ class App(tk.Tk):
                 lab.place_forget()
                 state["at"] = None
                 state["key"] = None
+
+    def _furi_spread(self, want, width):
+        """同じ段で重なる漢字のふりがなを、重ならないよう横に並べ直す。読みが漢字より
+        広いと（十本 → じゅっ｜ぽん）、となりと重なって読めなかった。重なる組は、その
+        漢字のかたまりの真ん中にそろえて、すき間なく順に置く。重ならない所は動かさない。"""
+        gap = max(1, _px(1))
+        rows = {}
+        for item in want:
+            rows.setdefault(item[2][1], []).append(item)
+        out = []
+        for y, items in rows.items():
+            items.sort(key=lambda it: it[2][0])
+            chain = []
+
+            def flush():
+                if len(chain) > 1:
+                    ws = [self._furi_widths.get(it[1][0], 0) for it in chain]
+                    total = sum(ws) + gap * (len(chain) - 1)
+                    mid = (chain[0][2][0] + ws[0] / 2 + chain[-1][2][0] + ws[-1] / 2) / 2
+                    x = int(max(0, min(mid - total / 2, width - total)))
+                    for it, w in zip(chain, ws):
+                        out.append((it[0], it[1], (x, y), it[3]))
+                        x += w + gap
+                else:
+                    out.extend(chain)
+                chain.clear()
+            right = None
+            for it in items:
+                x0 = it[2][0]
+                if right is not None and x0 >= right:
+                    flush()
+                chain.append(it)
+                right = max(right or 0, x0 + self._furi_widths.get(it[1][0], 0)) if len(chain) > 1 \
+                    else x0 + self._furi_widths.get(it[1][0], 0)
+            flush()
+        return out
 
     def _furi_drop_overlaps(self, want):
         """同じ段のふりがなが重なるときは、漢字のふりがなを残し、数字・英字などの読み
@@ -7421,9 +7645,9 @@ class App(tk.Tk):
         self._place_dialog(win)
         frm = ttk.Frame(win)
         frm.pack(fill="both", expand=True, padx=12, pady=12)
-        ttk.Label(frm, text="⚠️ " + friendly, wraplength=480,
+        ttk.Label(frm, text="⚠️ " + friendly, wraplength=_px(480),
                   justify="left").pack(anchor="w")
-        ttk.Label(frm, style="Credit.TLabel", wraplength=480, justify="left",
+        ttk.Label(frm, style="Credit.TLabel", wraplength=_px(480), justify="left",
                   text="詳しい内容は" + _in_app_folder("エラー.log") + "にも保存したよ。"
                   ).pack(anchor="w", pady=(6, 0))
         btns = ttk.Frame(frm)
@@ -7682,14 +7906,16 @@ class App(tk.Tk):
         win.resizable(False, False)
         self._place_dialog(win)
         frm = ttk.Frame(win)
-        frm.pack(fill="both", expand=True, padx=14, pady=12)
-        ttk.Label(frm, text=info, wraplength=520,
+        frm.pack(fill="both", expand=True, padx=_px(14), pady=_px(12))
+        # 幅は表示の倍率に合わせる（px のままだと、250%表示では保存先が6行に折れていた）
+        wrap = _px(520)
+        ttk.Label(frm, text=info, wraplength=wrap,
                   justify="left").pack(anchor="w")
-        ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=8)
+        ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=_px(8))
         ttk.Label(frm, text="音声を公開するときは、このクレジット表記をどこかに載せてね:",
-                  wraplength=520, justify="left").pack(anchor="w")
+                  wraplength=wrap, justify="left").pack(anchor="w")
         ttk.Label(frm, text=credit, style="Cluster.TLabel",
-                  wraplength=520, justify="left").pack(anchor="w", pady=(2, 0))
+                  wraplength=wrap, justify="left").pack(anchor="w", pady=(_px(2), 0))
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(12, 0))
 
@@ -7723,6 +7949,15 @@ class App(tk.Tk):
         n_c = len(self._shape_report.get("confusables", []))
         n_h = len(self._shape_report.get("heads", []))
         self.report_btn.config(state="normal" if (n_r or n_c or n_h) else "disabled")
+        try:
+            if n_r or n_c or n_h:
+                if not self.report_btn.winfo_manager():
+                    self.report_btn.pack(side="right", fill="y", padx=(GAPX, 0),
+                                         before=self.extract_btn)
+            elif self.report_btn.winfo_manager():
+                self.report_btn.pack_forget()
+        except tk.TclError:
+            pass
         return n_r, n_c
 
     def show_shape_report(self):
@@ -7740,7 +7975,9 @@ class App(tk.Tk):
         win = tk.Toplevel(self)
         self._report_win = win
         win.title("直した所")
-        win.geometry("640x480")
+        # 表示の倍率に合わせる（640x480 ピクセルの決め打ちだと、250%表示では小さすぎて
+        # 「閉じる」が切れ、中身も数行しか見えなかった）。125%までは、これまでと同じ大きさ
+        win.geometry(f"{max(640, _px(512))}x{max(480, _px(384))}")
         win.transient(self)
         self._place_dialog(win)
         head = ttk.Frame(win)
@@ -7843,17 +8080,18 @@ class App(tk.Tk):
     # すべて clam ベースの統一配色。ライト/ダーク＝落ち葉、くっきり＝高コントラスト、
     # ずんだ＝ずんだもんの若草色。文字と地の色差（コントラスト）を優先して選定。
     LIGHT = dict(  # 空と落ち葉：水色の帯に白い面。大事なボタンは落ち葉のオレンジ
-        bg="#f8fcff", card="#f8fcff", field="#ffffff", textbg="#ffffff", ground="#bfe0f5",
+        bg="#fbfdff", card="#fbfdff", field="#ffffff", textbg="#ffffff", ground="#cfe6f6",
         fg="#22333f", subtle="#5e7685", head_fg="#1f5f8f",
         accent="#c4500c", accent_hi="#d9601a", accent_fg="#ffffff",
-        btn="#e4f2fb", btn_hi="#d3e9f8", border="#cfe0ec",
+        btn="#e4f2fb", btn_hi="#d3e9f8", border="#d8e6f0",
         sel="#cfe8fb", disabled="#a9bccb", ok="#2f7d3f",
         tool="#37596f", danger="#b3261e",
-        act="#e1f0fa", act_hi="#cfe6f7", act_border="#8fbfe0", quiet_border="#8fb3cc",
+        # 枠は面より少し濃いだけにする（濃い枠が並ぶと、線ばかりが目に入る）
+        act="#e3f0fa", act_hi="#cfe6f7", act_border="#a9cde8", quiet_border="#a6c1d4",
         # 上の帯の文字（無いテーマは fg・head_fg・subtle・accent）
         ground_fg="#1d3a4f", ground_title="#123a5a", ground_sub="#3a6480", ground_link="#a03c08",
         steps=("#c4500c", "#2a7d44", "#1f6fb5"),   # ① ② ③ の見出し（無いテーマは head_fg）
-        caption="#bfe0f5", caption_fg="#123a5a",   # タイトルバー（無いテーマは OS の色）
+        caption="#cfe6f6", caption_fg="#123a5a",   # タイトルバー（無いテーマは OS の色）
     )
     DARK = dict(
         bg="#272320", card="#302b26", field="#3a342d", textbg="#1f1c19", ground="#1a1714",
@@ -7872,6 +8110,7 @@ class App(tk.Tk):
         sel="#bcd7ff", disabled="#8a8a8a", ok="#1b5e20",
         tool="#1f1f1f", danger="#b00020",
         act="#e6e6e6", act_hi="#d2d2d2", act_border="#3a3a3a", quiet_border="#3a3a3a",
+        caption="#dfe3e8", caption_fg="#111111",   # タイトルバーは帯と同じ色に
     )
     ZUNDA = dict(  # ずんだ：ずんだもんの若草色。やわらかい緑の明色テーマ
         bg="#edf6e8", card="#f7fbf3", field="#ffffff", textbg="#ffffff", ground="#d6e7cc",
@@ -7881,6 +8120,8 @@ class App(tk.Tk):
         sel="#c9ecca", disabled="#9db3a2", ok="#2c7a44",
         tool="#3f5b47", danger="#a8392b",
         act="#cfe5c0", act_hi="#bddaa9", act_border="#8db478", quiet_border="#7fa86b",
+        # タイトルバーは帯と同じ色に（前は OS の白のままで、緑の帯の上で浮いて見えた）
+        caption="#d6e7cc", caption_fg="#243329",
     )
     # (設定キー, 表示名, パレット)。表示名がテーマ選択プルダウンの並びになる
     THEMES = [("light", "ライト", LIGHT), ("dark", "ダーク", DARK),
@@ -8009,8 +8250,11 @@ class App(tk.Tk):
                         troughcolor=p["btn"])
         # 通常ボタン（フラット・少し余白）
         # padding類はDPI倍率で補正（宣言だけだと高DPIでボタンだけ窮屈になる）
-        btn_pad = tuple(_px(v) for v in p.get("btn_pad", (7, 3)))
-        primary_pad = tuple(_px(v) for v in p.get("primary_pad", (14, 8)))
+        # ボタンの中の余白は、縦だけ少し広めに（詰まって見えないように）。横は広げない:
+        # いちばん狭い窓では再生バーのボタンの行に余りが無く、横を 9 にすると、125%表示で
+        # 左の列にスクロールバーが出たとき「« 最初から」の最後の字が切れた
+        btn_pad = tuple(_px(v) for v in p.get("btn_pad", (7, 4)))
+        primary_pad = tuple(_px(v) for v in p.get("primary_pad", (14, 9)))
         # ふつうの操作のボタン: はっきりした面＋枠（以前は面が地とほぼ同じ色で、
         # ボタンなのか見分けにくかった）
         style.configure("TButton", background=p["act"], foreground=p["fg"],
@@ -8243,7 +8487,9 @@ class App(tk.Tk):
             return
         win = tk.Toplevel(self)
         win.title("検索")
-        win.geometry("360x40")
+        # 大きさは中身に任せる。前は 360x40 ピクセルに決め打ちで、250%表示では「↓次」
+        # 「↑前」が窓の外に出て見えず、125%でもボタンの下が切れていた
+        win.resizable(False, False)
         win.transient(self)
         # 検索は本文を隠さないよう、真ん中ではなく本文欄の右上に出す
         self._place_dialog(win, near=lambda w, h: (
@@ -8251,7 +8497,7 @@ class App(tk.Tk):
             self.text.winfo_rooty() + _px(8)),
             focus=lambda: self._search_entry)
         self._search_win = win
-        row = ttk.Frame(win); row.pack(fill="x", padx=6, pady=6)
+        row = ttk.Frame(win); row.pack(fill="x", padx=_px(6), pady=_px(6))
         self._search_var = tk.StringVar()
         self._search_entry = ttk.Entry(row, textvariable=self._search_var, width=22)
         self._search_entry.pack(side="left", padx=2)
@@ -8261,7 +8507,8 @@ class App(tk.Tk):
         ttk.Button(row, text="↑前", width=4,
                    command=lambda: self._search_jump(-1)).pack(side="left", padx=1)
         self._search_count = tk.StringVar(value="")
-        ttk.Label(row, textvariable=self._search_count).pack(side="left", padx=6)
+        # 件数の欄は先に幅を取っておく（出たり消えたりで、窓の幅が変わらないように）
+        ttk.Label(row, textvariable=self._search_count, width=9).pack(side="left", padx=_px(6))
         self._search_entry.bind("<Return>", lambda e: self._search_jump(+1))
         self._search_var.trace_add("write", lambda *a: self._search_refresh())
         win.protocol("WM_DELETE_WINDOW", self._close_search)
@@ -8610,12 +8857,16 @@ class App(tk.Tk):
             "update_latest": self._update_latest,
             "update_url": self._update_url,
             "geometry": self.geometry(),
+            # 窓の大きさはピクセルなので、保存したときの表示の倍率も控える
+            # （125%の画面で保存して250%の画面で開くと、半分の大きさになっていた）
+            "ui_scale": UI_SCALE,
             "zoomed": self._is_zoomed(),
             "vvproj_query": bool(self.vvproj_query_var.get()),
             "adv_open": bool(self._adv_open),
             "opt_open": bool(self._opt_open),
             "replace_open": bool(self._rep_open),
             "voice_detail_open": bool(self._vdetail_open),
+            "finish_open": bool(self._finish_open),
             "synth_cache_mb": core._SYNTH_CACHE_MAX_BYTES // (1024 * 1024),
         }
 
@@ -8664,6 +8915,7 @@ class App(tk.Tk):
             self._set_advanced(bool(s.get("adv_open", False)))
             self._set_opt_rows(bool(s.get("opt_open", False)))
             self.vvproj_query_var.set(bool(s.get("vvproj_query", True)))
+            self._set_finish(bool(s.get("finish_open", False)))
         except Exception:
             pass
         try:
@@ -8768,17 +9020,20 @@ class App(tk.Tk):
             pass
         try:
             if s.get("geometry"):
-                self._apply_saved_geometry(s["geometry"])
+                self._apply_saved_geometry(s["geometry"], s.get("ui_scale"))
             # 最大化はここでは当てない（本体はまだ隠れている。今 zoomed に
             # すると構築途中の窓が見えてしまう）。表示する直前に当てる
             self._want_zoomed = bool(s.get("zoomed", False))
         except Exception:
             pass
 
-    def _apply_saved_geometry(self, geo):
+    def _apply_saved_geometry(self, geo, saved_scale=None):
         """保存したウィンドウ位置を復元する。ただしサブモニタ切断などで画面外に
         なる座標はプライマリ画面内へ寄せ、必ず一部が見えるようにする
-        （そのまま適用すると『起動しても窓が出ない』と誤解される）。"""
+        （そのまま適用すると『起動しても窓が出ない』と誤解される）。
+        saved_scale は保存したときの表示の倍率（UI_SCALE）。今と違えば、大きさを
+        今の倍率に直す（125%の画面で保存して250%の画面で開くと、窓が半分の高さで
+        開き、左の列の ③ が隠れていた）。"""
         # Tk の geometry() は左/上のモニタだと "980x880+-1500+120" のように
         # 「+」のあとに負の数を書く。以前の正規表現はこれに合わず、補正を
         # 素通りしていた（外したモニタの座標がそのまま当たる＝窓が見えない）
@@ -8790,6 +9045,17 @@ class App(tk.Tk):
                 pass
             return
         w, h, x, y = int(m[1]), int(m[2]), int(m[3]), int(m[4])
+        try:
+            scale = float(saved_scale or 0)
+        except (TypeError, ValueError):
+            scale = 0.0
+        if scale > 0 and abs(scale - UI_SCALE) > 0.01:
+            w, h = int(round(w * UI_SCALE / scale)), int(round(h * UI_SCALE / scale))
+        # 最小の大きさより小さい値は、倍率の違う画面で保存したもの（倍率を控えていなかった
+        # 前の版の設定など）。最小まで広げておく。画面が小さくて入らないときは、すぐ下の
+        # _fit_to_work_area が縮める
+        min_w, min_h = self.minsize()
+        w, h = max(w, min_w), max(h, min_h)
         vx, vy, vw, vh = self._virtual_screen()
         # 仮想デスクトップ（つながっている全モニタを合わせた範囲）に
         # 100x60 以上見えていれば、サブモニタの位置でもそのまま尊重する。

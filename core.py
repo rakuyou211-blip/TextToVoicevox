@@ -31,6 +31,8 @@ APP_VERSION = "1.26.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
 OCR_HELPER = os.path.join(APP_DIR, "ocr_helper.py")
+AUDIO_PS1 = os.path.join(APP_DIR, "audio_win.ps1")   # Windows に入っている変換で M4A / MP3 を作る
+WIN_ENCODER = "windows"   # audio_encoders() が返す印（ffmpeg の場所の代わり）
 OCR_ENGINE_DIR = os.path.join(APP_DIR, "ocr_engine")   # 強い文字読み取り（Windows の初回セットアップで入る）
 
 IS_WIN = sys.platform == "win32"
@@ -597,11 +599,66 @@ def _conf_neighbor(text: str, i: int, step: int) -> str:
     return ""
 
 
+# 行の頭（や、かぎ括弧・句読点のすぐあと）の「ー」を「一」に直すときの、すぐあとの字。
+# のばす音の印は、かなのあとにしか来ない（行の頭には置かない決まりもある）ので、ここに
+# ある「ー」は漢数字の「一」か線（―）のどちらか。すぐあとが、数える言葉や「一」で
+# 始まるよくある言葉のときだけ「一」と見る（ー人 → 一人・ー番 → 一番・ーページ → 一ページ）。
+# 強い読み取り（PP-OCR）は、はっきりした字でも行の頭の「一ページ目」を「ーページ目」と
+# 読んだ（2026-11-13 に実測。游ゴシック・游明朝・MS明朝・メイリオの4つとも）。
+# 線（―・――）のほうは、読み取りが「一」と読むか消すかで、「ー」と読んだのは「――一人」を
+# まとめて「ー人」と読んだ1回だけだった（このときは「一人」に直すほうが元に近い）。
+# それでも、線のあとに来やすい動きの言葉の頭（―言った・―見ろ・―気がつくと）は入れない。
+# 入っているのは、数える言葉と、「一」で始まる名詞によくある字だけ。
+_CONF_ICHI_NEXT_KANJI = set(
+    "人日月年回個本枚冊台番度章話巻部匹頭羽階位点件歳才時分秒円万億千百十兆杯軒通着足組"
+    "品種行列段節項条号週倍割例名社校曲句語字画泊食口票戦勝敗球歩面場幕編代席隻艘基株箱"
+    "袋缶皿膳坪畳錠包首色周局家族同緒般体部覧連括貫斉旦層瞬帯様端角期区昨")
+_CONF_ICHI_NEXT_KATA = (
+    "ページ", "キロ", "メートル", "センチ", "ミリ", "グラム", "リットル", "パーセント", "ドル",
+    "ユーロ", "カ月", "ヵ月", "ヶ月", "ケ月", "カ所", "ヵ所", "ヶ所", "カ国", "ヵ国", "ヶ国",
+    "カ年", "ヶ年", "コマ", "セット", "ケース", "パック", "ダース", "チーム", "クラス", "ステップ",
+    "ポイント", "インチ", "フィート", "マイル", "トン", "ヘクタール", "ワット", "バイト",
+    "ピクセル", "フレーム", "シーズン", "ラウンド", "ゲーム", "イニング", "ホール", "グループ",
+    "ブロック")
+# 行の頭と同じに扱う、すぐ前の字（ここから文や言葉が始まる）
+_CONF_ICHI_HEAD_PREV = set("「『（(【〈《、。．，")
+_CONF_SPACES = str.maketrans("", "", " \t　\r")
+
+
+def _conf_ichi_for_choonpu(text: str, i: int) -> bool:
+    """text[i] の「ー」が、本当は漢数字の「一」か（_CONF_ICHI_NEXT_KANJI の説明）。
+    すぐあとが数える言葉などのときだけ True。
+      ・行の頭、または かぎ括弧・句読点のすぐあと（ーページ目 → 一ページ目・「ー人で → 「一人で）
+      ・漢字のすぐあとで、カタカナの数える言葉が続く（第ーページ → 第一ページ）
+    前後の空白は読み飛ばす（Windows の読み取りは「ー キ ロ 先」のように字のあいだを空ける）。
+    行の頭でも、前の行がカタカナで終わっていれば触らない（禁則の無い画面で、のばす音が
+    次の行へ折り返した形かもしれない: コンピュ／ーター）。"""
+    end = text.find("\n", i + 1)
+    after = text[i + 1:] if end < 0 else text[i + 1:end]
+    after = after.translate(_CONF_SPACES)
+    j = i - 1
+    while j >= 0 and text[j] in " \t　\r":
+        j -= 1
+    if j >= 0 and text[j] != "\n":
+        if text[j] not in _CONF_ICHI_HEAD_PREV:
+            return _conf_is_kanji(text[j]) and after.startswith(_CONF_ICHI_NEXT_KATA)
+    else:
+        k = j - 1
+        while k >= 0 and text[k] in " \t　\r":
+            k -= 1
+        if k >= 0 and _conf_is_kata(text[k]):
+            return False
+    return (after[:1] == "つ" or after[:1] in _CONF_ICHI_NEXT_KANJI
+            or after.startswith(_CONF_ICHI_NEXT_KATA))
+
+
 def _conf_pass_choonpu(text: str) -> str:
     """第1パス: 一⇄ー の補正（判定は“この段階のテキスト”の近傍）。
       1. カタカナ直後の「一」で、直後もカタカナ/長音/行末/句読点 → 長音「ー」
          （サ一ビス→サービス。直後がひらがな・漢字なら「メロン一つ」型なので触らない）
-      2. 漢字に挟まれた「ー」 → 漢数字「一」（第ー章→第一章。長音は直前カナ以外に現れない）"""
+      2. 漢字に挟まれた「ー」 → 漢数字「一」（第ー章→第一章。長音は直前カナ以外に現れない）
+      3. 行の頭などの「ー」で、すぐあとが数える言葉など → 漢数字「一」
+         （ーページ目→一ページ目。_conf_ichi_for_choonpu）"""
     out = list(text)
     for i, ch in enumerate(text):
         if ch == "一":
@@ -614,6 +671,8 @@ def _conf_pass_choonpu(text: str) -> str:
             prev = _conf_neighbor(text, i, -1)
             nxt = _conf_neighbor(text, i, +1)
             if _conf_is_kanji(prev) and _conf_is_kanji(nxt):
+                out[i] = "一"
+            elif _conf_ichi_for_choonpu(text, i):
                 out[i] = "一"
     return "".join(out)
 
@@ -660,6 +719,23 @@ def _conf_pass_kana_kanji(text: str) -> str:
     return "".join(out)
 
 
+# Windows の読み取りは、日付や時刻の字のあいだにも空白を入れる（「2026 / 1 1 / 13 18 : 07」）。
+# 空白のままだと日付・時刻と分からず「イチ、イチ、…ゼロナナ」とばらばらに読まれた
+# （2026-11-14 に実測）。数字にはさまれた / と : のまわりと、/ と / のあいだ・: の前後で
+# 2つに割れた数字だけをつなぐ。読み取った文字にだけ使う（打った文の空白には触らない）
+_CONF_DT_SEP = re.compile(r"(?<=\d)[ \t　]*([/:])[ \t　]*(?=\d)")
+_CONF_DT_SPLIT = (re.compile(r"(?<=/)(\d) (\d)(?=/)"),           # 2026/1 1/13
+                  re.compile(r"(?<![\d/:.])(\d) (\d)(?=:\d)"),    # 1 8:07
+                  re.compile(r"(?<=\d:)(\d) (\d)(?![\d:/])"))     # 18:0 7
+
+
+def _conf_join_datetime(text: str) -> str:
+    text = _CONF_DT_SEP.sub(r"\1", text)
+    for rx in _CONF_DT_SPLIT:
+        text = rx.sub(r"\1\2", text)
+    return text
+
+
 def fix_ocr_confusables(text: str) -> str:
     """OCRが取り違えやすい同形文字を、前後の文字種で確定できる場合だけ補正する。
     2パス構成: 先に 一⇄ー（_conf_pass_choonpu）、その結果に対して 漢字⇄カタカナ
@@ -671,7 +747,7 @@ def fix_ocr_confusables(text: str) -> str:
     既知の限界: 「ピカ一。」（ぴかいち）等ごく稀な語は誤補正し得る。「入カした」
     「口ボット」のような、かな が続く・実在語と衝突し得る形は安全側に倒して補正しない。
     半角英数のみ対象（全角は normalize_ascii 適用後なら半角になっている）。"""
-    fixed = _conf_pass_kana_kanji(_conf_pass_choonpu(text))
+    fixed = _conf_join_datetime(_conf_pass_kana_kanji(_conf_pass_choonpu(text)))
 
     def _fix_token(m):
         tok = m.group(0)
@@ -1228,14 +1304,30 @@ def normalize_ascii(text: str) -> str:
 #   10:30→ジュウ、サンジュウ  10時〜12時→ジュウジ、ジュウニジ  10-20人→イチゼロ、ニジュウニン
 #   100m→ヒャクエム  10g→ジュウジイ  -5℃→ゴド（マイナスが消える）  +3→タスサン
 #   ver.2→ヴァア、ニ  1st→イチショオトトン  いいねw→イイネダブリュウ
-# もともと正しく読める物（iPhone・YouTube・1,280円・50%・5km・3×4・文中の――）には触らない。
-# どちらとも取れる物は直さない（「1/3」「11/7」は分数か日付か分からない。曜日が付けば日付）。
+# もともと正しく読める物（iPhone・YouTube・50%・5km・3×4・文中の――）には触らない。
+# （1,280円 の桁区切りのカンマだけは外す。読みは同じで、区切って読まれるのを防ぐ）
+# どちらとも取れる物は直さない（「1/3」「11/7」は分数か日付か分からない。曜日か時刻が
+# 続けば日付: 11/7(土)・11/13 18:07）。ほかに 18時07分→ジュウハチジ ゼロ ナナフン、
+# 6:07 PM→ロクジ ナナフン ピイエム も直す（18時7分・午後6時7分。2026-11-14 に実測）。
 _RF_DATE = re.compile(
     r"(?<![\d/.\-])((?:1[89]|2[01])\d\d)([/.\-])(0?[1-9]|1[0-2])\2"
     r"(0?[1-9]|[12]\d|3[01])(?!\d|[/\-]|\.\d)")
 _RF_MD_WEEK = re.compile(
     r"(?<![\d/.])(0?[1-9]|1[0-2])/(0?[1-9]|[12]\d|3[01])"
     r"(?=\s*[(（][月火水木金土日](?:曜日?)?[)）])")
+# 年の無い「11/13 18:07」。すぐあとに時刻が続くなら日付（エクスプローラーの一覧・メールの
+# 受信日時・予定表など）。前は「ジュウイチ、ジュウサン」と読んでいた（2026-11-14 に実測）
+_RF_MD_TIME = re.compile(
+    r"(?<![\d/.])(0?[1-9]|1[0-2])/(0?[1-9]|[12]\d|3[01])"
+    r"(?=\s*(?:[(（][月火水木金土日](?:曜日?)?[)）]\s*)?"
+    r"(?:(?:AM|PM|am|pm|午前|午後)\s*)?(?:[01]?\d|2[0-4]):[0-5]\d(?!\d))")
+# 「18時07分」「2026年01月05日」の頭の0。VOICEVOX は「ジュウハチジ ゼロ ナナフン」と読む
+_RF_ZERO_PAD = re.compile(r"(?<![\d.,])0(?=\d[月日時分秒])")
+# 時刻の前後の AM / PM（「エエエム」「ピイエム」と読まれる）→ 午前・午後（時刻の前に置く）
+_RF_AMPM_BEFORE = re.compile(
+    r"(?<![A-Za-z])(AM|PM|am|pm|[ap]\.m\.)\s*(?=(?:[01]?\d|2[0-4]):[0-5]\d(?!\d))")
+_RF_AMPM_AFTER = re.compile(
+    r"(?<![\d:.])((?:[01]?\d|2[0-4]):[0-5]\d(?::[0-5]\d)?)\s*(AM|PM|am|pm|[ap]\.m\.)(?![A-Za-z])")
 _RF_TIME = re.compile(r"(?<![\d:.])([01]?\d|2\d):([0-5]\d)(?::([0-5]\d))?(?![\d:])")
 # 範囲の「〜」「-」のあとに来る、数の単位（10時〜12時・3-5日・10%〜20%）
 _RF_COUNTER = "時分秒日月年円人歳才個回件枚冊本台匹頭羽週度号階位点章話巻頁"
@@ -1255,6 +1347,13 @@ _RF_M2 = re.compile(r"(?<=[\d万千])m²")
 _RF_M3 = re.compile(r"(?<=[\d万千])m³")
 _RF_METER = re.compile(r"(?<=[\d万千])m(?![a-zA-Z0-9²³/])")
 _RF_GRAM = re.compile(r"(?<=[\d万千])g(?![a-zA-Z0-9])")
+# ファイルの大きさ（エクスプローラーの「1,234 KB」など）。数と単位のあいだに空白があると
+# 「イチ、ケイ ビイ」と英字で読まれる（空白が無い「64GB」は正しく読む。2026-11-14 に実測）。
+# 単位を読みにして空白も詰める。「/s」は「エス」と読まれるので「毎秒」に
+_RF_BYTES = re.compile(r"(?<=\d)[ \t]?(KB|kB|MB|GB|TB)(?![A-Za-z])")
+_RF_BYTES_YOMI = {"KB": "キロバイト", "kB": "キロバイト", "MB": "メガバイト", "GB": "ギガバイト",
+                  "TB": "テラバイト"}
+_RF_PER_SEC = re.compile(r"(?<=バイト)/s(?![A-Za-z])")
 _RF_FIRST = re.compile(r"(?<![0-9A-Za-z])1st(?![A-Za-z])")
 _RF_VER = re.compile(r"(?<![A-Za-z])(?i:ver)\.?\s*(?=\d)")
 # 笑いの「w」（いいねw・草www）。日本語のすぐあとで、文の終わりか、2つ以上続くとき
@@ -1285,7 +1384,12 @@ def fix_readings(text: str) -> str:
     text = _RF_DATE.sub(lambda m: f"{m.group(1)}年{int(m.group(3))}月{int(m.group(4))}日",
                         text)
     text = _RF_MD_WEEK.sub(lambda m: f"{int(m.group(1))}月{int(m.group(2))}日", text)
+    text = _RF_MD_TIME.sub(lambda m: f"{int(m.group(1))}月{int(m.group(2))}日", text)
+    text = _RF_AMPM_AFTER.sub(
+        lambda m: ("午前" if m.group(2)[0] in "Aa" else "午後") + m.group(1), text)
+    text = _RF_AMPM_BEFORE.sub(lambda m: "午前" if m.group(1)[0] in "Aa" else "午後", text)
     text = _RF_TIME.sub(_rf_time, text)
+    text = _RF_ZERO_PAD.sub("", text)
     text = _RF_RANGE_HYPHEN.sub(r"\1から\2", text)
     text = _RF_RANGE_HYPHEN2.sub("から", text)
     text = _RF_RANGE_WAVE.sub("から", text)
@@ -1296,6 +1400,8 @@ def fix_readings(text: str) -> str:
     text = _RF_M3.sub("立方メートル", text)
     text = _RF_METER.sub("メートル", text)
     text = _RF_GRAM.sub("グラム", text)
+    text = _RF_BYTES.sub(lambda m: _RF_BYTES_YOMI[m.group(1)], text)
+    text = _RF_PER_SEC.sub("毎秒", text)
     text = _RF_FIRST.sub("ファースト", text)
     text = _RF_VER.sub("バージョン", text)
     text = _RF_W_RUN.sub("", text)
@@ -1596,6 +1702,54 @@ def screen_selection_box(p0, p1, region, image_size, min_drag=SCREEN_MIN_DRAG):
     if box[2] - box[0] < 1 or box[3] - box[1] < 1:
         return None
     return box
+
+
+def screen_selection_box_multi(p0, p1, layout, image_size, min_drag=SCREEN_MIN_DRAG):
+    """screen_selection_box の、画面が何台かあるとき用。
+
+    layout は画面ごとの対応 [(vx, vy, vw, vh, ix, iy, iw, ih), ...]:
+    アプリから見たその画面の範囲 (vx, vy, vw, vh)（Tkの画面座標）と、その画面が
+    スクリーンショットの画像のどこに写っているか (ix, iy, iw, ih)（画素）。
+    倍率のちがう画面が混ざると（250% と 125% の2台など）、アプリから見た座標と画像の
+    画素は、画面ごとに別の比でずれる。全体を1つの比で直すと、囲んだ所とちがう場所を
+    切り抜いていた。画面が1台なら、layout に全体を1つ入れれば screen_selection_box と同じ。
+
+    囲み始めた点のある画面で切り抜く（ほかの画面にはみ出したぶんは、その画面の端で切る）。
+    囲み始めがどの画面にも無いとき（画面の構成が変わった等）は、いちばん重なる画面で。"""
+    (x0, y0), (x1, y1) = p0, p1
+    left, right = sorted((x0, x1))
+    top, bottom = sorted((y0, y1))
+    if right - left < min_drag or bottom - top < min_drag:
+        return None
+    pick = None
+    for m in layout:
+        vx, vy, vw, vh = m[:4]
+        if vx <= x0 < vx + vw and vy <= y0 < vy + vh:
+            pick = m
+            break
+    if pick is None:
+        best = 0
+        for m in layout:
+            vx, vy, vw, vh = m[:4]
+            w = min(right, vx + vw) - max(left, vx)
+            h = min(bottom, vy + vh) - max(top, vy)
+            if w > 0 and h > 0 and w * h > best:
+                pick, best = m, w * h
+    if pick is None:
+        return None
+    vx, vy, vw, vh, ix, iy, iw, ih = pick
+    box = screen_selection_box(
+        (min(max(left, vx), vx + vw), min(max(top, vy), vy + vh)),
+        (min(max(right, vx), vx + vw), min(max(bottom, vy), vy + vh)),
+        (vx, vy, vw, vh), (iw, ih), min_drag=1)
+    if box is None:
+        return None
+    width, height = image_size
+    out = (max(0, box[0] + ix), max(0, box[1] + iy),
+           min(width, box[2] + ix), min(height, box[3] + iy))
+    if out[2] - out[0] < 1 or out[3] - out[1] < 1:
+        return None
+    return out
 
 
 # 「自動めくり読み」：囲んだ範囲のページが変わったかを、縮めた白黒画像の差で見る。
@@ -4485,6 +4639,55 @@ def _furi_dict_reading(span, dict_spans):
     return "".join(dict_spans[x] for x in parts), parts
 
 
+_FURI_SOKUON_HEAD = set("カキクケコサシスセソタチツテトハヒフヘホパピプペポ")
+_FURI_H_TO_P = dict(zip("ハヒフヘホ", "パピプペポ"))
+
+
+def _furi_dict_match(span, dict_spans, got):
+    """本文の区間 span の辞書の読みが、エンジンの発音 got と同じ音か。同じなら、語ごとの
+    [(区間, 読み)] を返す（違えば None）。語のつなぎ目でつまる音になる読み（第一章 →
+    ダイ｜イチ｜ショウ が ダイ｜イッ｜ショウ、十本 → ジッ｜ポン）も、同じ読みとして扱う。
+    前は別の読みと見なして、誤読の候補としてカタカナで出していた。"""
+    want, parts = _furi_dict_reading(span, dict_spans)
+    if not want:
+        return None
+    target = furigana_norm(got)
+    if furigana_norm(want) == target:
+        return [(x, dict_spans[x]) for x in parts]
+    if not 2 <= len(parts) <= 6:
+        return None
+    reads = [dict_spans[x] for x in parts]
+
+    def forms(i, shifted):
+        """i 番目の語の読みの候補 [(読み, 次の語がパ行に変わりうるか)]。"""
+        r = reads[i]
+        heads = [r]
+        if shifted and r[:1] in _FURI_H_TO_P:
+            heads.append(_FURI_H_TO_P[r[0]] + r[1:])   # イッ｜ポン
+        out = []
+        for h in heads:
+            out.append((h, False))
+            nxt = reads[i + 1][:1] if i + 1 < len(reads) else ""
+            if nxt in _FURI_SOKUON_HEAD and len(h) >= 2:
+                if h[-1] in "チツクキ":
+                    out.append((h[:-1] + "ッ", True))
+                elif h.endswith("ジュウ"):
+                    out.extend([(h[:-3] + "ジュッ", True), (h[:-3] + "ジッ", True)])
+        return out
+
+    def walk(i, shifted, acc):
+        if i == len(reads):
+            return acc if furigana_norm("".join(acc)) == target else None
+        for r, sh in forms(i, shifted):
+            hit = walk(i + 1, sh, acc + [r])
+            if hit:
+                return hit
+        return None
+
+    hit = walk(0, False, [])
+    return list(zip(parts, hit)) if hit else None
+
+
 def furigana(text, query, dict_spans=None):
     """本文 text と、その audio_query の結果から、ふりがなの一覧
     [(開始, 終了, 読み, 種類)] を作る。種類は FURI_OK / FURI_DIFF / FURI_RAW。
@@ -4496,9 +4699,8 @@ def furigana(text, query, dict_spans=None):
     dict_spans = dict_spans or {}
 
     def agrees(span, got):
-        want, _ = _furi_dict_reading(span, dict_spans)
         # 辞書と合う区間1つは、読まれない字1つ（-1）より重い
-        return 2 if want and furigana_norm(want) == furigana_norm(got) else 0
+        return 2 if _furi_dict_match(span, dict_spans, got) else 0
 
     # 区切り方が何通りもあるときは、辞書の読みと合う区間が多い区切り方を選ぶ。
     # それでも区切り方しだいで読みが変わる区間には出さない
@@ -4509,9 +4711,10 @@ def furigana(text, query, dict_spans=None):
         if not got:
             continue   # 読まれない字には出さない
         want, parts = _furi_dict_reading(span, dict_spans)
-        if want and furigana_norm(want) == furigana_norm(got):
+        match = _furi_dict_match(span, dict_spans, got)
+        if match:
             # 辞書の語ごとに分けて出す（連続再生 → れんぞく｜さいせい）
-            out.extend((x[0], x[1], kata_to_hira(dict_spans[x]), FURI_OK) for x in parts)
+            out.extend((x[0], x[1], kata_to_hira(r), FURI_OK) for x, r in match)
         else:
             out.append((span[0], span[1], got, FURI_DIFF if want else FURI_RAW))
     return out
@@ -5060,7 +5263,9 @@ def resolve_speaker(name: str, speakers):
 # ============================================================
 def audio_encoders():
     """この環境で使える出力形式と変換コマンドを {"m4a": ..., "mp3": ...} で返す。
-    Mac: afconvert(OS標準)でM4A。ffmpegがあればMP3も。Win/その他: ffmpegがあれば両方。"""
+    Mac: afconvert(OS標準)でM4A。ffmpegがあればMP3も。Win: ffmpeg があればそれ、無ければ
+    Windows に入っている変換（audio_win.ps1。Windows 10 以降）で両方。その他: ffmpegがあれば両方。
+    前は Windows に ffmpeg が無いと WAV しか選べず、なぜ選べないかも分からなかった。"""
     import shutil
     enc = {}
     if IS_MAC and os.path.exists("/usr/bin/afconvert"):
@@ -5069,6 +5274,8 @@ def audio_encoders():
     if ff:
         enc.setdefault("m4a", ff)
         enc["mp3"] = ff
+    elif IS_WIN and os.path.isfile(AUDIO_PS1) and sys.getwindowsversion().major >= 10:
+        enc["m4a"] = enc["mp3"] = WIN_ENCODER
     return enc
 
 
@@ -5093,6 +5300,10 @@ def encode_audio_file(wav_path, out_path, fmt, encoders=None, keep_input=False):
         raise RuntimeError(f"{fmt.upper()}への変換ツールが見つかりません。")
     if cmd_or_path == "afconvert":
         cmd = ["/usr/bin/afconvert", wav_path, "-f", "m4af", "-d", "aac", out_path]
+    elif cmd_or_path == WIN_ENCODER:
+        cmd = [_find_powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+               "-File", AUDIO_PS1, "-In", os.path.abspath(wav_path),
+               "-Out", os.path.abspath(out_path), "-Fmt", fmt]
     elif fmt == "mp3":
         cmd = [cmd_or_path, "-y", "-loglevel", "error", "-i", wav_path,
                "-codec:a", "libmp3lame", "-q:a", "2", out_path]
@@ -5116,6 +5327,11 @@ def encode_audio_file(wav_path, out_path, fmt, encoders=None, keep_input=False):
         raise RuntimeError(f"{fmt.upper()}への変換がタイムアウトしました"
                            "（変換ツールが応答しません）")
     if proc.returncode != 0 or not os.path.exists(out_path):
+        if cmd_or_path == WIN_ENCODER:
+            try:   # 先に空のファイルを作るので、失敗したら残さない
+                os.remove(out_path)
+            except OSError:
+                pass
         raise RuntimeError(f"変換失敗: {proc.stderr or proc.stdout or 'unknown'}")
 
 

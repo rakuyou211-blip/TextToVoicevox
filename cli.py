@@ -251,7 +251,8 @@ def main(argv=None):
     need = "m4a" if args.format in ("m4a", "m4b") else args.format
     if args.format != "wav" and need not in encoders:
         raise SystemExit(f"{args.format.upper()}への変換ツールがありません"
-                         "（Mac: afconvert / それ以外: ffmpeg が必要）。")
+                         "（Windows 10 以降: 同じフォルダの audio_win.ps1 / Mac: afconvert / "
+                         "それ以外: ffmpeg が必要）。")
 
     # GUIと同じ3並列合成＋行単位キャッシュ＋スプール方式（全行のWAVをメモリに
     # 持たず、行WAVを一時フォルダに書いて (パス, 再生秒) だけ保持する。

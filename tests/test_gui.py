@@ -3119,10 +3119,23 @@ def test_title_bar_follows_theme_colors(app, monkeypatch):
     assert calls[35] == main._colorref(app.LIGHT["caption"])
     assert calls[36] == main._colorref(app.LIGHT["caption_fg"])
     assert main._colorref("#123456") == 0x563412
-    app.theme_var.set("zunda")
+    # ずんだ・くっきりも、帯と同じ色にする（前は OS の白のままで、帯の上で浮いて見えた）
+    for key, pal in (("zunda", app.ZUNDA), ("hc", app.HC)):
+        app.theme_var.set(key)
+        app.apply_theme()
+        assert main._dark_title_bar(app, False) is True
+        assert calls[35] == main._colorref(pal["caption"])
+        assert calls[36] == main._colorref(pal["caption_fg"])
+    # 色を決めていないテーマ（ダーク）は OS の色に戻す（暗さは別の設定で伝える）
+    app.theme_var.set("dark")
     app.apply_theme()
-    assert main._dark_title_bar(app, False) is True
+    assert main._dark_title_bar(app, True) is True
     assert calls[35] == 0xFFFFFFFF and calls[36] == 0xFFFFFFFF
+    for _key, _label, pal in app.THEMES:
+        if "caption" in pal:
+            assert pal["caption"] == pal["ground"]   # 帯と同じ色
+            assert _contrast(pal["caption_fg"], pal["caption"]) >= 4.5
+    assert _contrast(app._FURI_COLORS["dark"][0], app.DARK["textbg"]) >= 7   # 小さい字なので高めに
     app.theme_var.set("light")
     app.apply_theme()
 
