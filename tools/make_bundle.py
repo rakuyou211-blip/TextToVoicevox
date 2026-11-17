@@ -65,7 +65,10 @@ LONGEST = 150
 
 
 def say(text=""):
-    print(text, flush=True)
+    # 黒い窓の文字コードで出せない字（CI の Windows は cp1252 で日本語が出せない）は、
+    # 止まらずに置き換えて出す（以前は UnicodeEncodeError で、作る途中で止まっていた）
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(str(text).encode(enc, "replace").decode(enc, "replace"), flush=True)
 
 
 def run(cmd, **kw):

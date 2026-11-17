@@ -192,7 +192,8 @@ def shortcut_current(top, here=None):
     行き先は、ショートカットから見た相対の道（.\\起動.pyw や .\\app\\起動.pyw）で見る。"""
     here = here or top
     icon = os.path.join(here, ICON_REL)
-    rel = "." + os.sep + os.path.relpath(launcher_path(top, here), top)
+    # ショートカットは Windows の物なので、区切りはいつも \（Mac・Linux のテストでも同じ答え）
+    rel = ".\\" + os.path.relpath(launcher_path(top, here), top).replace("/", "\\")
     try:
         with open(os.path.join(top, SHORTCUT_NAME), "rb") as f:
             data = f.read()
