@@ -1589,26 +1589,30 @@ def test_playall_lines_rereads_only_when_paused_mid_voice(app, monkeypatch,
     assert msgs[-1][0] == "playall_done" and msgs[-1][3] == 2
 
 
-def _skip_without_ui_font(app):
-    """画面の字（Windows は Yu Gothic UI）が無い環境では、幅を測るテストを飛ばす。
-    GitHub の Windows（サーバー版）には日本語の字が無く、代わりの幅の広い字で並べるので、
-    利用者の Windows 10/11（必ず入っている）とは並びが変わる（2026-11-18 に CI で確認）。"""
+def _layout_report(app):
+    """CI で並びのテストが落ちたときに原因を追えるよう、画面と字と部品の幅を書き出す。"""
     import main
     import tkinter.font as tkfont
-    if not main.UI_FONT:
-        return
-    want = tkfont.Font(app, font=main.UI_FONT).cget("family")
-    got = tkfont.Font(app, font=main.UI_FONT).actual("family")
-    print(f"画面の字: 指定 {want} / 実際 {got}")
-    if got != want:
-        pytest.skip(f"画面の字 {want} が無い環境（代わりに {got}）")
+    app.update()
+    print("画面", app.winfo_screenwidth(), app.winfo_screenheight(), "倍率", main.UI_SCALE,
+          "字", tkfont.Font(app, font=main.UI_FONT or "TkDefaultFont").actual())
+
+
+def _layout_widths(app):
+    ctl = app._player_rows[0]
+    bar, tools = app._rbar[0], app._rbar[1]
+    def kids(f):
+        return [(str(c.cget("text")) if "text" in c.keys() else c.winfo_class(), c.winfo_reqwidth())
+                for c in f.pack_slaves()]
+    return (f"窓 {app.geometry()} 左の列 {app._steps_col.winfo_width()} / 再生バー {ctl.winfo_width()} {kids(ctl)}"
+            f" / 本文の見出し {bar.winfo_width()} 見出し {app._rbar_head.winfo_reqwidth()} {kids(tools)}")
 
 
 def test_player_bar_wraps_instead_of_clipping(app):
     """いちばん狭い窓でも、再生バーの部品が切れない（入らなければ「速さ・間」と
     「何行目か」を2行目へ送る）。広い窓では1行に戻る。"""
     import main
-    _skip_without_ui_font(app)
+    _layout_report(app)
     ctl, row2, params, sep = app._player_rows
 
     def settle():
@@ -1627,7 +1631,7 @@ def test_player_bar_wraps_instead_of_clipping(app):
     box = row2 if not app._player_one else ctl
     assert params.pack_info()["in"] == box
     for w in [c for c in ctl.winfo_children() if c.winfo_manager()]:
-        assert visible(w, ctl), f"再生バーの部品が切れている: {w}"
+        assert visible(w, ctl), f"再生バーの部品が切れている: {w} {_layout_widths(app)}"
     assert visible(params, box)
     assert app._play_prog.winfo_width() >= main._px(40)
     if app._player_one:
@@ -2611,14 +2615,14 @@ def test_furigana_tools_stay_above_text_at_default_width(app, monkeypatch):
     本文の上の行に並ぶ（ボタンを足したときに下の行へ押し出され、「ふりがなが消えた」と
     見えないように）。"""
     import main
-    _skip_without_ui_font(app)
+    _layout_report(app)
     _furi_ready(app, monkeypatch, {})
     app.furigana_var.set(True)
     app._furi_refresh()                   # つながっているので「ふりがな」（短い方）
     assert app.furigana_chk.cget("text") == "ふりがな"
     app.geometry(f"{main._px(980)}x{main._px(760)}")
     _settle(app)
-    assert app._rbar_level <= 1
+    assert app._rbar_level <= 1, _layout_widths(app)
     assert str(app.furi_next_btn.pack_info()["in"]) == str(app._rbar[1])
 
 

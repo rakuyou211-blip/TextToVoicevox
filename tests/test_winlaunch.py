@@ -775,7 +775,8 @@ def _fake_link(made):
     """本物と同じく、絵の道と、ショートカットから見た行き先の相対の道を書いておく偽物。"""
     def write(lnk, target, icon, desc):
         made.append((lnk, target, icon, desc))
-        rel = "." + os.sep + os.path.relpath(target, os.path.dirname(lnk))
+        # 本物（Windows のショートカット）と同じく、区切りはいつも \
+        rel = ".\\" + os.path.relpath(target, os.path.dirname(lnk)).replace("/", "\\")
         with open(lnk, "wb") as f:
             f.write(b"\x4c\x00\x00\x00" + icon.encode("utf-16-le") + rel.encode("utf-16-le"))
     return write
