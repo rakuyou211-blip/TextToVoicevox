@@ -2115,6 +2115,7 @@ class App(tk.Tk):
         self._rbar_one = True
         self._rbar_level = 0
         self._rbar_compact = False   # 狭いとき「置換 ▷」「辞書...」に縮めているか
+        self._rbar_full_req = (0, 0)  # 縮める前の 辞書・置き換え の幅
         self.text_font = tkfont.Font(font=(TEXT_FONT or "TkTextFont"))
         self.text = tk.Text(body, wrap="word", undo=True, font=self.text_font,
                             padx=_px(8), pady=_px(4))
@@ -2324,6 +2325,7 @@ class App(tk.Tk):
                               (self.next_btn, "次の行 ▷", "▷"),
                               (top_btn, "« 最初から", "«"))
         self._player_compact = False
+        self._player_full_req = {}   # 元の文で出していたときの幅（_reflow_player_row）
         sep = ttk.Separator(ctl, orient="vertical")
         sep.pack(side="left", fill="y", padx=GAPX * 2)
         # 速さ・間（params）と、位置の線路・何行目か（tail）はそれぞれ1つの枠にまとめ、
@@ -3548,9 +3550,15 @@ class App(tk.Tk):
         extra = (_packed_width(params) + sep.winfo_reqwidth() + 4 * GAPX
                  + tail_w + 2 * GAPX)
         base = _packed_width(ctl, skip=(params, sep, tail))
-        # 今の表示（記号だけかどうか）に左右されないよう、元の文で出したときの幅で決める
-        for btn, full, _short in self._player_short:
-            base += self._text_width(full) - self._text_width(str(btn.cget("text")))
+        # 今の表示（記号だけかどうか）に左右されないよう、元の文で出したときの幅で決める。
+        # 元の幅は字の幅からの見積もりではなく、元の文で出していたときに実際に測った幅を
+        # 使う（見積もりが数 px ずれると、縮める・戻すを際限なく繰り返して固まった）
+        if not self._player_compact:
+            self._player_full_req = {btn: btn.winfo_reqwidth()
+                                     for btn, _f, _s in self._player_short}
+        else:
+            for btn, _full, _short in self._player_short:
+                base += self._player_full_req.get(btn, 0) - btn.winfo_reqwidth()
         compact = ctl.winfo_width() < base
         if compact != self._player_compact:
             self._player_compact = compact
@@ -3616,11 +3624,18 @@ class App(tk.Tk):
         fixed = _packed_width(tools, skip=movable)
         # 今の表示（縮めているかどうか）に左右されないよう、元の文の幅にして比べる。
         # 縮めると save だけ狭くなる
+        # 元の幅は、元の文で出していたときに実際に測った幅（字の幅からの見積もりだと
+        # 数 px ずれて、縮める・戻すを繰り返して固まることがある）
         tw = self._text_width
         dict_full, dict_short = "読み方辞書...", "辞書..."
-        rep_now = str(self._rep_btn.cget("text"))
-        mov += tw(dict_full) - tw(str(self.dict_btn.cget("text")))
-        fixed += tw(self._rep_label(False)) - tw(rep_now)
+        if not self._rbar_compact:
+            self._rbar_full_req = (self.dict_btn.winfo_reqwidth(),
+                                   self._rep_btn.winfo_reqwidth())
+        else:
+            mov += self._rbar_full_req[0] - self.dict_btn.winfo_reqwidth()
+            fixed += self._rbar_full_req[1] - self._rep_btn.winfo_reqwidth()
+        # 縮めたときに狭くなるぶん（見積もり。縮めるかどうかを決めるだけで、戻すときは
+        # 上の実際の幅で決めるので、ずれても行き来しない）
         save = (tw(dict_full) - tw(dict_short)
                 + tw(self._rep_label(False)) - tw(self._rep_label(True)))
         width = bar.winfo_width()

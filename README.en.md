@@ -110,7 +110,7 @@ If it won't start, run **`デバッグ起動.pyw`** (in the `app` folder; macOS:
 
 > Heads up: right now this is distributed as a **script zip**, not a ready-made `.exe` or `.app`. There is no packaged executable yet. That's on my list, but it isn't here today, and I'd rather say so than pretend otherwise.
 
-**Download (latest, v1.26.0):** [Windows](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip) (`TextToVoicevox_Windows.zip`) · [macOS](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip) (`TextToVoicevox_Mac.zip`). Older versions are on the [Releases page](https://github.com/rakuyou211-blip/TextToVoicevox/releases).
+**Download (latest, v1.26.1):** [Windows](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip) (`TextToVoicevox_Windows.zip`) · [macOS](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip) (`TextToVoicevox_Mac.zip`). Older versions are on the [Releases page](https://github.com/rakuyou211-blip/TextToVoicevox/releases).
 
 ---
 
