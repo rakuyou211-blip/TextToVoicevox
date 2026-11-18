@@ -2330,6 +2330,9 @@ class App(tk.Tk):
         # 窓が狭くて1行に入らないときは、両方を下の行へ送る（_reflow_player_row）。
         # 1行目にはボタンだけが残る。どちらの行にも置けるよう、枠の親は bar にする
         row2 = ttk.Frame(bar)   # 狭いときだけ出す2行目
+        # 2行目にも入らないとき（Mac の100%表示のいちばん狭い窓など）、何行目かを置く3行目
+        self._player_row3 = ttk.Frame(bar)
+        self._player_layout = 1
         params = ttk.Frame(bar)
         params.pack(in_=ctl, side="left")
         # 速さは ② の話速（speed_var）と同じ値。どちらで変えても両方がそろう
@@ -3554,12 +3557,21 @@ class App(tk.Tk):
             for btn, full, short in self._player_short:
                 btn.configure(text=short if compact else full)
         one = ctl.winfo_width() >= base + extra
+        # 2行目に「速さ・間」と並べて、何行目か（短い方）と線路（いちばん細くて _px(40)）が入るか
+        tail_min = (self._text_width(self._pos_var.get().split("・")[-1])
+                    + _pack_padx(self._pos_lbl) + _px(40) + _pack_padx(self._play_prog)
+                    + 4 * GAPX)
+        two = ctl.winfo_width() >= _packed_width(params) + tail_min
+        layout = 1 if one else (2 if two else 3)
         self._fit_position()
-        if one == self._player_one:
+        if layout == self._player_layout:
             return
+        self._player_layout = layout
         self._player_one = one
+        row3 = self._player_row3
         if one:
             row2.pack_forget()
+            row3.pack_forget()
             sep.pack(side="left", fill="y", padx=GAPX * 2)
             params.pack(in_=ctl, side="left")
             tail.pack(in_=ctl, side="left", fill="x", expand=True, padx=(GAPX * 2, 0))
@@ -3567,7 +3579,13 @@ class App(tk.Tk):
             sep.pack_forget()
             row2.pack(fill="x", pady=(2, 0), after=ctl)
             params.pack(in_=row2, side="left")
-            tail.pack(in_=row2, side="left", fill="x", expand=True, padx=(GAPX * 2, 0))
+            if layout == 2:
+                row3.pack_forget()
+                tail.pack(in_=row2, side="left", fill="x", expand=True,
+                          padx=(GAPX * 2, 0))
+            else:
+                row3.pack(fill="x", pady=(2, 0), after=row2)
+                tail.pack(in_=row3, side="left", fill="x", expand=True, padx=0)
         params.lift()
         tail.lift()
 
