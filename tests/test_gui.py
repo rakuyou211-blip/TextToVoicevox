@@ -1656,6 +1656,27 @@ def test_player_bar_wraps_instead_of_clipping(app):
     assert not row2.winfo_ismapped() and sep.winfo_ismapped()
 
 
+@pytest.mark.parametrize("ratio", [0.9, 1.0, 1.1])
+def test_narrow_labels_settle_at_every_width(app, monkeypatch, ratio):
+    """ボタン名を縮める・戻すは、どの幅でも一度決まったら行き来しない。字の幅の
+    見積もりが実際とずれていても（CI の Windows で、縮める・戻すを繰り返して固まった）。"""
+    import main
+    real = app._text_width
+    monkeypatch.setattr(app, "_text_width", lambda text: int(real(text) * ratio))
+    app._pos_var.set("12,345 / 12,345行・あと約25時間")
+    for w in range(main._px(860), main._px(1160), max(1, main._px(6))):
+        app.geometry(f"{w}x{main._px(720)}")
+        for _ in range(4):
+            app.update()
+        state = (app._player_compact, app._player_layout, app._rbar_compact,
+                 app._rbar_level)
+        for _ in range(3):   # もう一度並べ直しても変わらない
+            app._reflow()
+            app.update()
+            assert (app._player_compact, app._player_layout, app._rbar_compact,
+                    app._rbar_level) == state, w
+
+
 def test_pause_closes_mouth_and_resume_reopens_only_mid_line(app):
     """一時停止で口パクを止め、再開時は行の途中のときだけ口パクを戻す。"""
     import threading
