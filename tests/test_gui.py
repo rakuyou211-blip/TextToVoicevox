@@ -1645,6 +1645,9 @@ def test_player_bar_wraps_instead_of_clipping(app):
     # 以外の幅（左の列など）を足した大きさにする
     wide = (ctl.winfo_reqwidth() + params.winfo_reqwidth()
             + app._player_tail.winfo_reqwidth() + main._px(200))
+    if app._player_compact:   # 記号だけにしたボタンは、元の文に戻るぶん広くなる
+        wide += sum(app._text_width(full) - app._text_width(short)
+                    for _btn, full, short in app._player_short)
     app.geometry(f"{wide + app.winfo_width() - ctl.winfo_width()}x{main._px(720)}")
     settle()
     if ctl.winfo_width() < wide:

@@ -2114,6 +2114,7 @@ class App(tk.Tk):
         self._rbar_head = head
         self._rbar_one = True
         self._rbar_level = 0
+        self._rbar_compact = False   # 狭いとき「置換 ▷」「辞書...」に縮めているか
         self.text_font = tkfont.Font(font=(TEXT_FONT or "TkTextFont"))
         self.text = tk.Text(body, wrap="word", undo=True, font=self.text_font,
                             padx=_px(8), pady=_px(4))
@@ -2317,6 +2318,12 @@ class App(tk.Tk):
                              command=self._play_from_top)
         top_btn.pack(side="left", padx=(4, 0))
         _Tooltip(top_btn, "本文の最初から読み上げます（再生中なら頭に戻ります）。")
+        # ボタンだけでも1行に入らない画面（1024×768 の100%表示など）では、この3つを
+        # 記号だけにする（_reflow_player_row）。中身は吹き出しで読める
+        self._player_short = ((self.prev_btn, "◁ 前の行", "◁"),
+                              (self.next_btn, "次の行 ▷", "▷"),
+                              (top_btn, "« 最初から", "«"))
+        self._player_compact = False
         sep = ttk.Separator(ctl, orient="vertical")
         sep.pack(side="left", fill="y", padx=GAPX * 2)
         # 速さ・間（params）と、位置の線路・何行目か（tail）はそれぞれ1つの枠にまとめ、
@@ -3538,6 +3545,14 @@ class App(tk.Tk):
         extra = (_packed_width(params) + sep.winfo_reqwidth() + 4 * GAPX
                  + tail_w + 2 * GAPX)
         base = _packed_width(ctl, skip=(params, sep, tail))
+        # 今の表示（記号だけかどうか）に左右されないよう、元の文で出したときの幅で決める
+        for btn, full, _short in self._player_short:
+            base += self._text_width(full) - self._text_width(str(btn.cget("text")))
+        compact = ctl.winfo_width() < base
+        if compact != self._player_compact:
+            self._player_compact = compact
+            for btn, full, short in self._player_short:
+                btn.configure(text=short if compact else full)
         one = ctl.winfo_width() >= base + extra
         self._fit_position()
         if one == self._player_one:
@@ -3581,14 +3596,32 @@ class App(tk.Tk):
         # 足す（多めに見ていたぶん、125%表示の既定の窓で 3px 足りず、下の行へ送っていた）
         mov = sum(w.winfo_reqwidth() + _pack_padx(w) for w in movable)
         fixed = _packed_width(tools, skip=movable)
+        # 今の表示（縮めているかどうか）に左右されないよう、元の文の幅にして比べる。
+        # 縮めると save だけ狭くなる
+        tw = self._text_width
+        dict_full, dict_short = "読み方辞書...", "辞書..."
+        rep_now = str(self._rep_btn.cget("text"))
+        mov += tw(dict_full) - tw(str(self.dict_btn.cget("text")))
+        fixed += tw(self._rep_label(False)) - tw(rep_now)
+        save = (tw(dict_full) - tw(dict_short)
+                + tw(self._rep_label(False)) - tw(self._rep_label(True)))
         width = bar.winfo_width()
         full = self._text_width(self.stats_var.get())
+        compact = False
         if width >= head + full + fixed + mov + 4 * GAPX:
             level = 0
         elif width >= head + fixed + mov + 2 * GAPX:
             level = 1
+        elif width >= head + fixed + mov - save + 2 * GAPX:
+            # 1024×768 の100%表示などで、既定の窓でもふりがなの道具が本文の下へ
+            # 押し出されていた。短い名前にすれば上の行に入る
+            level, compact = 1, True
         else:
             level = 2
+        if compact != self._rbar_compact:
+            self._rbar_compact = compact
+            self.dict_btn.configure(text=dict_short if compact else dict_full)
+            self._rep_btn.configure(text=self._rep_label())
         self._fit_stats(width - (mov if level == 2 else 0) - 2 * GAPX if level else None)
         if level == self._rbar_level:
             return
@@ -3686,10 +3719,15 @@ class App(tk.Tk):
         self._rep_open = bool(show)
         if self._rep_open:
             self._rep_frame.pack(fill="x", after=self._rbar[0])
-            self._rep_btn.config(text="置き換え ▽")
         else:
             self._rep_frame.pack_forget()
-            self._rep_btn.config(text="置き換え ▷")
+        self._rep_btn.config(text=self._rep_label())
+
+    def _rep_label(self, short=None):
+        """「置き換え ▷」の文。見出しの行が狭いときは「置換 ▷」（_reflow_result_bar）。"""
+        if short is None:
+            short = self._rbar_compact
+        return ("置換" if short else "置き換え") + (" ▽" if self._rep_open else " ▷")
 
     # ---------------- 合成パラメータ・行別話者ヘルパー ----------------
     def _format_choices(self):
