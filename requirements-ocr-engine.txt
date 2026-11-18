@@ -1,0 +1,30 @@
+# 強い文字読み取り（PP-OCRv6）の部品。Windows の初回セットアップで一緒に入る（winsetup.py）。
+# アプリの venv ではなく ocr_engine/deps に入れて、ocr_engine/python（Python 3.14）で動かす
+# （アプリの Python が新しいと、onnxruntime が入らないため）。
+# 入らなくてもアプリは動く（Windows の読み取りで読む）。
+#
+# ・何が入るかを固定するため、版とハッシュを全部書いてある（pip --require-hashes）
+# ・モデルは rapidocr の wheel に同梱されていて、ネットにつながずに動く（ocr_helper.py が入口を塞ぐ）
+# ・版を上げたら、ocr_helper.py --selftest と tools/ocr_bench で読みが落ちていないか確かめる
+
+certifi==2026.10.23 --hash=sha256:e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1
+charset-normalizer==3.5.2 --hash=sha256:e4e81e09c1578b8df602e3db08b0b3ea0a6947ad612f52bf8dc5ea8d47691f0c
+colorama==0.4.6 --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+colorlog==6.12.0 --hash=sha256:30d392604e9110045a2c2aeefc27d7a017abbab63f3a8aee594eac0801df784e
+flatbuffers==25.12.19 --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
+idna==3.20 --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+numpy==2.5.4 --hash=sha256:2ca144f15135b6212a5c47b1e2aeca6e412f102f95a2d5d88d8aec77eb255de3
+omegaconf==2.4.0 --hash=sha256:f141a664c777582405e3cc6e0545ecc79429e79f844995b1a6e71c35946a025c
+onnxruntime==1.31.1 --hash=sha256:0a3998e18cb667ef54287556bd62291a788ed235723dd90c83b2294b24e71d81
+opencv-python-headless==5.0.0.93 --hash=sha256:829717b6a95554f273e49e357cee3b3a2a26b6f4842fbc1bed2b45bdd8f87e0e
+packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pillow==13.0.0 --hash=sha256:f7cbb7a64e7ec664775195e4f81923bc8a93d9451b963f844e59118f63147a7a
+protobuf==7.36.2 --hash=sha256:a300819d441e078a5608c0d3c709796bb548136058fda017ae51d425b44fd353
+pyclipper==1.4.0 --hash=sha256:6c317e182590c88ec0194149995e3d71a979cfef3b246383f4e035f9d4a11826
+PyYAML==6.0.3 --hash=sha256:4a2e8cebe2ff6ab7d1050ecd59c25d4c8bd7e6f400f5f82b96557ac0abafd0ac
+rapidocr==3.10.0 --hash=sha256:2fc34e26cd0f48514804a94f8832283039c7334076bff60768b1fed9ad068050
+requests==2.34.2 --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
+shapely==2.2.0 --hash=sha256:48dd1d961391f314ab7fa8812c86ca2a727bee2bdca1478730eacaea007da18e
+six==1.17.0 --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+tqdm==4.70.1 --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73
+urllib3==2.8.0 --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3

@@ -1,6 +1,7 @@
 name: Release zips
 
 # Release を出したら、Windows 用と Mac 用の zip を作って、その Release に自動で添付する。
+# 1行導入が入れる Windows の「Python 入りの版」（TextToVoicevox_OneLine_Win64.zip）も添付する。
 # 名前に版数を入れないので、README のダウンロードのリンク
 #   https://github.com/<repo>/releases/latest/download/TextToVoicevox_Mac.zip
 # は、版が変わっても同じまま最新版を指す。
@@ -141,3 +142,38 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: gh release upload "$TAG" dist/TextToVoicevox_Windows.zip dist/TextToVoicevox_Mac.zip --clobber --repo "${{ github.repository }}"
+
+  # 1行導入（install.ps1）が入れる「Python 入りの版」TextToVoicevox_OneLine_Win64.zip。
+  # 中の Python で部品を入れて試すので、Windows で作る。zips の後に動く（Release が先に要る）。
+  # README からはリンクしない: ブラウザで落とした zip を Explorer で展開すると、Defender が
+  # Python の exe と DLL の組を約4分つかんで離さない（くわしくは tools/make_bundle.py）
+  bundle:
+    needs: zips
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || '' }}
+          fetch-depth: 0
+
+      - name: Use the tagged source if the tag exists
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ inputs.tag }}" >/dev/null; then
+            git checkout -q "${{ inputs.tag }}"
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the Python-included app
+        run: python tools/make_bundle.py dist
+
+      - name: Attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" dist/TextToVoicevox_OneLine_Win64.zip --clobber --repo "${{ github.repository }}"

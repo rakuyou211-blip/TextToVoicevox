@@ -3,12 +3,17 @@
 
 黒い画面にエラーの内容を出したまま起動します。うまく動かないときに使います。
 まだ一度も起動できていない状態でも、ここから開けます（要ればセットアップもします）。
+zip では app フォルダの中にあります（いちばん上には、ふだん使う「起動」だけを置くため）。
 """
 import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+# 起動.pyw と同じ探し方（隣に app フォルダがあればそこ、無ければこのフォルダ）
+APP = os.path.join(HERE, "app")
+if not os.path.exists(os.path.join(APP, "winlaunch.py")):
+    APP = HERE
+sys.path.insert(0, APP)
 try:
     import winlaunch
 except ImportError:
@@ -28,4 +33,4 @@ except ImportError:
     sys.exit(1)
 
 if __name__ == "__main__":
-    sys.exit(winlaunch.run(HERE, "debug"))
+    sys.exit(winlaunch.run(APP, "debug"))

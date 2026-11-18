@@ -99,6 +99,11 @@ def _recognize_one(path, languages, strip_labels=True):
                       "y0": y_top, "y1": 1.0 - y_bottom})
     if not lines:
         return ""
+    try:
+        import core
+        lines = core.tate_to_yoko(lines, core.image_aspect(path))   # 縦書きは右の列から読む
+    except Exception:
+        pass
     if strip_labels:
         try:
             import core

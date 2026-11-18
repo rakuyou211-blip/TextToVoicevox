@@ -2,6 +2,11 @@
 venv/
 venv_mac/
 
+# 強い文字読み取りの部品（文字読み取りを強くする.pyw が入れる。配布しない）
+ocr_engine/
+ocr_engine.new/
+ocr_engine.old/
+
 # Python キャッシュ
 __pycache__/
 *.pyc
@@ -11,6 +16,10 @@ __pycache__/
 settings.json
 settings.json.bak
 last_text.txt
+
+# エラーの記録（アプリが自分のフォルダに書く。人ごとの物なので配布しない）
+エラー.log
+起動エラー.log
 
 # 行単位の合成キャッシュ（自動生成・上限500MBでLRU削除）
 voice_cache/

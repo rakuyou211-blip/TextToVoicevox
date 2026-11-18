@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TextToVoicevox Guide</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: 縦に進む「道のり」— 準備3駅 → 使い方4駅。駅と駅を線路でつなぐ */
+:root {
+  --bg: #f6f8f1;
+  --surface: #ffffff;
+  --ink: #23301f;
+  --muted: #5f6b58;
+  --line: #d7dfcd;
+  --leaf: #4f8a2b;        /* ずんだ色のアクセント */
+  --leaf-soft: #e3efd5;
+  --amber: #b5651d;       /* 注意 */
+  --amber-soft: #f8ead9;
+  --code-bg: #eef2e8;
+  --f-display: "Zen Maru Gothic", "Hiragino Maru Gothic ProN", "Yu Gothic", sans-serif;
+  --f-body: "BIZ UDPGothic", "Yu Gothic UI", "Meiryo", sans-serif;
+  --f-code: "M PLUS 1 Code", "Consolas", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161c14; --surface: #1f271c; --ink: #e6eddf; --muted: #a3b09a; --line: #34402f;
+    --leaf: #8fcf5f; --leaf-soft: #2a3a22; --amber: #e9a35c; --amber-soft: #3a2c1c; --code-bg: #273022;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161c14; --surface: #1f271c; --ink: #e6eddf; --muted: #a3b09a; --line: #34402f;
+  --leaf: #8fcf5f; --leaf-soft: #2a3a22; --amber: #e9a35c; --amber-soft: #3a2c1c; --code-bg: #273022;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--f-body); font-size: 16px; line-height: 1.75;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 64px;
+}
+.wrap { max-width: 760px; margin: 0 auto; display: grid; gap: 48px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; line-height: 1.35; }
+h1 { font-size: clamp(28px, 6vw, 40px); font-weight: 900; }
+h2 { font-size: 24px; font-weight: 900; }
+h3 { font-size: 19px; font-weight: 700; }
+p { margin: 0; }
+a { color: var(--leaf); font-weight: 700; }
+a:focus-visible, button:focus-visible { outline: 3px solid var(--leaf); outline-offset: 2px; border-radius: 4px; }
+
+header { display: grid; gap: 12px; }
+.kicker { font-family: var(--f-display); font-weight: 700; color: var(--leaf); letter-spacing: .08em; font-size: 14px; }
+.lead { color: var(--muted); max-width: 62ch; }
+
+/* 全体の流れ（ミニ路線図） */
+.route { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 4px; font-family: var(--f-display); font-weight: 700; font-size: 14px; }
+.route span { padding: 4px 12px; border-radius: 999px; background: var(--leaf-soft); color: var(--ink); }
+.route span.prep { background: var(--amber-soft); }
+.route i { font-style: normal; color: var(--muted); }
+
+section { display: grid; gap: 20px; }
+.sec-head { display: grid; gap: 4px; }
+.sec-head p { color: var(--muted); }
+
+/* 駅（ステップ）と線路 */
+ol.track { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+ol.track > li { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 16px; position: relative; padding-bottom: 28px; }
+ol.track > li:last-child { padding-bottom: 0; }
+ol.track > li::before {
+  content: ""; position: absolute; left: 23px; top: 48px; bottom: 0; width: 2px; background: var(--line);
+}
+ol.track > li:last-child::before { display: none; }
+.stop {
+  width: 48px; height: 48px; border-radius: 50%;
+  display: grid; place-items: center;
+  font-family: var(--f-display); font-weight: 900; font-size: 20px;
+  background: var(--leaf); color: var(--bg);
+}
+.prep .stop { background: var(--amber); }
+.body { min-width: 0; display: grid; gap: 10px; padding-top: 8px; }
+.body ul { margin: 0; padding-left: 1.2em; display: grid; gap: 4px; }
+.where { font-size: 13px; color: var(--muted); font-family: var(--f-display); font-weight: 700; letter-spacing: .04em; }
+
+.ui { font-family: var(--f-display); font-weight: 700; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
+code { font-family: var(--f-code); font-size: 14px; background: var(--code-bg); border-radius: 4px; padding: 0 5px; }
+kbd { font-family: var(--f-code); font-size: 13px; background: var(--code-bg); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 6px; }
+
+.check {
+  border: 2px solid var(--amber); background: var(--amber-soft); border-radius: 10px;
+  padding: 12px 16px; display: grid; gap: 4px;
+}
+.check strong { color: var(--amber); font-family: var(--f-display); }
+
+.cmd { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: stretch; }
+.cmd pre {
+  margin: 0; overflow-x: auto; background: var(--code-bg); border-radius: 8px; padding: 10px 12px;
+  font-family: var(--f-code); font-size: 13px; line-height: 1.6;
+}
+.cmd button {
+  font-family: var(--f-display); font-weight: 700; font-size: 14px; border: 0; border-radius: 8px;
+  background: var(--leaf); color: var(--bg); padding: 0 14px; cursor: pointer;
+}
+
+/* 画面の地図 */
+.screen { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: grid; gap: 10px; }
+.screen-bar { font-family: var(--f-display); font-weight: 700; font-size: 13px; color: var(--muted); }
+.layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 10px; }
+.col { display: grid; gap: 10px; align-content: start; }
+.col.main { grid-template-rows: minmax(0, 1fr) auto; align-content: stretch; }
+.panel { border: 1px dashed var(--line); border-radius: 10px; padding: 10px 12px; display: grid; gap: 2px; align-content: start; }
+.panel b { font-family: var(--f-display); font-size: 15px; }
+.panel small { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.panel.text { min-height: 150px; }
+.panel.conn { border-style: solid; }
+
+table { border-collapse: collapse; width: 100%; font-size: 15px; }
+.tablebox { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font-family: var(--f-display); font-size: 13px; color: var(--muted); letter-spacing: .04em; }
+
+.trouble { display: grid; gap: 12px; }
+.trouble details { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; }
+.trouble summary { font-family: var(--f-display); font-weight: 700; cursor: pointer; }
+.trouble details p { margin-top: 8px; color: var(--ink); }
+
+footer { color: var(--muted); font-size: 14px; display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 20px; }
+
+@media (max-width: 520px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
+  ol.track > li { grid-template-columns: 40px minmax(0, 1fr); gap: 12px; }
+  .stop { width: 40px; height: 40px; font-size: 17px; }
+  ol.track > li::before { left: 19px; top: 40px; }
+  .cmd { grid-template-columns: minmax(0, 1fr); }
+  .cmd button { padding: 8px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .cmd button { transition: filter .15s; }
+  .cmd button:hover { filter: brightness(1.1); }
+}
+
+/* 言語の切り替え・補足・ボタンの色の説明 */
+.langs { display: flex; flex-wrap: wrap; gap: 4px 16px; font-family: var(--f-display); font-size: 13px; font-weight: 700; }
+.langs span { color: var(--muted); }
+.note { color: var(--muted); font-size: 14px; }
+.colors { font-size: 15px; }
+/* 画面の日本語の名前は、日本語の字形で出す（中国語のページでも） */
+[lang="ja"] { font-family: "Zen Maru Gothic", "BIZ UDPGothic", "Yu Gothic", "Hiragino Sans", sans-serif; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <nav class="langs" aria-label="Language"><a href="How%20to%20use%20%28%E6%97%A5%E6%9C%AC%E8%AA%9E%29.html" lang="ja">日本語</a><span aria-current="page" lang="en">English</span><a href="How%20to%20use%20%28%E7%B9%81%E9%AB%94%E4%B8%AD%E6%96%87%29.html" lang="zh-TW">繁體中文</a><a href="How%20to%20use%20%28%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87%29.html" lang="zh-CN">简体中文</a></nav>
+    <div class="kicker">TextToVoicevox ・ Windows</div>
+    <h1>From install to read-aloud</h1>
+    <p class="lead">An app that pulls the text out of PDFs, images and text files and reads it aloud in VOICEVOX voices such as Zundamon. Everything runs on your own computer; your text is never sent anywhere. You can also open this page from <span class="ui" lang="ja">使い方</span> (how to use) at the top right of the app.</p>
+    <p class="note">The app's screen is in Japanese only. Button names below are written in Japanese exactly as they appear in the app, with a short English gloss.</p>
+    <div class="route" aria-label="Overall flow">
+      <span class="prep">VOICEVOX</span><i>→</i><span class="prep">Python</span><i>→</i><span class="prep">The app</span><i>→</i>
+      <span>Add files</span><i>→</i><span>Extract text</span><i>→</i><span>Pick a voice</span><i>→</i><span>Make audio</span>
+    </div>
+  </header>
+
+  <section aria-labelledby="prep-h">
+    <div class="sec-head">
+      <h2 id="prep-h">Setup (first time only)</h2>
+      <p>Install in this order. VOICEVOX and Python are separate programs and are not included in the app.</p>
+    </div>
+    <ol class="track prep">
+      <li>
+        <div class="stop">1</div>
+        <div class="body">
+          <h3>Install VOICEVOX</h3>
+          <p>VOICEVOX is the program that actually makes the voices. Download and install it from the <a href="https://voicevox.hiroshiba.jp/" target="_blank" rel="noopener">official VOICEVOX site</a>.</p>
+          <ul>
+            <li>After that there is nothing else to do. Opening the app also starts the speech engine (no editor window; it closes together with the app).</li>
+            <li>If you also want the editor window, start it with the app's <span class="ui" lang="ja">VOICEVOX起動</span> (start VOICEVOX) button.</li>
+            <li>To stop it starting by itself, untick <span class="ui" lang="ja">アプリと一緒に VOICEVOX を起動</span> (start VOICEVOX with the app) under <span class="ui" lang="ja">接続設定…</span> (connection settings) at the bottom left.</li>
+            <li>If your PC has a GPU and your VOICEVOX is the GPU build, the app starts it on the GPU, which makes audio much faster (about 4× on the PC we measured). To turn this off, untick <span class="ui" lang="ja">GPU があれば使う</span> (use the GPU if there is one) in the same place.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div class="stop">2</div>
+        <div class="body">
+          <h3>Install Python</h3>
+          <p>Download the installer for Python 3.9 or newer from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org</a> and run it.</p>
+          <div class="check">
+            <strong>The most common stumbling point</strong>
+            <p>On the installer's first screen, <b>be sure to tick</b> “Add python.exe to PATH” before you continue.</p>
+          </div>
+        </div>
+      </li>
+      <li>
+        <div class="stop">3</div>
+        <div class="body">
+          <h3>Start the app</h3>
+          <p>Double-click <span class="ui" lang="ja">起動.pyw</span> in the extracted folder.</p>
+          <ul>
+            <li>The first time only, a black window runs the setup (needs an internet connection; takes a few minutes).</li>
+            <li>When it finishes, the app opens. From then on it opens right away.</li>
+            <li>After the first start, a “TextToVoicevox” shortcut with the app’s icon appears, and 起動.pyw moves into the app folder. Open the shortcut from then on.</li>
+            <li>When a new version is out, “新しい版があります” appears at the top. Click it to see how to update.</li>
+            <li>Always right-click the zip → “Extract All” before using it.</li>
+          </ul>
+          <p class="where">Another way: paste one line into Terminal (no Python needed, no warning, and you get an icon on your desktop)</p>
+          <div class="cmd">
+            <pre id="install-cmd">irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.ps1 | iex</pre>
+            <button type="button" id="copy-btn">Copy</button>
+          </div>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <section aria-labelledby="screen-h">
+    <div class="sec-head">
+      <h2 id="screen-h">The screen</h2>
+      <p>The window has two columns: the steps (① → ② → ③) on the left, the text and the player on the right. Work down the left column from the top.</p>
+    </div>
+    <div class="screen" role="img" aria-label="Layout of the app window. Left column: ① import, ② voice, ③ save, connection. Right column: the text and the player bar">
+      <div class="screen-bar">TextToVoicevox ・ status message ・ theme ・ <span lang="ja">使い方</span> (how to use) ・ <span lang="ja">感想を送る</span> (send feedback)</div>
+      <div class="layout">
+        <div class="col">
+          <div class="panel"><b><span lang="ja">① 取り込む</span> — import</b><small>Drop files / <span lang="ja">スクリーンショット</span> (screenshot) → <span lang="ja">▶ テキスト抽出 実行</span> (extract). Page range and cleanup: <span lang="ja">設定 ▷</span> (settings)</small></div>
+          <div class="panel"><b><span lang="ja">② 声</span> — voice</b><small>The face of the voice you picked (click it to hear a sample), character, style, speed and so on → <span lang="ja">♪ 声を聴く</span> (voice sample) / <span lang="ja">▶ 試聴</span> (preview a line)</small></div>
+          <div class="panel"><b><span lang="ja">③ 保存</span> — save</b><small>Audio format, how to split (one file to start with), subtitles → <span lang="ja">♪ 音声を生成</span> (make audio files)</small></div>
+          <div class="panel conn"><b><span lang="ja">接続</span> — connection</b><small>● <span lang="ja">接続OK</span> (connected) / <span lang="ja">VOICEVOX起動</span> · <span lang="ja">画面なしで起動</span> (start VOICEVOX / start without its window) / start the engine with the app</small></div>
+        </div>
+        <div class="col main">
+          <div class="panel text"><b><span lang="ja">本文</span> — the text</b><small>The extracted text appears here, and you can edit it (autosaved every 60 seconds). Above the kanji you see how VOICEVOX will actually read them (furigana).</small></div>
+          <div class="panel"><b>Player bar</b><small><span lang="ja">◁ 前の行</span> previous line · <span lang="ja">▶ 再生</span> play · <span lang="ja">次の行 ▷</span> next line · <span lang="ja">■ 停止</span> stop · <span lang="ja">« 最初から</span> from the top · speed · gap · time left · <span lang="ja">◁ 広げる</span> widen</small></div>
+        </div>
+      </div>
+    </div>
+    <p class="colors">Buttons: the main actions — <span class="ui" lang="ja">▶ テキスト抽出 実行</span> (extract), <span class="ui" lang="ja">♪ 音声を生成</span> (make audio) and <span class="ui" lang="ja">▶ 再生</span> (play) — are <b>painted in the theme color</b> (orange in the light and dark themes, green in zunda, blue in high-contrast), buttons with a <b>plain filled face</b> are everyday actions, and <b>outlined</b> ones are occasional actions (saving the .txt, copying, previous / next line). Plain text is a tool; the ones with a <b>gear</b> mark open <b>settings</b>. The red <span class="ui" lang="ja">本文を全消去</span> clears the text.</p>
+  </section>
+
+  <section aria-labelledby="use-h">
+    <div class="sec-head">
+      <h2 id="use-h">How to use it (every time)</h2>
+      <p>Add a file, extract the text, turn it into speech. These four steps are the basics.</p>
+    </div>
+    <ol class="track">
+      <li>
+        <div class="stop">1</div>
+        <div class="body">
+          <p class="where">Left column, <span lang="ja">① 取り込む</span></p>
+          <h3>Add what you want read</h3>
+          <p>Drag and drop a PDF, an image (PNG, JPG and so on), or a .txt, .docx or .epub file onto the window.</p>
+          <ul>
+            <li>To read text that is on your screen, press <span class="ui" lang="ja">スクリーンショット</span> (screenshot, <kbd>Ctrl</kbd>+<kbd>R</kbd>) and drag a box around it. It is read aloud right away.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div class="stop">2</div>
+        <div class="body">
+          <p class="where">Left column <span lang="ja">① 取り込む</span> → the text on the right</p>
+          <h3>Extract the text</h3>
+          <p>As soon as you add a file, its text is extracted into the text area on the right. To extract again, press <span class="ui" lang="ja">▶ テキスト抽出 実行</span> (<kbd>Ctrl</kbd>+<kbd>Enter</kbd>).</p>
+          <ul>
+            <li>For PDFs you can set a page range such as <code>5-320</code> to skip the cover and table of contents (<span class="ui" lang="ja">設定 ▷</span> in ①).</li>
+            <li>In PDF books, the book or chapter name printed at the top or bottom of every page (the running head) and the page numbers are not read aloud; the first occurrence of a chapter heading (第一章 and so on) stays. You can see what was taken out under <span class="ui" lang="ja">直した所</span> (fixes).</li>
+            <li>Scans and photos are read too (vertical text from the right column), including text over game scenes and photos, small text, and Japanese mixed with English.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div class="stop">3</div>
+        <div class="body">
+          <p class="where">The text on the right / left column <span lang="ja">② 声</span></p>
+          <h3>Fix the text and pick a voice</h3>
+          <p>You can edit the text directly. The furigana above the kanji show how VOICEVOX will actually read them, so you can spot misreadings before you listen (click a colored one to fix that word's reading). In ② pick a character and a voice style, then check it with <span class="ui" lang="ja">▶ 試聴</span> (<kbd>Ctrl</kbd>+<kbd>P</kbd>).</p>
+          <ul>
+            <li>Furigana appear only while VOICEVOX is running. If it is not, a line right above the text says so (<span lang="ja">「ふりがな（漢字の上の読み）は、VOICEVOX を起動すると出ます」</span>), and the <span class="ui" lang="ja">画面なしで起動</span> button next to it starts VOICEVOX. In a narrow window the furigana checkbox sits below the text.</li>
+            <li>Tick <span lang="ja">「誤読候補だけ」</span> (likely misreadings only) to show just the colored readings.</li>
+            <li>In a long book, <span class="ui" lang="ja">次の候補 ▷</span> (next candidate, <kbd>F8</kbd>; <kbd>Shift</kbd>+<kbd>F8</kbd> goes back) at the top right of the text jumps to each colored reading in turn. Lines whose readings haven't been looked up yet are checked with VOICEVOX as it goes.</li>
+            <li>The text grows when you widen the window (in a narrow one it never shrinks below your size). Set your own size with <kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>−</kbd> (or <kbd>Ctrl</kbd> + mouse wheel) and go back with <kbd>Ctrl</kbd>+<kbd>0</kbd>. Right-click → <span lang="ja">「文字の大きさ」</span> (text size) turns the automatic sizing on or off.</li>
+            <li>Start a line with <code>@ずんだもん:</code> to switch the voice for that line only (for dialogue).</li>
+            <li>Lines that start with <code>#</code> are not read (use them for notes).</li>
+            <li>You can also fix a misreading by selecting the word, right-clicking, and adding it to the pronunciation dictionary.</li>
+            <li>Dates, times and symbols (25℃, 10:30, 2026/11/7, 10〜20人 and so on) are rewritten before speaking so that VOICEVOX reads them right; your text stays as it is. To turn this off, untick <span class="ui" lang="ja">数字・日付・記号の読み方を直す</span> at the top of the <span class="ui" lang="ja">読み方辞書...</span> (pronunciation dictionary) window.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div class="stop">4</div>
+        <div class="body">
+          <p class="where">The player bar under the text / left column <span lang="ja">③ 保存</span></p>
+          <h3>Listen, or save it as audio files</h3>
+          <ul>
+            <li><span class="ui" lang="ja">▶ 再生</span> (right under the text) … reads from the line with the cursor to the end. <kbd>Space</kbd> pauses and resumes. The line being read stays about a third of the way down the text, so you can see the next sentence. The player bar shows the line number and the time left (<span lang="ja">あと約◯分</span>).</li>
+            <li><span class="ui" lang="ja">◁ 広げる</span> (widen, <kbd>F11</kbd>, at the right end of the player bar) … folds the left column so the text fills the window, and the text grows with it. <span class="ui" lang="ja">▷ 戻す</span> (back), or <kbd>Esc</kbd> when nothing is playing, brings it back.</li>
+            <li><span class="ui" lang="ja">♪ 音声を生成</span> (<kbd>Ctrl</kbd>+<kbd>G</kbd>) … saves files in the format chosen in ③ (WAV and others). By default everything goes into one file; change that with <span class="ui" lang="ja">まとめ方</span> (how to split) in ③. If a save would make more than 300 files, the app asks first. Tick <span class="ui" lang="ja">字幕(.srt)も保存</span> to get subtitles too.</li>
+            <li><span class="ui" lang="ja">段落・章は長め</span> (longer pauses at paragraphs and chapters; next to <span lang="ja">文の間</span> in ③, on by default) … leaves a longer pause where a new paragraph starts (after a blank line or a full-width-space indent) and before chapter headings such as 第一章 (1.0 s and 2.0 s when the sentence gap is 0.4 s), both when playing and in saved audio. Paragraphs indented with a full-width space are found even with <span class="ui" lang="ja">空行を削除</span> (remove blank lines) on.</li>
+            <li>Press <kbd>Esc</kbd> to stop midway. You can also save what has been made so far.</li>
+          </ul>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <section aria-labelledby="out-h">
+    <div class="sec-head">
+      <h2 id="out-h">Formats you can save</h2>
+    </div>
+    <div class="tablebox">
+      <table>
+        <thead><tr><th>Format</th><th>Use</th><th>Needs</th></tr></thead>
+        <tbody>
+          <tr><td>WAV</td><td>The most reliable; works directly in video editors</td><td>Nothing</td></tr>
+          <tr><td>M4A / MP3</td><td>Listening on a phone, smaller files</td><td>Nothing (ffmpeg only for MP3 on a Mac)</td></tr>
+          <tr><td>M4B(本)</td><td>Audiobook with chapters (split automatically at headings like 第◯章)</td><td>Nothing</td></tr>
+          <tr><td>.srt</td><td>Subtitles timed to the audio</td><td>Nothing</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="tr-h">
+    <div class="sec-head">
+      <h2 id="tr-h">If something goes wrong</h2>
+    </div>
+    <div class="trouble">
+      <details>
+        <summary>Double-clicking 起動.pyw does nothing, or Notepad opens</summary>
+        <p>Python is not installed, or the PATH box was not ticked. Redo setup step 2. If Python is installed but Notepad opens, right-click → “Open with” → choose “Python”.</p>
+      </details>
+      <details>
+        <summary>“Windows protected your PC” appears</summary>
+        <p>Click the small “More info”, then “Run anyway”. The author simply has not code-signed it; all of the source code is public.</p>
+      </details>
+      <details>
+        <summary><span lang="ja">「VOICEVOX: つながっていません」</span> (not connected to VOICEVOX) appears</summary>
+        <p>VOICEVOX is not running. If it is installed, it normally starts when you open the app. If it didn't, press <span class="ui" lang="ja">VOICEVOX起動</span> or <span class="ui" lang="ja">画面なしで起動</span> at the bottom left of the app (<span lang="ja">接続</span>, connection). If this happens every time, check that <span class="ui" lang="ja">アプリと一緒に VOICEVOX を起動</span> (start VOICEVOX with the app) under <span class="ui" lang="ja">接続設定…</span> at the bottom left is on.</p>
+      </details>
+      <details>
+        <summary>No furigana appear</summary>
+        <p>Furigana appear only while the app is connected to VOICEVOX (until then a line right above the text says so, with a <span class="ui" lang="ja">画面なしで起動</span> button next to it). Start VOICEVOX, or press <span class="ui" lang="ja">VOICEVOX起動</span> or <span class="ui" lang="ja">画面なしで起動</span> at the bottom left of the app; they appear by themselves once it connects. In a narrow window, the furigana checkbox sits below the text.</p>
+      </details>
+      <details>
+        <summary>You can't tell what's wrong</summary>
+        <p>Start the app with <span class="ui" lang="ja">デバッグ起動.pyw</span> to see the error in a black window. Records are also kept in the folder: <span lang="ja">起動エラー.log</span> and <span lang="ja">エラー.log</span> (if you installed from the zip, all of these are in the <span lang="ja">app</span> folder).</p>
+      </details>
+    </div>
+  </section>
+
+  <footer>
+    <p>When you publish audio you made, follow the terms of VOICEVOX and of each character, and add a credit such as “VOICEVOX:ずんだもん”. The button on the completion screen copies it for you.</p>
+    <p>This app is not an official VOICEVOX product. It's an unofficial tool made by one person, not affiliated with the VOICEVOX project or the characters' rights holders.</p>
+    <p>The app: <a href="https://github.com/rakuyou211-blip/TextToVoicevox" target="_blank" rel="noopener">TextToVoicevox (MIT License)</a></p>
+  </footer>
+</div>
+
+<script>
+  document.getElementById('copy-btn').addEventListener('click', function () {
+    var btn = this, text = document.getElementById('install-cmd').textContent;
+    function selectIt() {
+      var r = document.createRange(); r.selectNodeContents(document.getElementById('install-cmd'));
+      var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      btn.textContent = 'Selected';
+    }
+    try {
+      navigator.clipboard.writeText(text).then(function () { btn.textContent = 'Copied'; }, selectIt);
+    } catch (e) { selectIt(); }
+    setTimeout(function () { btn.textContent = 'Copy'; }, 2000);
+  });
+</script>
+</body>
+</html>

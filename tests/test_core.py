@@ -1476,6 +1476,33 @@ class TestFixOcrConfusables:
     def test_empty(self):
         assert core.fix_ocr_confusables("") == ""
 
+    def test_ichi_at_line_head(self):
+        # 強い読み取りは、行の頭の「一ページ目」を「ーページ目」と読む（2026-11-13 に実測）。
+        # のばす音の印は行の頭に来ないので、すぐあとが数える言葉などなら「一」に戻す
+        cases = {"ーページ目を開く。": "一ページ目を開く。", "ー人で歩いた。": "一人で歩いた。",
+                 "ーつの考え": "一つの考え", "ーキロ先にある。": "一キロ先にある。",
+                 "「ー人で行く」": "「一人で行く」", "そう、ー度だけ": "そう、一度だけ",
+                 "第ーページ": "第一ページ", "前の行。\nー日が終わった。": "前の行。\n一日が終わった。",
+                 # Windows の読み取りは字のあいだを空ける
+                 "ー キ ロ 先": "一 キ ロ 先", "第 ー ペ ー ジ": "第 一 ペ ー ジ"}
+        for s, want in cases.items():
+            assert core.fix_ocr_confusables(s) == want, s
+
+    def test_spaced_date_and_time_joined(self):
+        # Windows の読み取りは日付・時刻の字のあいだも空ける（2026-11-14 に実測）
+        cases = {"2026 / 1 1 / 13 18 : 07": "2026/11/13 18:07", "1 8 : 0 7": "18:07",
+                 "10 : 30 に集合": "10:30 に集合"}
+        for s, want in cases.items():
+            assert core.fix_ocr_confusables(s) == want, s
+        for s in ("1 2 3", "第 1 話", "A : B"):
+            assert core.fix_ocr_confusables(s) == s, s
+
+    def test_dash_and_wrapped_choonpu_kept(self):
+        # 線（―）として使われた「ー」・動きの言葉が続く形・前の行から折り返したのばす音は触らない
+        for s in ("ーーそうだね", "ーー人", "ー言った。", "ー気がつくと朝だった。", "ーいや、違う。",
+                  "ー彼は言った", "コンピュ\nーター", "コンピュ\n ーター", "ーabc", "ー"):
+            assert core.fix_ocr_confusables(s) == s, s
+
 
 # ============================================================
 #  expand_readable_chars（読み上げ困難な記号の展開）
@@ -2543,6 +2570,96 @@ class TestBuildChapters:
         assert kind == "none" and chs == []
 
 
+def test_fmt_left_is_rough_on_purpose():
+    """再生バーの「あと◯分」は、行ごとに変わるので細かい数字を出さない。"""
+    assert core.fmt_left(0) == "約10秒"
+    assert core.fmt_left(44) == "約40秒"
+    assert core.fmt_left(54) == "約50秒"
+    assert core.fmt_left(55) == "約1分"
+    assert core.fmt_left(125) == "約2分"
+    assert core.fmt_left(3599) == "約1時間"
+    assert core.fmt_left(3725) == "約1時間2分"
+    assert core.fmt_left(90000) == "約25時間"
+
+
+class TestParagraphPauses:
+    """段落の切れ目（空行のあと）と章の見出しの前は、文と文のあいだより長く空ける。"""
+    LINES = ["プロローグ", "一文目。", "二文目。", "次の段落。", "第一章 出発", "本文。"]
+    PARA = [0, 1, 1, 2, 3, 4]
+
+    def test_kinds_of_breaks(self):
+        # 先頭の行の前は切れ目なし。見出しは段落が変わっても「章」
+        assert core.line_breaks(self.LINES, self.PARA) == [
+            "", "para", "", "para", "chapter", "para"]
+
+    def test_gaps_scale_with_sentence_gap(self):
+        gaps = core.line_gaps(self.LINES, self.PARA, 0.4)
+        assert gaps == pytest.approx([0.0, 1.0, 0.4, 1.0, 2.0, 1.0])   # 2.5倍・5倍
+
+    def test_zero_stays_zero_and_extra_is_capped(self):
+        assert core.line_gaps(self.LINES, self.PARA, 0.0) == [0.0] * 6
+        assert core.break_gap("para", 3.0) == pytest.approx(5.0)      # 足すのは2秒まで
+        assert core.break_gap("chapter", 3.0) == pytest.approx(7.0)   # 足すのは4秒まで
+        assert core.break_gap("", 3.0) == pytest.approx(3.0)
+        assert core.break_gap("para", -1) == 0.0
+
+    def test_off_means_same_gap_everywhere(self):
+        gaps = core.line_gaps(self.LINES, self.PARA, 0.4, longer=False)
+        assert gaps == pytest.approx([0.0] + [0.4] * 5)
+
+    def test_concat_srt_and_chapters_follow_per_line_gaps(self, tmp_path):
+        wavs = [_make_wav(0.10), _make_wav(0.05), _make_wav(0.20)]
+        # どこも同じ秒数のリストなら、秒数1つを渡したときとバイト単位で同じ
+        assert (core.concat_wavs(wavs, gap_sec=[0.0, 0.3, 0.3])
+                == core.concat_wavs(wavs, gap_sec=0.3))
+        gaps = [0.0, 0.1, 0.25]
+        out = tmp_path / "j.wav"
+        durs = core.concat_wavs_to_file(wavs, str(out), gap_sec=gaps)
+        data = out.read_bytes()
+        assert data == core.concat_wavs(wavs, gap_sec=gaps)
+        with wave.open(io.BytesIO(data), "rb") as w:
+            frames = w.readframes(w.getnframes())
+        one, zero = b"\x01\x00", b"\x00\x00"
+        assert frames == (one * 2400 + zero * 2400 + one * 1200
+                          + zero * 6000 + one * 4800)   # 行の前ごとに、その行の秒数
+        srt = core.make_srt(["あ", "い", "う"], durs, gap_sec=gaps)
+        assert "00:00:00,000 --> 00:00:00,100" in srt
+        assert "00:00:00,200 --> 00:00:00,250" in srt
+        assert "00:00:00,500 --> 00:00:00,700" in srt
+        chs, kind = core.build_chapters(["まえ", "第一章", "本文"], [10.0, 2.0, 5.0],
+                                        gap=[0.0, 2.0, 1.0])
+        assert kind == "heads" and chs == [("冒頭", 0.0), ("第一章", 12.0)]
+
+
+class TestCliParaPause:
+    """CLI も GUI と同じく、段落の切れ目の前は長め（--no-para-pause で、どこも同じ）。"""
+
+    def _srt(self, tmp_path, monkeypatch, name, *extra):
+        import cli
+        src = tmp_path / "p.txt"
+        src.write_text("一段落。\n\n二段落の一文。二段落の二文。", encoding="utf-8")
+        speakers = [("ずんだもん（ノーマル）", 3, "uz")]
+        monkeypatch.setattr(core, "vv_check", lambda url, timeout=3: "0.0.0")
+        monkeypatch.setattr(core, "vv_speakers", lambda url, timeout=10: speakers)
+        monkeypatch.setattr(core, "vv_synthesize_one",
+                            lambda url, text, sid, **kw: _make_wav(0.05))
+        out = tmp_path / name
+        rc = cli.main([str(src), "-o", str(out), "--wav", "--srt", "--keep-blank",
+                       "--unit", "combine", "--gap", "0.1", *extra])
+        assert rc == 0
+        return (out / "voicevox_output.srt").read_text(encoding="utf-8")
+
+    def test_longer_by_default(self, tmp_path, monkeypatch):
+        srt = self._srt(tmp_path, monkeypatch, "on")
+        assert "00:00:00,300 --> 00:00:00,350" in srt   # 0.05 + 0.25（0.1 の2.5倍）
+        assert "00:00:00,450 --> 00:00:00,500" in srt   # 同じ段落の中は 0.1
+
+    def test_no_para_pause(self, tmp_path, monkeypatch):
+        srt = self._srt(tmp_path, monkeypatch, "off", "--no-para-pause")
+        assert "00:00:00,150 --> 00:00:00,200" in srt
+        assert "00:00:00,300 --> 00:00:00,350" in srt
+
+
 class TestGroupOutputIndices:
     def test_all_units(self):
         para = [0, 0, 1, 1, 2]
@@ -2823,3 +2940,786 @@ def test_page_signature_ignores_tiny_change():
 def test_signature_diff_mismatch_is_max():
     assert core.signature_diff(b"", b"abc") == 255.0
     assert core.signature_diff(b"ab", b"abc") == 255.0
+
+
+def _mk_wav(samples, nch=1, width=2, rate=24000):
+    import struct
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(nch)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        if width == 2:
+            w.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+        else:
+            w.writeframes(bytes(samples))
+    return buf.getvalue()
+
+
+def test_pad_wav_for_play_stereo_and_silent_tail():
+    """再生用パディング: ステレオでも各チャンネルを0へフェードし、末尾がもともと0なら
+    無音を足すだけ。元のサンプルは変えない。"""
+    import struct
+    padded = core._pad_wav_for_play(_mk_wav([1000, -1000] * 3, nch=2), tail_sec=0.05)
+    with wave.open(io.BytesIO(padded), "rb") as w:
+        assert w.getnchannels() == 2
+        n = w.getnframes()
+        s = struct.unpack(f"<{n * 2}h", w.readframes(n))
+    assert n == 3 + int(24000 * 0.05)
+    assert s[:6] == (1000, -1000) * 3
+    assert 0 < s[6] < 1000 and -1000 < s[7] < 0
+    assert s[-2:] == (0, 0)
+    quiet = core._pad_wav_for_play(_mk_wav([0, 0, 0]), tail_sec=0.1)
+    assert abs(core.wav_duration(quiet) - (3 / 24000 + 0.1)) < 1e-4
+
+
+def test_pad_wav_for_play_passthrough():
+    """読めないデータ・空・0秒指定は元のまま返す。8bit PCMは無音だけ足す。"""
+    assert core._pad_wav_for_play(b"") == b""
+    assert core._pad_wav_for_play(b"not-a-wav") == b"not-a-wav"
+    raw = _mk_wav([1, 2, 3])
+    assert core._pad_wav_for_play(raw, tail_sec=0) == raw
+    p8 = core._pad_wav_for_play(_mk_wav([128, 200, 50], width=1), tail_sec=0.1)
+    assert abs(core.wav_duration(p8) - (3 / 24000 + 0.1)) < 1e-4
+
+
+def test_play_tail_sec_only_on_windows():
+    """語尾の無音を足すのは Windows の winsound 経路だけ（Mac の afplay は不要）。"""
+    if core.IS_WIN:
+        assert core.PLAY_TAIL_SEC > 0
+    else:
+        assert core.PLAY_TAIL_SEC == 0.0
+
+
+# ------------------------------------------------------------
+#  連続再生の音の流れ（LineStream / WaveOutStream）と、行ごとの再生の戻り値
+# ------------------------------------------------------------
+
+class _FakeOut:
+    """WaveOutStream の代わり。鳴らした位置はテストが advance() で進める。"""
+    opened = []
+
+    def __init__(self, rate, channels=1, sampwidth=2):
+        self.fmt = (rate, channels, sampwidth)
+        self.rate = rate
+        self.frame_bytes = channels * sampwidth
+        self.data = bytearray()
+        self.written = 0
+        self.pos = 0
+        self.paused = False
+        self.closed = False
+        _FakeOut.opened.append(self)
+
+    def write(self, pcm):
+        self.data += pcm
+        self.written += len(pcm) // self.frame_bytes
+
+    def position(self):
+        return self.pos
+
+    def advance(self, sec):
+        if not self.paused:
+            self.pos = min(self.written, self.pos + int(round(sec * self.rate)))
+
+    def pause(self):
+        self.paused = True
+
+    def resume(self):
+        self.paused = False
+
+    def close(self):
+        self.closed = True
+
+
+def _line_wav(sec, value=1000, rate=24000):
+    """値がすべて value の16bitモノラルWAV（無音と見分けるため0以外）。"""
+    n = int(round(rate * sec))
+    return _mk_wav([value] * n, rate=rate) if n else _mk_wav([], rate=rate)
+
+
+@pytest.fixture
+def fake_out():
+    _FakeOut.opened = []
+    return _FakeOut
+
+
+def test_line_stream_inserts_exact_gap_and_reports_lines(fake_out):
+    """行と行のあいだに、指定した秒数ちょうどの無音が入る。最初の行の前には入れない。
+    鳴り始め・鳴り終わりは、鳴らした位置に合わせて順に届く。"""
+    ls = core.LineStream(fake_out)
+    ls.add("A", _line_wav(0.10, 1000), 0.0)
+    ls.add("B", _line_wav(0.20, 2000), 0.25)
+    out = fake_out.opened[0]
+    assert out.written == 2400 + 6000 + 4800
+    assert out.data[:4800] == b"\xe8\x03" * 2400                 # A（前に無音なし）
+    assert out.data[4800:4800 + 12000] == b"\x00" * 12000        # 0.25秒の無音
+    assert out.data[16800:] == b"\xd0\x07" * 4800                # B
+    assert ls.poll() == []
+    out.advance(0.01)
+    assert ls.poll() == [("start", "A")]
+    out.advance(0.20)          # A が終わり、間の途中
+    assert ls.poll() == [("end", "A")]
+    out.advance(0.20)          # 間が終わり B が鳴り始める
+    assert ls.poll() == [("start", "B")]
+    assert not ls.done()
+    out.advance(1.0)
+    assert ls.poll() == [("end", "B")]
+    assert ls.done() and ls.remaining() == 0
+
+
+def test_line_stream_short_lines_report_start_and_end_together(fake_out):
+    """ポーリングの間に始まって終わった短い行も、始まり→終わりの順で両方届く。"""
+    ls = core.LineStream(fake_out)
+    ls.add(1, _line_wav(0.05), 0.0)
+    ls.add(2, _line_wav(0.05), 0.0)
+    fake_out.opened[0].advance(1.0)
+    assert ls.poll() == [("start", 1), ("end", 1), ("start", 2), ("end", 2)]
+
+
+def test_line_stream_pause_holds_position_and_resume_continues(fake_out):
+    """一時停止は出力ごと止める（位置が進まない）。開く前に止めていても、開いた
+    出力は止まった状態から始まる。再開すると続きから鳴る。"""
+    ls = core.LineStream(fake_out)
+    ls.pause()
+    ls.add("A", _line_wav(0.5), 0.0)
+    out = fake_out.opened[0]
+    assert out.paused
+    out.advance(1.0)
+    assert ls.poll() == [] and out.pos == 0
+    ls.resume()
+    out.advance(0.2)
+    assert ls.poll() == [("start", "A")]
+    ls.pause()
+    out.advance(5.0)
+    assert out.pos == int(0.2 * 24000)      # 止めた所のまま
+    assert abs(ls.remaining() - 0.3) < 1e-6
+    ls.resume()
+    out.advance(0.3)
+    assert ls.poll() == [("end", "A")]
+
+
+def test_line_stream_waiting_time_counts_toward_gap(fake_out):
+    """次の行の合成待ちで流れが空になっていた時間は、行間の無音に数える
+    （合成が遅くても、行間が「待ち＋間」に延びない）。"""
+    now = [100.0]
+    ls = core.LineStream(fake_out, clock=lambda: now[0])
+    ls.add("A", _line_wav(0.1), 0.0)
+    out = fake_out.opened[0]
+    out.advance(1.0)
+    assert ls.poll() == [("start", "A"), ("end", "A")]   # 空になった時刻を覚える
+    now[0] += 0.3                                         # 0.3秒待った
+    ls.add("B", _line_wav(0.1), 0.5)
+    silence = (out.written - 2400 - 2400)
+    assert silence == int(round(0.2 * 24000))             # 0.5 - 0.3 = 0.2秒だけ足す
+    out.advance(1.0)
+    ls.poll()                                             # B を鳴らし終えて空になる
+    now[0] += 1.0                                         # 1秒待った
+    ls.add("C", _line_wav(0.1), 0.5)                      # → 間は足さない
+    assert out.written == 2400 + 4800 + 2400 + 2400
+
+
+def test_line_stream_reopens_for_other_format_without_losing_events(fake_out):
+    """サンプリング周波数の違う行は、今の音を鳴らし終えてから開き直して続ける。
+    閉じる前の行の鳴り終わりも取りこぼさない。"""
+    ls = core.LineStream(fake_out)
+    ls.add("A", _line_wav(0.1, rate=24000), 0.0)
+    ls.add("B", _line_wav(0.1, rate=48000), 0.1)
+    assert len(fake_out.opened) == 1            # まだ A が鳴っている
+    first = fake_out.opened[0]
+    first.advance(0.05)
+    assert ls.poll() == [("start", "A")]
+    first.advance(1.0)
+    events = ls.poll()
+    assert events == [("end", "A")]
+    assert first.closed and len(fake_out.opened) == 2
+    second = fake_out.opened[1]
+    assert second.fmt == (48000, 1, 2)
+    second.advance(1.0)
+    assert ls.poll() == [("start", "B"), ("end", "B")]
+
+
+def test_line_stream_close_stops_and_drops_pending(fake_out):
+    ls = core.LineStream(fake_out)
+    ls.add("A", _line_wav(0.1, rate=24000), 0.0)
+    ls.add("B", _line_wav(0.1, rate=48000), 0.0)   # A のあとで開き直す予定
+    ls.close()
+    assert fake_out.opened[0].closed
+    assert ls.done() and ls.remaining() == 0
+    assert len(fake_out.opened) == 1
+
+
+def test_line_stream_rejects_compressed_wav(fake_out):
+    """非圧縮PCM以外は受け付けない（呼び出し側でエラーにする）。"""
+    with pytest.raises(Exception):
+        core.LineStream(fake_out).add("A", b"RIFF....WAVEfmt junk", 0.0)
+
+
+def test_wave_out_stream_on_real_device():
+    """本物の出力（Windows の waveOut）で、無音を足して位置が進むこと・一時停止で
+    止まること・閉じるとすぐ止まることを確かめる。音は出ない。出力機器の無い環境
+    （CI など）では開けないので飛ばす。"""
+    import time
+    if not core.IS_WIN:
+        pytest.skip("waveOut は Windows 専用")
+    try:
+        out = core.WaveOutStream(24000)
+    except OSError as e:
+        pytest.skip(f"音の出力を開けない環境: {e}")
+    try:
+        out.write(b"\x00\x00" * 2400)              # 0.1秒
+        deadline = time.monotonic() + 3
+        while out.position() < out.written and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert out.position() == out.written == 2400
+        out.pause()
+        out.write(b"\x00\x00" * 2400)
+        time.sleep(0.2)
+        assert out.position() == 2400              # 止めている間は進まない
+        out.resume()
+        deadline = time.monotonic() + 3
+        while out.position() < out.written and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert out.position() == 4800
+        out.write(b"\x00\x00" * 24000 * 5)          # 5秒ぶん足してすぐ閉じる
+        t0 = time.monotonic()
+    finally:
+        out.close()
+    assert time.monotonic() - t0 < 0.5
+    out.close()                                    # 2回閉じても大丈夫
+
+
+def _fake_winsound(monkeypatch):
+    """winsound の代わり（どのOSでもテストできるように）。呼ばれ方を記録するだけ。"""
+    import types
+    calls = []
+    ws = types.SimpleNamespace(
+        SND_MEMORY=4, SND_FILENAME=0x20000, SND_ASYNC=1, SND_PURGE=0x40,
+        PlaySound=lambda arg, flags: calls.append((arg, flags)))
+    monkeypatch.setitem(sys.modules, "winsound", ws)
+    monkeypatch.setattr(core, "IS_WIN", True)
+    return ws, calls
+
+
+def test_play_wav_blocking_stop_in_tail_counts_as_finished(monkeypatch):
+    """Windows の行ごとの再生: 声が鳴り終わったあと（足した無音の間）に止めたら、
+    声は聞き終えている扱い（True）で、まだ残っているかもしれない語尾を PURGE で
+    切らない。声の途中で止めたら False で、音を止める。"""
+    import threading
+    ws, calls = _fake_winsound(monkeypatch)
+    wav = _line_wav(0.10)
+    stop = threading.Event()
+    threading.Timer(0.25, stop.set).start()        # 声(0.1秒)のあと・足した無音の間
+    assert core.play_wav_blocking(wav, stop_event=stop) is True
+    assert not any(flags == ws.SND_PURGE for _a, flags in calls)
+    calls.clear()
+    stop = threading.Event()
+    threading.Timer(0.05, stop.set).start()        # 声の途中
+    assert core.play_wav_blocking(_line_wav(0.5), stop_event=stop) is False
+    assert any(flags == ws.SND_PURGE for _a, flags in calls)
+    calls.clear()
+    stop = threading.Event()
+    stop.set()                                     # もう止められていたら鳴らさない
+    assert core.play_wav_blocking(wav, stop_event=stop) is False
+    assert calls == []
+
+
+# ------------------------------------------------------------
+#  ふりがな（VOICEVOX が実際に読む読みを、漢字の上に出す）
+# ------------------------------------------------------------
+
+def _furi_cases():
+    import json
+    path = os.path.join(os.path.dirname(__file__), "fixtures", "furigana_cases.json")
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)["cases"]
+
+
+def _dict_spans(case):
+    return {(a, b): r for a, b, r in case["dict_spans"]}
+
+
+def test_furigana_segments_split_kana_symbols_and_kanji():
+    """かな・読まない記号・漢字など（数字・英字と、それにくっついて読まれる記号を含む）に分ける。"""
+    segs = core.furigana_segments("東京で20%、v1.25を三ヶ月・「AI」")
+    kinds = [(k, "東京で20%、v1.25を三ヶ月・「AI」"[a:b]) for k, a, b in segs]
+    assert kinds == [("wild", "東京"), ("kana", "で"), ("wild", "20%"), ("silent", "、"),
+                     ("wild", "v1.25"), ("kana", "を"), ("wild", "三ヶ月"),
+                     ("silent", "・「"), ("wild", "AI"), ("silent", "」")]
+
+
+def test_furigana_norm_treats_same_sounds_as_equal():
+    """書き方が違っても同じ音なら同じとみなす（とうきょう＝トオキョオ、つづく＝ツズク）。"""
+    n = core.furigana_norm
+    assert n("トウキョウ") == n("トオキョオ") == n("トーキョー")
+    assert n("ツヅク") == n("ツズク")
+    assert n("センセイ") == n("センセエ")
+    assert n("ハナヂ") == n("ハナジ")
+    assert n("カラ") != n("ツラ")
+
+
+def test_engine_pronunciation_keeps_pauses():
+    q = {"accent_phrases": [
+        {"moras": [{"text": "キョ"}, {"text": "オ"}], "pause_mora": {"text": "、"}},
+        {"moras": [{"text": "ア"}, {"text": "メ"}], "pause_mora": None}]}
+    assert core.engine_pronunciation(q) == "キョオ、アメ"
+
+
+@pytest.mark.parametrize("case", _furi_cases(), ids=lambda c: c["text"][:12])
+def test_furigana_matches_recorded_engine_readings(case):
+    """記録したエンジンの実際の読みから、記録どおりのふりがなを作る（辞書なし・あり）。"""
+    got_kana = [list(x) for x in core.furigana(case["text"], case["query"], None)]
+    got_dict = [list(x) for x in core.furigana(case["text"], case["query"],
+                                               _dict_spans(case))]
+    assert got_kana == case["expect_kana"]
+    assert got_dict == case["expect_dict"]
+
+
+@pytest.mark.parametrize("case", _furi_cases(), ids=lambda c: c["text"][:12])
+def test_furigana_always_follows_what_the_engine_reads(case):
+    """精確さの約束: どのふりがなも、エンジンが実際に読む発音と同じ音で、本文の順に並ぶ。
+    辞書なしのときはカタカナのまま発音そのもの、辞書ありでもひらがなは同じ音のものだけ。"""
+    pron = core.engine_pronunciation(case["query"]).replace("、", "")
+    norm = core.furigana_norm
+
+    def find(sound, pos):
+        """pron[pos:] の中で、sound と同じ音になる所（書き分けの違いは区間の中だけでならす）。"""
+        for i in range(pos, len(pron)):
+            for j in range(i + 1, min(len(pron), i + len(sound) + 2) + 1):
+                if norm(pron[i:j]) == norm(sound):
+                    return j
+        return -1
+
+    for spans in (None, _dict_spans(case)):
+        pos = 0
+        for a, b, reading, kind in core.furigana(case["text"], case["query"], spans):
+            sound = core.hira_to_kata(reading)
+            if spans is None:
+                assert kind == core.FURI_RAW
+                at = pron.find(sound, pos)       # 辞書なしは発音そのもの
+                end = at + len(sound) if at >= 0 else -1
+            else:
+                end = find(sound, pos)
+            assert end >= 0, (case["text"], case["text"][a:b], reading)
+            pos = end
+
+
+def test_furigana_examples_show_misreadings_and_correct_spelling():
+    """エンジンの誤読（瞬き→シバタき）は色つきのカタカナ、書き方が発音と違う語
+    （続く・三日月・鼻血）は辞書の正しい書き方のひらがなで出る。"""
+    cases = {c["text"]: c for c in _furi_cases()}
+    c = cases["夜空には無数の星が瞬き、川の流れる音だけが聞こえていた。"]
+    got = {c["text"][a:b]: (r, k) for a, b, r, k in
+           core.furigana(c["text"], c["query"], _dict_spans(c))}
+    assert got["瞬"] == ("シバタ", core.FURI_DIFF)
+    assert got["夜空"] == ("よぞら", core.FURI_OK)
+    c = cases["三日月が鼻血のように赤い。"]
+    got = {c["text"][a:b]: r for a, b, r, _k in
+           core.furigana(c["text"], c["query"], _dict_spans(c))}
+    assert got == {"三日月": "みかづき", "鼻血": "はなぢ", "赤": "あか"}
+
+
+def test_furigana_skips_spans_that_cannot_be_decided():
+    """「彼女は笑い」は、エンジンの発音「カノジョワワライ」のどちらの ワ が「は」か決まら
+    ないので、辞書が無ければ出さない（違う所に出すくらいなら出さない）。辞書があれば決まる。"""
+    cases = {c["text"]: c for c in _furi_cases()}
+    c = cases["「今日は早く帰れそうだね」と彼女は笑いながら言った。"]
+    plain = {c["text"][a:b] for a, b, _r, _k in core.furigana(c["text"], c["query"], None)}
+    assert "彼女" not in plain and "笑" not in plain
+    with_dict = {c["text"][a:b]: r for a, b, r, _k in
+                 core.furigana(c["text"], c["query"], _dict_spans(c))}
+    assert with_dict["彼女"] == "かのじょ" and with_dict["笑"] == "わら"
+
+
+def test_furigana_gives_up_on_mismatch_and_long_lines():
+    """エンジンの発音と本文のかなが合わない（読み方が想定外）ときと、長すぎる行は出さない。"""
+    q = {"accent_phrases": [{"moras": [{"text": "ア"}, {"text": "イ"}],
+                             "pause_mora": None}]}
+    assert core.furigana("東京へ", q, None) == []
+    long_text = "東京" * (core.FURIGANA_MAX_CHARS // 2 + 1)
+    assert core.furigana(long_text, q, None) == []
+
+
+def test_furigana_assign_is_exact_without_enumerating():
+    """区切り方がとても多い行でも、全部の区切り方を考えたうえで、決まる所だけを出す
+    （上限つきで並べて調べると、見ていない区切り方で外れることがあるため）。
+    「漢は漢」は「カワワカ」に2通りに当てはまる（カ|ワ|ワカ と カワ|ワ|カ）。8つ並べると
+    256通りになるが、最後の「漢」だけはどの区切り方でも「ホ」に決まる。"""
+    assert core.furigana_assign(core._furi_items("漢は漢"), "カワワカ") == {}
+    text = "漢は漢。" * 8 + "漢"
+    pron = "カワワカ、" * 8 + "ホ"
+    got = core.furigana_assign(core._furi_items(text), pron)
+    assert got == {(len(text) - 1, len(text)): "ホ"}
+
+
+def test_vv_furigana_uses_one_query_and_optional_dictionary(monkeypatch):
+    """1行につきエンジンへの問い合わせは1回。辞書を使わなければ、すべてカタカナ。"""
+    c = _furi_cases()[0]
+    calls = []
+    monkeypatch.setattr(core, "vv_audio_query",
+                        lambda base, text, sid, timeout=None, read_fix=None:
+                        calls.append(text) or c["query"])
+    got = core.vv_furigana("http://x", c["text"], 1, use_dictionary=False)
+    assert calls == [c["text"]]
+    assert [list(x) for x in got] == c["expect_kana"]
+
+
+def test_furigana_dictionary_reads_like_recorded():
+    """辞書（Janome）が入っている環境では、記録どおりの読みを引く（入っていなければ飛ばす）。"""
+    pytest.importorskip("janome")
+    core.reset_furigana_dictionary()
+    tok = core.furigana_dictionary()
+    assert tok
+    for c in _furi_cases():
+        assert core.furigana_dict_spans(c["text"], tok) == _dict_spans(c), c["text"]
+
+
+def test_furigana_skips_characters_the_engine_does_not_read():
+    """画像の読み取りで混ざる「丿」のように、エンジンが読まずに飛ばす字があっても、
+    辞書と合う当てはめ方があれば、隣の言葉にはふりがなを出す（読まれない字には出さない）。
+    辞書が無いときは決められないので、これまでどおり出さない。"""
+    text = "丿(色恋【Dし版】・"
+    q = {"accent_phrases": [
+        {"moras": [{"text": c} for c in ["イ", "ロ", "コ", "イ"]], "pause_mora": {"text": "、"}},
+        {"moras": [{"text": c} for c in ["ディ", "イ", "シ", "バ", "ン"]], "pause_mora": None}]}
+    spans = {(2, 4): "イロコイ", (7, 8): "バン"}
+    got = {text[a:b]: (r, k) for a, b, r, k in core.furigana(text, q, spans)}
+    assert got["色恋"] == ("いろこい", core.FURI_OK)
+    assert got["版"] == ("ばん", core.FURI_OK)
+    assert "丿" not in got
+    plain = {text[a:b] for a, b, _r, _k in core.furigana(text, q, None)}
+    assert "色恋" not in plain and "丿" not in plain
+
+
+def test_engine_found_in_vvpp_engines(tmp_path, monkeypatch):
+    """最近の VOICEVOX は、エンジンを自分の設定フォルダ（vvpp-engines）にだけ置く
+    ことがある。そこにある公式エンジンを見つける（ほかのエンジンや、怪しい実行
+    ファイル名は使わない）。"""
+    import json as _json
+    base = tmp_path / "vvpp-engines"
+    other = base / "Other+1111"
+    other.mkdir(parents=True)
+    (other / "engine_manifest.json").write_text(
+        _json.dumps({"uuid": "1111", "command": "run.exe"}), encoding="utf-8")
+    (other / "run.exe").write_text("x", encoding="utf-8")
+    assert core._find_vvpp_engine(str(tmp_path)) is None
+    official = base / f"VOICEVOX_Engine+{core.VV_ENGINE_ID}"
+    official.mkdir()
+    manifest = official / "engine_manifest.json"
+    manifest.write_text(_json.dumps({"uuid": core.VV_ENGINE_ID,
+                                     "command": "../run.exe"}), encoding="utf-8")
+    assert core._find_vvpp_engine(str(tmp_path)) is None     # 外へ出る名前は使わない
+    manifest.write_text(_json.dumps({"uuid": core.VV_ENGINE_ID, "command": "run.exe"}),
+                        encoding="utf-8")
+    assert core._find_vvpp_engine(str(tmp_path)) is None     # 実行ファイルが無い
+    (official / "run.exe").write_text("x", encoding="utf-8")
+    found = core._find_vvpp_engine(str(tmp_path))
+    assert found == str(official / "run.exe")
+    # 本体のそばに vv-engine が無いときは、こちらを使う
+    monkeypatch.setattr(core, "find_voicevox", lambda *a, **k: None)
+    assert core.find_voicevox_engine(data_dir=str(tmp_path)) == found
+
+
+def test_style_icon_is_fetched_from_the_connected_engine(monkeypatch):
+    """スタイルの顔アイコン: URL で返す新しいエンジンでも、base64 で返す古いエンジン
+    でも読む。URL のときは、つないでいるエンジン（base_url）からだけ取る。"""
+    import base64
+    import requests
+    calls = []
+
+    class Resp:
+        def __init__(self, js=None, content=b""):
+            self._js, self.content = js, content
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._js
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append((url, params))
+        if url.endswith("/speaker_info"):
+            return Resp({"style_infos": [
+                {"id": 3, "icon": "http://elsewhere.example/_resources/abc"},
+                {"id": 1, "icon": base64.b64encode(b"PNG1").decode()},
+                {"id": 7, "icon": ""}]})
+        return Resp(content=b"PNG3")
+    monkeypatch.setattr(requests, "get", fake_get)
+    base = "http://127.0.0.1:50021"
+    assert core.vv_style_icon(base, "u", 3) == b"PNG3"
+    assert calls[0][1]["resource_format"] == "url"     # 音声サンプルまで丸ごと受け取らない
+    assert calls[-1][0] == base + "/_resources/abc"     # ほかの場所へは取りに行かない
+    assert core.vv_style_icon(base, "u", 1) == b"PNG1"
+    assert core.vv_style_icon(base, "u", 7) is None
+    assert core.vv_style_icon(base, "u", 99) is None
+
+
+# ============================================================
+#  読み上げる直前の読み方の直し（fix_readings / speech_text）
+# ============================================================
+# 左がもとの書き方、右が直した形。どれも VOICEVOX 0.26.1 で、もとの書き方は読み違え、
+# 直した形は正しく読むことを確かめた（2026-11-07）
+FIX_CASES = [
+    ("気温は25℃。", "気温は25度。"), ("㈱テスト", "株式会社テスト"), ("手順①②③", "手順1、2、3"),
+    ("10〜20人", "10から20人"), ("2026/11/7に出す", "2026年11月7日に出す"),
+    ("2026-11-07に出す", "2026年11月7日に出す"), ("2026.11.7に出す", "2026年11月7日に出す"),
+    ("11/7(土)に出す", "11月7日(土)に出す"), ("10:30に集合", "10時30分に集合"),
+    ("9:05に出る", "9時5分に出る"), ("10:30:15に止まる", "10時30分15秒に止まる"),
+    ("24:00まで", "24時まで"), ("12:00〜13:00", "12時から13時"), ("10時〜12時", "10時から12時"),
+    ("10:30-12:00", "10時30分から12時"), ("10-20人が来た", "10から20人が来た"),
+    ("1990-2000年", "1990から2000年"), ("第1-3話", "第1から3話"), ("10%〜20%", "10%から20%"),
+    ("気温は-5℃", "気温はマイナス5度"), ("前年比-3%", "前年比マイナス3%"),
+    ("+3キロ", "プラス3キロ"), ("±0", "プラスマイナス0"), ("100m先", "100メートル先"),
+    ("1.5m", "1.5メートル"), ("1万m", "1万メートル"), ("10g", "10グラム"),
+    ("50m²", "50平方メートル"), ("25°C", "25度"), ("1stアルバム", "ファーストアルバム"),
+    ("ver.2", "バージョン2"), ("Ver.2.1", "バージョン2.1"), ("いいねw", "いいね"),
+    ("草ｗｗｗ", "草"), ("草wwwマジで", "草マジで"), ("待って・・・", "待って…"),
+    ("1,280円", "1280円"), ("ＡＩが答えた", "AIが答えた"), ("ｶﾀｶﾅ", "カタカナ"),
+    # 2026-11-14 に実測: 年の無い日付＋時刻・頭の0・AM/PM
+    ("11/13 18:07", "11月13日 18時7分"), ("11/13(木) 18:07", "11月13日(木) 18時7分"),
+    ("12/25 0:00", "12月25日 0時"), ("18時07分", "18時7分"), ("2026年01月05日", "2026年1月5日"),
+    ("6:07 PM", "午後6時7分"), ("AM 9:30", "午前9時30分"),
+    ("2026/11/13 6:07 PM", "2026年11月13日 午後6時7分"), ("10:30 a.m.", "午前10時30分"),
+    # ファイルの大きさ（空白があると「ケイ ビイ」と読まれる。2026-11-14 に実測）
+    ("1,234 KB", "1234キロバイト"), ("1.5 MB", "1.5メガバイト"), ("64GB", "64ギガバイト"),
+    ("3 TB", "3テラバイト"), ("100KB/s", "100キロバイト毎秒"),
+]
+# 直さない物（もともと正しく読める・どちらとも取れる・電話番号や型番など）
+KEEP_CASES = ["11/7に出す", "1/3を食べた", "03-1234-5678に電話", "3-1で勝った", "10-5は5",
+              "1+2", "5m/s", "20mm", "5km", "2ml", "100mg", "5kg", "21st", "server2",
+              "幅wと高さh", "サイトはwww.example.comです", "Hello world", "iPhoneとMac",
+              "16:9の画面", "第3章 旅立ち", "v1.25.0", "3.14", "ABC-10人", "それは――違う",
+              "11/13", "3/4は分数", "100分", "0.05秒", "第01話", "PM2.5の値", "AMラジオ",
+              "MBA", "GBの空き", "KBS京都", "4K", "100 Mbps"]
+
+
+@pytest.mark.parametrize("raw,want", FIX_CASES)
+def test_fix_readings(raw, want):
+    """VOICEVOX が読み違える書き方を、読める形にする。2回かけても同じ。"""
+    assert core.fix_readings(raw) == want
+    assert core.fix_readings(want) == want
+
+
+@pytest.mark.parametrize("raw", KEEP_CASES)
+def test_fix_readings_leaves_the_rest(raw):
+    assert core.fix_readings(raw) == raw
+
+
+def test_speech_text_follows_switch():
+    """speech_text は「数字・日付・記号の読み方を直す」に従う（read_fix で個別に決めてもよい）。"""
+    try:
+        assert core.speech_text("25℃") == "25度"
+        core.set_read_fix(False)
+        assert core.speech_text("25℃") == "25℃"
+        assert core.speech_text("25℃", True) == "25度"
+    finally:
+        core.set_read_fix(True)
+    assert core.speech_text("25℃", False) == "25℃"
+    assert core.speech_text("") == ""
+
+
+def test_engine_gets_fixed_text(monkeypatch):
+    """エンジンへ文を渡す関数は、直した文を渡す（ふりがな・試聴・保存で同じ読みになる）。
+    しまう声の名札も直した文で作る（切り替えたとき、前の読みの声が出てこない）。"""
+    import requests
+    sent = []
+
+    class Resp:
+        content = b"wav"
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"kana": "ニジュウゴド", "accent_phrases": []}
+
+    def post(url, params=None, **kw):
+        sent.append((url, (params or {}).get("text")))
+        return Resp()
+    monkeypatch.setattr(requests, "post", post)
+    core.vv_audio_query("http://x", "25℃", 1)
+    core.vv_reading("http://x", "25℃", 1)
+    core.vv_synthesize_with_kana("http://x", "25℃", 1)
+    assert [t for u, t in sent if u.endswith("/audio_query")] == ["25度"] * 3
+    sent.clear()
+    core.vv_audio_query("http://x", "25℃", 1, read_fix=False)
+    assert sent == [("http://x/audio_query", "25℃")]
+    keys = []
+    monkeypatch.setattr(core, "synth_cache_get", lambda key: keys.append(key))
+    monkeypatch.setattr(core, "synth_cache_put", lambda key, wav: None)
+    assert core.vv_synthesize_cached("http://x", "25℃", 1, engine_ver="v",
+                                     dict_hash="h") == b"wav"
+    assert keys == [core.synth_cache_key("25度", 1, 1.0, 0.0, 1.0, 1.0, "v", "h")]
+
+
+def test_cli_read_fix_switch(monkeypatch, tmp_path):
+    """CLI も既定で読み方を直す。--no-read-fix で切れる。"""
+    import cli
+    seen = []
+    monkeypatch.setattr(core, "set_read_fix", lambda on: seen.append(on))
+    src = tmp_path / "a.txt"
+    src.write_text("気温は25℃。", encoding="utf-8")
+    cli.main([str(src), "-o", str(tmp_path / "o")])
+    cli.main([str(src), "-o", str(tmp_path / "o"), "--no-read-fix"])
+    assert seen == [True, False]
+
+
+# ============================================================
+#  GPU を使うか（このアプリが VOICEVOX を起こすとき）
+# ============================================================
+def test_want_gpu_needs_gpu_build_and_strong_gpu(tmp_path):
+    """GPU を使える版（DirectML.dll がある）で、2GB 以上のメモリの GPU があるときだけ使う。"""
+    run = tmp_path / "run.exe"
+    run.write_bytes(b"")
+    strong = [("NVIDIA GeForce RTX 5060 Laptop GPU", 8546942976), ("AMD Radeon(TM) 610M", 536870912)]
+    weak = [("AMD Radeon(TM) 610M", 536870912)]
+    assert core.want_gpu(str(run), strong) is False      # GPU 版ではない
+    (tmp_path / "DirectML.dll").write_bytes(b"")
+    assert core.want_gpu(str(run), strong) is True
+    assert core.want_gpu(str(run), weak) is False         # 小さな GPU だけなら CPU のまま
+    assert core.want_gpu(None, strong) is False
+
+
+def test_launch_engine_marks_gpu(monkeypatch, tmp_path):
+    """起こしたプロセスに、GPU で起こしたかと、起こした実行ファイルを付けておく。"""
+    run = tmp_path / "run.exe"
+    run.write_bytes(b"")
+    (tmp_path / "DirectML.dll").write_bytes(b"")
+    monkeypatch.setattr(core, "find_voicevox_engine", lambda user_path=None: str(run))
+    monkeypatch.setattr(core, "gpu_memory_sizes", lambda: [("RTX", 8 * 1024 ** 3)])
+    seen = []
+
+    class FakePopen:
+        def __init__(self, argv, **kw):
+            seen.append(argv)
+    monkeypatch.setattr(core.subprocess, "Popen", FakePopen)
+    proc, _url = core.launch_voicevox_engine(use_gpu="auto")
+    assert "--use_gpu" in seen[-1] and proc.uses_gpu is True and proc.run_path == str(run)
+    proc, _url = core.launch_voicevox_engine(use_gpu=False)
+    assert "--use_gpu" not in seen[-1] and proc.uses_gpu is False
+
+
+def test_gpu_memory_sizes_is_a_list():
+    sizes = core.gpu_memory_sizes()
+    assert isinstance(sizes, list)
+    assert all(isinstance(n, str) and isinstance(b, int) for n, b in sizes)
+
+
+# ============================================================
+#  PDF の柱（毎ページの本や章の名前）とページ番号
+# ============================================================
+_BODY = "しかもあとで聞くとそれは書生という人間中で一番獰悪な種族であったそうだ。"
+
+
+def test_strip_running_heads_book_title_and_page_numbers():
+    """本の名前の柱は最初の1回（扉）だけ残し、ページ番号は外す。"""
+    pages = [f"吾輩は猫である\n{n}\n{_BODY}" for n in range(1, 7)]
+    out, gone = core.strip_running_heads(pages)
+    assert out[0] == f"吾輩は猫である\n{_BODY}"
+    assert all(o == _BODY for o in out[1:])
+    assert gone.count("吾輩は猫である") == 5 and "3" in gone
+
+
+def test_strip_running_heads_keeps_only_the_chapter_start():
+    """章の名前の柱は、章の見出しと見なされて、毎ページの前に長い間を入れ、M4B の章も
+    ページごとに作っていた。章の始まりの1回だけ残す。"""
+    pages = ["第一章　猫の一日\n" + _BODY] + [f"{_BODY}\n第一章　猫の一日\n{n}" for n in range(2, 7)]
+    out, _gone = core.strip_running_heads(pages)
+    lines = "\n".join(out).split("\n")
+    assert core.detect_chapters(lines) == [("第一章　猫の一日", 0)]
+    gaps = core.line_gaps(lines, core.paragraph_ids(lines), 0.4, True)
+    assert gaps.count(2.0) == 0          # 章の前の長い間は、最初の見出しの前（0）だけ
+
+
+def test_strip_running_heads_number_inside_head():
+    """柱にページ番号が付いていても（吾輩は猫である　12）同じ柱と分かる。"""
+    pages = [f"吾輩は猫である　{n}\n{_BODY}" for n in range(10, 16)]
+    out, gone = core.strip_running_heads(pages)
+    assert out[0].startswith("吾輩は猫である　10") and len(gone) == 5
+
+
+def test_strip_running_heads_book_title_from_page_two_goes_entirely():
+    """2ページ目から出る本の名前の柱は、全部外す（章の見出しではないので、残す1回も無い）。"""
+    pages = [f"第一章　猫の一日\n{_BODY}"] + [f"吾輩は猫である\n{_BODY}\n{n}" for n in range(2, 7)]
+    out, gone = core.strip_running_heads(pages)
+    assert "吾輩は猫である" not in "\n".join(out) and gone.count("吾輩は猫である") == 5
+    assert out[0].startswith("第一章　猫の一日")
+
+
+def test_strip_running_heads_leaves_body_and_short_files():
+    """文の終わりの形の行（はい。）や、「」で終わるセリフは柱と見なさない。
+    3ページまでの PDF には何もしない。"""
+    pages = [f"はい。\n{_BODY}\n「そうだね」" for _ in range(6)]
+    assert core.strip_running_heads(pages) == (pages, [])
+    short = [f"本の名前\n{_BODY}"] * 3
+    assert core.strip_running_heads(short) == (short, [])
+
+
+@pytest.mark.parametrize("line,want", [
+    ("12", True), ("- 12 -", True), ("― 12 ―", True), ("p.12", True), ("12/300", True),
+    ("（12）", True), ("１２", True), ("xii", True), ("XIV", True), ("12時", False),
+    ("吾輩", False), ("civil", False), ("", False)])
+def test_is_page_number(line, want):
+    assert core._is_page_number(line) == want
+
+
+def _make_text_pdf(path, pages):
+    """文字の層がある PDF を作る（英字だけ。pdfium の標準の字を使う）。"""
+    import ctypes
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as raw
+    doc = pdfium.PdfDocument.new()
+    for lines in pages:
+        page = doc.new_page(595, 842)
+        y = 800
+        for ln in lines:
+            obj = raw.FPDFPageObj_NewTextObj(doc.raw, b"Helvetica", ctypes.c_float(12.0))
+            buf = ctypes.create_string_buffer((ln + "\0").encode("utf-16-le"))
+            raw.FPDFText_SetText(obj, ctypes.cast(buf, ctypes.POINTER(raw.FPDF_WCHAR)))
+            raw.FPDFPageObj_Transform(obj, 1, 0, 0, 1, 50, y)
+            raw.FPDFPage_InsertObject(page.raw, obj)
+            y -= 40
+        raw.FPDFPage_GenerateContent(page.raw)
+    doc.save(str(path))
+    doc.close()
+
+
+def test_extract_files_strips_pdf_heads(tmp_path):
+    """PDF を取り出すとき、柱とページ番号を外し、外した行を report["heads"] に入れる。
+    strip_heads=False なら、これまでどおり全部残す。"""
+    pytest.importorskip("pypdfium2")
+    pdf = tmp_path / "book.pdf"
+    bodies = ["The cat sat on the mat.", "It was a sunny day.", "Then it rained.",
+              "The cat went home.", "It slept well."]
+    _make_text_pdf(pdf, [["MY CAT BOOK", body, str(n)] for n, body in enumerate(bodies, 1)])
+    report = {}
+    text, _warn = core.extract_files([str(pdf)], report=report)
+    assert text.count("MY CAT BOOK") == 1 and all(b in text for b in bodies)
+    assert not any(ln.strip() in {"1", "2", "3", "4", "5"} for ln in text.splitlines())
+    assert report["heads"].count("MY CAT BOOK") == 4
+    text, _warn = core.extract_files([str(pdf)], strip_heads=False)
+    assert text.count("MY CAT BOOK") == 5
+
+
+def test_cli_strip_heads_switch(monkeypatch, tmp_path):
+    """CLI も既定で柱を外す。--no-strip-heads で外さない。"""
+    import cli
+    seen = []
+
+    def fake(paths, **kw):
+        seen.append(kw.get("strip_heads"))
+        return "本文。", []
+    monkeypatch.setattr(core, "extract_files", fake)
+    src = tmp_path / "a.txt"
+    src.write_text("本文。", encoding="utf-8")
+    cli.main([str(src), "-o", str(tmp_path / "o")])
+    cli.main([str(src), "-o", str(tmp_path / "o"), "--no-strip-heads"])
+    assert seen == [True, False]
+
+
+def test_strong_ocr_shutdown_stops_helper(monkeypatch):
+    """閉じるときに裏方を止める（動いていなくても困らない）。"""
+    stopped = []
+    monkeypatch.setattr(core._STRONG_HELPER, "_stop", lambda: stopped.append(True))
+    core.strong_ocr_shutdown()
+    assert stopped == [True]

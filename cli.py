@@ -49,6 +49,14 @@ def build_parser():
     p.add_argument("--keep-blank", action="store_true",
                    help="空行を残す（--unit para の段落区切りに必要。既定は削除）")
     p.add_argument("--gap", type=float, default=0.4, help="結合時の文間無音秒（既定0.4）")
+    p.add_argument("--para-pause", action=argparse.BooleanOptionalAction, default=True,
+                   help="段落の切れ目（空行のあと）と章の見出しの前は、間を長めにする"
+                        "（既定オン。GUIの「段落・章は長め」と同じ。段落の切れ目は "
+                        "--keep-blank のときだけ分かる）")
+    p.add_argument("--read-fix", action=argparse.BooleanOptionalAction, default=True,
+                   help="読み上げる前に、数字・日付・記号の読み方を直す（既定オン。"
+                        "25℃→25度・10:30→10時30分・2026/11/7→2026年11月7日など。"
+                        "出力する本文の字は変えない。GUIの「数字・日付・記号の読み方を直す」と同じ）")
     p.add_argument("--srt", action="store_true",
                    help="音声と同じ並びのSRT字幕も保存（出力ファイルごと）")
     p.add_argument("--vvproj", action="store_true",
@@ -91,6 +99,9 @@ def build_parser():
                         "矢印・英文ブロック、および局ロゴ/番組名/カテゴリ等のラベル）を"
                         "除去（既定ON。--no-denoise で無効）")
     p.add_argument("--pdf-ocr", action="store_true", help="PDFを常にOCRする")
+    p.add_argument("--strip-heads", action=argparse.BooleanOptionalAction, default=True,
+                   help="PDF の柱（毎ページの本や章の名前）とページ番号を外す（既定ON。"
+                        "章の見出しの最初の1回は残す。--no-strip-heads で外さない）")
     p.add_argument("--dpi", type=int, default=300, help="OCR解像度（既定300）")
     p.add_argument("--preprocess", action=argparse.BooleanOptionalAction,
                    default=True,
@@ -131,6 +142,7 @@ def _embed_m4b_chapters(out_audio, speak_lines, durations, gap):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    core.set_read_fix(args.read_fix)   # 合成・.vvproj の読み方の直し（既定オン）
     os.makedirs(args.out, exist_ok=True)
     # 末尾スラッシュ付きURL（ブラウザからのコピーで自然に付く）を正規化する。
     # そのまま連結すると /（二重スラッシュ）でエンジンが404を返し接続失敗になる
@@ -157,6 +169,7 @@ def main(argv=None):
         preprocess=args.preprocess, pdf_pages=pdf_pages,
         strip_labels=args.denoise, fix_confusables=args.fix_confusables,
         denoise=args.denoise,   # 映像内オーバーレイの除去はOCR由来テキスト限定
+        strip_heads=args.strip_heads,
         progress_cb=lambda d, t, m: print(f"  {m}"))
     for w in warnings:
         print(f"  警告: {w}", file=sys.stderr)
@@ -189,14 +202,15 @@ def main(argv=None):
 
     # 行頭の「@話者名:」タグをGUIと同様に解釈する（タグ自体は読み上げず、
     # その行だけ指定話者に切り替える）。未解決タグは行全体を既定話者で読む。
-    # 空行は段落番号のカウントに使う（--unit para・--keep-blank 前提）
+    # 段落は空行と行頭の字下げで分ける（GUI と同じ core.paragraph_ids。--unit para と、
+    # 段落の切れ目を長めにする間に使う）
     jobs = []          # (テキスト, style_id, speaker_uuid, 段落番号)
     uuid_of = {s[1]: s[2] for s in speakers}
-    para = 0
-    for ln in text.split("\n"):
+    para_ids = core.paragraph_ids(text.split("\n"))
+    for k, ln in enumerate(text.split("\n")):
         if not ln.strip():
-            para += 1
             continue
+        para = para_ids[k]
         if core.is_memo_line(ln):
             continue   # 行頭#はメモ行（GUIと同じく読み上げ対象外）
         name, rest = core.parse_speaker_tag(ln)
@@ -220,7 +234,8 @@ def main(argv=None):
 
     if args.vvproj:
         vv_path = os.path.join(args.out, "voicevox_project.vvproj")
-        entries = [(t, sid, u) for t, sid, u, _p in jobs]
+        # VOICEVOX が開いて読み直しても同じ読みになるよう、直した文で書く（GUI と同じ）
+        entries = [(core.speech_text(t), sid, u) for t, sid, u, _p in jobs]
         with open(vv_path, "w", encoding="utf-8") as f:
             f.write(core.make_vvproj(entries, sp[1], sp[2]))
         print(f"保存: {vv_path}（VOICEVOXの「プロジェクト読み込み」で開けます）")
@@ -236,7 +251,8 @@ def main(argv=None):
     need = "m4a" if args.format in ("m4a", "m4b") else args.format
     if args.format != "wav" and need not in encoders:
         raise SystemExit(f"{args.format.upper()}への変換ツールがありません"
-                         "（Mac: afconvert / それ以外: ffmpeg が必要）。")
+                         "（Windows 10 以降: 同じフォルダの audio_win.ps1 / Mac: afconvert / "
+                         "それ以外: ffmpeg が必要）。")
 
     # GUIと同じ3並列合成＋行単位キャッシュ＋スプール方式（全行のWAVをメモリに
     # 持たず、行WAVを一時フォルダに書いて (パス, 再生秒) だけ保持する。
@@ -280,6 +296,9 @@ def main(argv=None):
         # まとめ方ごとのグループ化はGUIと共有の core.group_output_indices で
         groups = core.group_output_indices(unit, [j[3] for j in jobs],
                                            args.split_lines)
+        # 各行の前の無音。段落・章の切れ目は長め（GUIと共有の core.line_gaps）
+        gaps_all = core.line_gaps(speak_lines, [j[3] for j in jobs], args.gap,
+                                  args.para_pause)
         width = max(3, len(str(len(groups))))   # 999超でも名前順ソートが崩れない
         csv_rows = []
         for gi, idxs in enumerate(groups):
@@ -300,6 +319,7 @@ def main(argv=None):
                 out_audio = os.path.join(args.out, f"{stem}.{args.format}")
             paths = [results[i][0] for i in idxs]
             durs = [results[i][1] for i in idxs]
+            ggaps = [0.0] + [gaps_all[i] for i in idxs[1:]]   # このファイルの中の行の前の無音
             if len(paths) == 1:
                 core.encode_audio_file(paths[0], out_audio, args.format,
                                        encoders, keep_input=True)
@@ -308,7 +328,7 @@ def main(argv=None):
                 # 同じフォルダに .part 名で作り、終わったら消す
                 part = out_audio + ".part.wav"
                 try:
-                    core.concat_wavs_to_file(paths, part, gap_sec=args.gap)
+                    core.concat_wavs_to_file(paths, part, gap_sec=ggaps)
                     core.encode_audio_file(part, out_audio, args.format, encoders)
                 finally:
                     if os.path.exists(part):
@@ -318,12 +338,12 @@ def main(argv=None):
                             pass
             if args.format == "m4b":
                 _embed_m4b_chapters(out_audio, [speak_lines[i] for i in idxs],
-                                    durs, args.gap)
+                                    durs, ggaps)
             if args.srt:
                 srt_path = os.path.splitext(out_audio)[0] + ".srt"
                 with open(srt_path, "w", encoding="utf-8") as f:
                     f.write(core.make_srt([speak_lines[i] for i in idxs],
-                                          durs, gap_sec=args.gap))
+                                          durs, gap_sec=ggaps))
             if args.list_csv and unit != "combine":
                 for i in idxs:
                     csv_rows.append((os.path.basename(out_audio),

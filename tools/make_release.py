@@ -4,8 +4,10 @@
     python tools/make_release.py [出力フォルダ] [--win-exe 署名済みの TextToVoicevox.exe]
 
 できるもの（名前に版数を入れないので、ダウンロードのリンクが版をまたいで変わらない）:
-    TextToVoicevox_Windows.zip … 起動.pyw・winsetup.py・ocr_win.ps1 など Windows で使うものだけ
-    TextToVoicevox_Mac.zip     … .command・.sh・ocr_mac.py など Mac で使うものだけ
+    TextToVoicevox_Windows.zip … 起動.pyw・winsetup.py・ocr_win.ps1 など Windows で使うものだけ。
+                                 開いたときに見える物を減らすため、いちばん上は 起動.pyw と説明
+                                 （winlaunch.TOP_FILES）だけにして、ほかは app フォルダに入れる
+    TextToVoicevox_Mac.zip     … .command・.sh・ocr_mac.py など Mac で使うものだけ（今までどおり1段）
 
 中身は git 管理のファイル（作業中の変更は入らない）。テスト・開発用の道具・
 1行導入の台本（install.ps1 / install.sh。ネットから直接読むもの）は入れない。
@@ -21,6 +23,8 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOP = "TextToVoicevox"   # zip を開いたときのフォルダ名（これまでと同じ）
+sys.path.insert(0, ROOT)
+import winlaunch  # noqa: E402  （app フォルダの名前と、いちばん上に置く物は、起動口と同じ決め事）
 
 NAMES = {"windows": "TextToVoicevox_Windows.zip", "mac": "TextToVoicevox_Mac.zip"}
 
@@ -33,7 +37,8 @@ def _windows_only(path):
     # .pyw は Windows 用の起動口。SAC に止められない入口として使う（winlaunch.py /
     # winsetup.py が中身）。.bat は v1.24.0 で1つも無くなった。
     return (path.endswith((".bat", ".ps1", ".pyw"))
-            or path in ("requirements-english-ocr.txt", "winlaunch.py", "winsetup.py"))
+            or path in ("ocr_helper.py", "requirements-ocr-engine.txt",
+                        "winlaunch.py", "winsetup.py"))
 
 
 def _mac_only(path):
@@ -51,6 +56,13 @@ def files_for(target, tracked):
     return sorted(out)
 
 
+def zip_name(target, f):
+    """zip の中での名前。Windows 用は、いちばん上に置く物（起動.pyw と説明）以外を app フォルダへ。"""
+    if target == "windows" and f not in winlaunch.TOP_FILES:
+        return f"{TOP}/{winlaunch.APP_SUBDIR}/{f}"
+    return f"{TOP}/{f}"
+
+
 def tracked_files(root=ROOT):
     out = subprocess.run(["git", "ls-files", "-z"], cwd=root,
                          capture_output=True, check=True).stdout
@@ -65,7 +77,7 @@ def build(target, out_dir, root=ROOT, extra=None):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         for f in files_for(target, tracked_files(root)):
             src = os.path.join(root, f)
-            info = zipfile.ZipInfo(f"{TOP}/{f}",
+            info = zipfile.ZipInfo(zip_name(target, f),
                                    time.localtime(os.path.getmtime(src))[:6])
             mode = 0o755 if f.endswith((".command", ".sh", ".bat")) else 0o644
             info.external_attr = (0o100000 | mode) << 16
