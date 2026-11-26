@@ -17,7 +17,7 @@ Hi. I'm rakuyou211, a solo hobby developer. I made this because I wanted my own 
 
 ▶ **How to use it, in 3 minutes**: [walkthrough video (YouTube, 3 min, in Japanese)](https://youtu.be/ZJlJh9jPQIY)
 
-▶ **Full manual with screenshots** (in Japanese): [read online](https://rakuyou211-blip.github.io/TextToVoicevox/manual/) / [PDF](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Manual_ja.pdf). The English quick guide is `How to use (English).html` in the download.
+▶ **Full manual with screenshots**: [read online](https://rakuyou211-blip.github.io/TextToVoicevox/manual/en/) / [PDF](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Manual_en.pdf) (the same as `Manual (English).html` in the download). It covers installing, every part of the screen, and troubleshooting; the app's screen is in Japanese, so each button is shown in Japanese with its meaning. Also in [Japanese](https://rakuyou211-blip.github.io/TextToVoicevox/manual/).
 
 ▶ **See it running**: [demo video (YouTube, 36s, in Japanese)](https://youtu.be/AWVs6Evw4E0) / [📷 Read from screen (Short, 24s, in Japanese)](https://youtube.com/shorts/1cteSkwa-Ec)
 
@@ -29,7 +29,7 @@ Hi. I'm rakuyou211, a solo hobby developer. I made this because I wanted my own 
 
 You give it a file. It pulls the text out, cleans it up, and reads it aloud in a VOICEVOX voice (Zundamon and others). You can also save the speech as an audio file.
 
-- **Read from screen** — press **📷 スクリーンショット** (screenshot) and drag a box around any text on your screen (e-book, PDF viewer, web page) and it's read aloud immediately (Ctrl+R / ⌘R). After turning a page, the **↻ 同じ範囲を読む** button that appears after your first selection (Ctrl/⌘+Shift+R) reads the same spot again without re-selecting — or tick **めくったら自動で読む** (auto-read on page turn) and it reads each new page by itself as you flip through. Offline, like everything else; macOS needs the one-time *Screen Recording* permission.
+- **Read from screen** — press **📷 スクリーンショット** (screenshot) and drag a box around any text on your screen (e-book, PDF viewer, web page) and it's read aloud immediately (Ctrl+R / ⌘R). After turning a page, the **同じ範囲を読む** button that appears after your first selection (Ctrl/⌘+Shift+R) reads the same spot again without re-selecting — or tick **めくったら自動で読む** (auto-read on page turn) and it reads each new page by itself as you flip through. Offline, like everything else; macOS needs the one-time *Screen Recording* permission.
 - **Reads from many formats** — PDF (with a text layer, *or* scanned pages via OCR), images (PNG, JPG, BMP, TIFF, WEBP, GIF), and `.txt`, `.docx`, `.epub`.
 - **No running heads in PDF books** — the book or chapter name printed at the top or bottom of each page and the page numbers are left out, so they aren't read on every page (a chapter-name head used to add a chapter pause and an M4B chapter on every page). The first occurrence of a chapter heading (第一章 and so on) stays; see what was taken out under **直した所** (fixes), and turn it off with **PDF のページの見出しと番号を読まない** under **設定 ▷** in section ①.
 - **Offline OCR** — for scanned pages and images. Nothing is uploaded. Windows uses **PP-OCRv6** (through RapidOCR; both Apache-2.0): **it is installed automatically during first-time setup, so there is nothing to press** (about 122 MB download, about 100 MB on disk). It reads text over game scenes and photos, small text, and Japanese mixed with English; in our test of 258 images it read 99.7% of characters correctly, against 89% for the OCR built into Windows. If it could not be installed, or you delete the `ocr_engine` folder, the built-in **Windows.Media.Ocr** is used, and a **読み取りを強くする** button appears under **設定 ▷** in section ① to install it again. macOS uses **Apple Vision**. Vertical Japanese is read column by column, starting from the right.
@@ -112,7 +112,7 @@ If it won't start, run **`デバッグ起動.pyw`** (in the `app` folder; macOS:
 
 > Heads up: right now this is distributed as a **script zip**, not a ready-made `.exe` or `.app`. There is no packaged executable yet. That's on my list, but it isn't here today, and I'd rather say so than pretend otherwise.
 
-**Download (latest, v1.26.2):** [Windows](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip) (`TextToVoicevox_Windows.zip`) · [macOS](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip) (`TextToVoicevox_Mac.zip`). Older versions are on the [Releases page](https://github.com/rakuyou211-blip/TextToVoicevox/releases).
+**Download (latest, v1.26.3):** [Windows](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip) (`TextToVoicevox_Windows.zip`) · [macOS](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip) (`TextToVoicevox_Mac.zip`). Older versions are on the [Releases page](https://github.com/rakuyou211-blip/TextToVoicevox/releases).
 
 ---
 
@@ -124,7 +124,13 @@ Open **Terminal** (right-click the Start button) or Windows PowerShell, paste th
 irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.ps1 | iex
 ```
 
-It downloads the build that has Python inside (the app, Python, its libraries and the image-text reader in one ~200 MB zip), puts it in `%LOCALAPPDATA%\TextToVoicevox`, creates a **TextToVoicevox** icon on the desktop and in the Start menu, and launches it — **you don't need Python on your PC**. That build is only offered through this line, not as a browser download: when a zip downloaded in a browser is extracted, Windows Defender holds Python's files for about four minutes, and the app can't open until then. Because PowerShell downloads the files itself, they never get the "downloaded from the internet" mark, so Windows doesn't show the *"Windows protected your PC"* warning. Run the same line again to update (your settings, dictionary and autosaved text are kept). When a new version is out, the app shows **新しい版があります** (a new version is out) at the top; choose **更新する** (update) and it swaps itself without pasting the line. It asks GitHub for the latest version number once a day, sending only the app's name and version; turn it off with **新しい版が出たら知らせる** under **接続設定…** (connection settings). No admin rights; to uninstall, delete that folder and the two icons. The script is [`install.ps1`](install.ps1).
+It downloads the build that has Python inside (the app, Python, its libraries and the image-text reader in one ~200 MB zip), puts it in `%LOCALAPPDATA%\TextToVoicevox`, creates a **TextToVoicevox** icon on the desktop and in the Start menu, and launches it — **you don't need Python on your PC**. That build is only offered through this line, not as a browser download: when a zip downloaded in a browser is extracted, Windows Defender holds Python's files for about four minutes, and the app can't open until then. Because PowerShell downloads the files itself, they never get the "downloaded from the internet" mark, so Windows doesn't show the *"Windows protected your PC"* warning. Run the same line again to update (your settings, dictionary and autosaved text are kept). When a new version is out, the app shows **新しい版があります** (a new version is out) at the top; choose **更新する** (update) and it swaps itself without pasting the line. It asks GitHub for the latest version number once a day, sending only the app's name and version; turn it off with **新しい版が出たら知らせる** under **接続設定…** (connection settings). No admin rights. The script is [`install.ps1`](install.ps1).
+
+To uninstall, open Windows **Settings → Apps → Installed apps**, click **…** next to TextToVoicevox and choose **Uninstall**, or paste this line into PowerShell ([`uninstall.ps1`](uninstall.ps1)). Either way it removes that folder, the two icons and the Settings entry; VOICEVOX and the audio files you made are kept. If you installed v1.26.2 or earlier, run the install line once more to update and the app appears in Settings.
+
+```powershell
+irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/uninstall.ps1 | iex
+```
 
 ## macOS: one-line install (recommended — no Gatekeeper warning)
 

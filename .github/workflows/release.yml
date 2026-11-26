@@ -65,7 +65,7 @@ jobs:
       - name: Sign with SignPath
         id: sign
         if: vars.SIGNPATH_ORGANIZATION_ID != ''
-        uses: signpath/github-action-submit-signing-request@v1
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
@@ -178,20 +178,25 @@ jobs:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: gh release upload "$TAG" dist/TextToVoicevox_OneLine_Win64.zip --clobber --repo "${{ github.repository }}"
 
-      # 説明書（説明書.html）を PDF にして、同じ Release に添付する（README からリンク）。
-      # Windows で作るのは、日本語の字（游ゴシック）が最初から入っていて、Chrome もあるため。
-      # ファイル名に日本語を書かないよう、いちばん上の .html のうち How to use 以外を探す
-      - name: Print the manual to PDF and attach it
+      # 説明書（説明書.html と Manual (English).html）を PDF にして、同じ Release に添付する
+      # （README からリンク）。Windows で作るのは、日本語の字（游ゴシック）が最初から入っていて、
+      # Chrome もあるため。ファイル名に日本語を書かないよう、日本語版は「いちばん上の .html のうち
+      # How to use と Manual 以外」で探す
+      - name: Print the manuals to PDF and attach them
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          $src = Get-ChildItem -LiteralPath . -Filter *.html | Where-Object { $_.Name -notlike 'How to use*' } | Select-Object -First 1
-          if (-not $src) { throw "manual html not found" }
+          $html = @(Get-ChildItem -LiteralPath . -Filter *.html)
+          $ja = $html | Where-Object { $_.Name -notlike 'How to use*' -and $_.Name -notlike 'Manual*' } | Select-Object -First 1
+          $en = $html | Where-Object { $_.Name -eq 'Manual (English).html' } | Select-Object -First 1
+          if (-not $ja -or -not $en) { throw "manual html not found: $($html.Name -join ', ')" }
           $chrome = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
-          $out = Join-Path (Resolve-Path dist) 'TextToVoicevox_Manual_ja.pdf'
-          $uri = ([Uri]$src.FullName).AbsoluteUri
-          Start-Process -FilePath $chrome -Wait -ArgumentList @('--headless=new', '--disable-gpu', '--no-first-run', '--no-pdf-header-footer', "--print-to-pdf=`"$out`"", $uri)
-          if (-not (Test-Path $out) -or (Get-Item $out).Length -lt 200KB) { throw "PDF was not made" }
-          gh release upload $env:TAG $out --clobber --repo "${{ github.repository }}"
+          foreach ($job in @(@{ src = $ja; pdf = 'TextToVoicevox_Manual_ja.pdf' }, @{ src = $en; pdf = 'TextToVoicevox_Manual_en.pdf' })) {
+            $out = Join-Path (Resolve-Path dist) $job.pdf
+            $uri = ([Uri]$job.src.FullName).AbsoluteUri
+            Start-Process -FilePath $chrome -Wait -ArgumentList @('--headless=new', '--disable-gpu', '--no-first-run', '--no-pdf-header-footer', "--print-to-pdf=`"$out`"", $uri)
+            if (-not (Test-Path $out) -or (Get-Item $out).Length -lt 200KB) { throw "PDF was not made: $($job.pdf)" }
+            gh release upload $env:TAG $out --clobber --repo "${{ github.repository }}"
+          }

@@ -37,7 +37,7 @@ TITLE = "TextToVoicevox"
 # まとめ、いちばん上には 起動.pyw と説明だけを置く（tools/make_release.py が並べる）。
 # GitHub の中身と、1行導入の入れ先は、今までどおり1つのフォルダに全部並ぶ
 APP_SUBDIR = "app"
-TOP_FILES = ("起動.pyw", "はじめにお読みください.txt", "説明書.html",
+TOP_FILES = ("起動.pyw", "はじめにお読みください.txt", "説明書.html", "Manual (English).html",
              "How to use (日本語).html", "How to use (English).html",
              "How to use (繁體中文).html", "How to use (简体中文).html")
 # 前の版（全部がいちばん上にあった形）から app へ移す、自分のデータと部品。app に無いときだけ移す。

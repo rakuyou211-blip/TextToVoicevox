@@ -2395,6 +2395,26 @@ def test_open_guide_prefers_the_manual_in_japanese(app, monkeypatch, tmp_path):
     assert "案内" in app.status_var.get()
 
 
+def test_open_guide_prefers_the_english_manual_in_english(app, monkeypatch, tmp_path):
+    """英語のパソコンでは、英語の説明書（Manual (English).html）を英語の案内より先に開く。
+    日本語のパソコンでは、英語の説明書があっても日本語の説明書。"""
+    import webbrowser
+    import main as main_mod
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", lambda url, *a, **k: opened.append(url))
+    monkeypatch.setattr(main_mod, "APP_DIR", str(tmp_path))
+    for name in ("How to use (日本語).html", "How to use (English).html", "説明書.html",
+                 "Manual (English).html"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    monkeypatch.setattr(app, "_guide_lang", lambda: "en")
+    app._open_guide()
+    assert opened[-1].startswith("file:") and opened[-1].endswith("Manual%20%28English%29.html")
+    assert "説明書" in app.status_var.get()
+    monkeypatch.setattr(app, "_guide_lang", lambda: "ja")
+    app._open_guide()
+    assert "%E8%AA%AC%E6%98%8E%E6%9B%B8" in opened[-1]   # 説明書
+
+
 def test_open_guide_finds_it_above_the_app_folder(app, monkeypatch, tmp_path):
     """Windows の zip では、案内は 起動.pyw の隣（app フォルダの1つ上）にある。
     エラーの記録などの言い方も「app の中の」になる。"""
@@ -2451,16 +2471,19 @@ def test_dark_title_bar_waits_for_the_frame_window(app):
         win.destroy()
 
 
-def test_conn_text_wraps_as_if_side_scrollbar_were_hidden(app):
+def test_conn_text_wraps_as_if_side_scrollbar_were_hidden(app, monkeypatch):
     """接続の状態の文は、左の列のスクロールバーの分を引いた幅で折り返す。スクロール
     バーで列が広がった分だけ折り返しが減ると、接続欄が低くなってスクロールバーが消え、
-    また出る…を繰り返し、窓の高さによっては画面が並び直し続けて固まった。"""
+    また出る…を繰り返し、窓の高さによっては画面が並び直し続けて固まった。
+    スクロールバーはアプリ自身が窓の高さに合わせて出し入れする（Mac では、隠した直後に
+    並び直しが走って、また出ることがあった）ので、出ている・いないはここで決めて確かめる。"""
     import types
     sb, lbl = app._steps_sb, app.engine_lbl
-    sb.pack_forget()
+    monkeypatch.setattr(sb, "winfo_manager", lambda: "")
     app._wrap_engine_lbl(types.SimpleNamespace(width=300))
     alone = lbl.winfo_pixels(lbl.cget("wraplength"))
-    sb.pack(side="right", fill="y", before=app._steps_view)
+    assert alone == 300
+    monkeypatch.setattr(sb, "winfo_manager", lambda: "pack")
     app._wrap_engine_lbl(types.SimpleNamespace(width=300 + sb.winfo_reqwidth()))
     assert lbl.winfo_pixels(lbl.cget("wraplength")) == alone
 
