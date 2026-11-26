@@ -80,7 +80,7 @@ class _EitherEvent:
 # 開いたときに見えるいちばん上にある物（winlaunch.TOP_FILES とショートカット）。起動.pyw は
 # 1回開いたあと app の中にしまうので、ほかの物でも見分ける
 _TOP_MARKERS = ("起動.pyw", "TextToVoicevox.lnk", "はじめにお読みください.txt", "説明書.html",
-                "How to use (日本語).html", "How to use (English).html")
+                "Manual (English).html", "How to use (日本語).html", "How to use (English).html")
 
 
 def _top_dir():
@@ -3014,8 +3014,8 @@ class App(tk.Tk):
     # 使い方の案内（アプリのフォルダにある How to use の4つ）
     _GUIDES = {"ja": "How to use (日本語).html", "en": "How to use (English).html",
                "zh-TW": "How to use (繁體中文).html", "zh-CN": "How to use (简体中文).html"}
-    # 説明書（画面の画像入りの、くわしい版。今は日本語だけ）。日本語なら、案内よりこちらを開く
-    _MANUALS = {"ja": "説明書.html"}
+    # 説明書（画面の画像入りの、くわしい版。日本語と英語）。その言語の版があれば、案内よりこちらを開く
+    _MANUALS = {"ja": "説明書.html", "en": "Manual (English).html"}
     _GUIDE_FALLBACK = "https://github.com/rakuyou211-blip/TextToVoicevox#readme"
 
     @staticmethod

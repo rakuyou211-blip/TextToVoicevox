@@ -31,6 +31,7 @@ nav.toc b { display: block; margin-bottom: 8px; color: var(--sub); font-size: 13
 nav.toc a { display: block; color: var(--ink); text-decoration: none; padding: 4px 10px; border-left: 3px solid transparent; }
 nav.toc a:hover { border-left-color: var(--accent); background: var(--paper); }
 nav.toc a.sub { padding-left: 24px; color: var(--sub); font-size: 13px; }
+nav.toc a.lang { display: inline-block; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 999px; padding: 2px 12px; background: var(--paper); color: var(--accent); }
 main { padding: 28px 0 80px; min-width: 0; }
 header.cover { background: var(--paper); border: 1px solid var(--line); border-radius: 18px; padding: 34px 36px; margin-bottom: 28px; }
 header.cover h1 { margin: 0 0 6px; font-size: 34px; color: var(--leaf); }
@@ -129,6 +130,7 @@ footer { color: var(--sub); font-size: 13px; text-align: center; padding: 20px 0
 <body>
 <div class="wrap">
 <nav class="toc">
+  <a class="lang" href="Manual%20(English).html" hreflang="en" lang="en">English manual →</a>
   <b>もくじ</b>
   <a href="#quick">まず3分で使い始める</a>
   <a href="#about">1. このアプリでできること</a>
@@ -233,7 +235,7 @@ footer { color: var(--sub); font-size: 13px; text-align: center; padding: 20px 0
     <ul>
       <li>配布ページから、最新版の「Python 入りの版」を落とす</li>
       <li>自分のユーザーのフォルダ（<code>%LOCALAPPDATA%\TextToVoicevox</code>）に置く（管理者の権限は使いません）</li>
-      <li>デスクトップとスタートメニューにアイコンを作って、起動する</li>
+      <li>デスクトップとスタートメニューにアイコンを作り、Windows の「設定 → アプリ」に載せて（そこから消せるように）、起動する</li>
     </ul>
     <p>ブラウザで落とした zip にはインターネットから来た印が付き、Windows が警告で止めます。この方法は PowerShell 自身がファイルを取ってくるので印が付かず、警告が出ません。ネットからのコマンドを貼るのが不安なときは、<a href="#win-zip">zip から入れる方法</a>を使ってください。</p>
   </details>
@@ -298,11 +300,18 @@ footer { color: var(--sub); font-size: 13px; text-align: center; padding: 20px 0
     <li><b>1行で入れた人</b> … 同じ1行をもう一度貼るだけです。設定・辞書・本文の自動保存はそのまま残ります。</li>
     <li><b>zip で入れた人</b> … 新しい zip を、今のフォルダの上に上書きで展開します。</li>
   </ul>
-  <h4>アンインストール（消す）</h4>
+  <h4 id="uninstall">アンインストール（消す）</h4>
+  <p><b>Windows で1行で入れた人</b>は、次のどちらかで消せます（どちらも同じことをします）。</p>
+  <ul>
+    <li><b>設定から</b> … スタートボタン →「<b>設定</b>」→「<b>アプリ</b>」→「<b>インストールされているアプリ</b>」で、TextToVoicevox の <b>…</b> →「<b>アンインストール</b>」。黒い窓が開き、消す物を見せてから消します。</li>
+    <li><b>1行で</b> … ターミナルに次の1行を貼って <kbd>Enter</kbd>。
+      <div class="cmdbox"><pre class="cmd">irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/uninstall.ps1 | iex</pre><button type="button" data-copy>コピー</button></div></li>
+  </ul>
+  <p class="small">消すのは、<code>%LOCALAPPDATA%\TextToVoicevox</code> フォルダ（設定と本文の自動保存もこの中）、デスクトップとスタートメニューのアイコン、「設定 → アプリ」の登録だけです。VOICEVOX（読み方辞書も VOICEVOX の側にあります）と、作った音声ファイルは残ります。v1.26.2 までに入れた人は、同じ1行で一度更新すると「設定 → アプリ」に出てきます（消す1行は、更新しなくても使えます）。</p>
   <table>
-    <tr><th>入れ方</th><th>消すもの</th></tr>
-    <tr><td>Windows・1行</td><td><code>%LOCALAPPDATA%\TextToVoicevox</code> フォルダと、デスクトップ・スタートメニューの「TextToVoicevox」アイコン（ほかには何も残しません）</td></tr>
-    <tr><td>Mac・1行</td><td><code>~/Library/Application Support/TextToVoicevox</code> フォルダと <code>~/Applications/TextToVoicevox.app</code>（Python も入れてもらった場合は <code>~/.local/python3.12</code> も消してかまいません）</td></tr>
+    <tr><th>入れ方</th><th>消し方</th></tr>
+    <tr><td>Windows・1行</td><td>上のとおり（「設定 → アプリ」か、消す1行）</td></tr>
+    <tr><td>Mac・1行</td><td><code>~/Library/Application Support/TextToVoicevox</code> フォルダと <code>~/Applications/TextToVoicevox.app</code> をゴミ箱へ（Python も入れてもらった場合は <code>~/.local/python3.12</code> も消してかまいません）</td></tr>
     <tr><td>zip</td><td>展開したフォルダごと消すだけです</td></tr>
   </table>
   <p class="small">エクスプローラーのアドレス欄に <code>%LOCALAPPDATA%</code> と打つと、Windows のそのフォルダが開きます。Mac の Finder では <kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd> で場所を打てます。</p>
@@ -324,7 +333,7 @@ footer { color: var(--sub); font-size: 13px; text-align: center; padding: 20px 0
     <li><b class="tag">I</b><span><b>再生バー</b> … 再生・一時停止・前の行／次の行・速さ・あと何分（<a href="#player">9章</a>）</span></li>
   </ol>
   <h4>ボタンの色の意味</h4>
-  <p><span class="btn main">塗ったボタン</span> は大事な操作（テキスト抽出 実行・音声を生成・再生）、<span class="btn">面のあるボタン</span> はよく使う操作、枠だけのボタンはときどき使う操作です。歯車の付いた文字（<b>⚙ 設定 ▷</b> など）は、設定を開きます。赤い文字の「本文を全消去」は本文を消すボタンです（消しても「復元」で戻せます）。</p>
+  <p><span class="btn main demo">塗ったボタン</span> は大事な操作（テキスト抽出 実行・音声を生成・再生）、<span class="btn demo">面のあるボタン</span> はよく使う操作、枠だけのボタンはときどき使う操作です。歯車の付いた文字（<b>⚙ 設定 ▷</b> など）は、設定を開きます。赤い文字の「本文を全消去」は本文を消すボタンです（消しても「復元」で戻せます）。</p>
 </section>
 
 <section id="basic">
@@ -359,7 +368,7 @@ footer { color: var(--sub); font-size: 13px; text-align: center; padding: 20px 0
   <ol class="steps">
     <li><span class="btn">スクリーンショット</span> を押すと、アプリが一度隠れて、画面を撮ります（自分の窓が写り込まないように）。</li>
     <li>読みたい所をドラッグで囲みます。囲み終わるとすぐ文字を読み取って、読み上げます。</li>
-    <li>ページをめくったら、<span class="btn">↻ 同じ範囲を読む</span>（<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>）で、囲み直さずに同じ所を読めます。「めくったら自動で読む」にチェックすると、ページが変わるたびに自動で読みます。</li>
+    <li>ページをめくったら、<span class="btn">同じ範囲を読む</span>（<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>）で、囲み直さずに同じ所を読めます。「めくったら自動で読む」にチェックすると、ページが変わるたびに自動で読みます。</li>
   </ol>
   <div class="note"><b>Mac の人</b>最初の1回だけ、システム設定で「画面収録」の許可が要ります。案内が出たら、TextToVoicevox（またはターミナル）を許可してください。</div>
   <h3>取り出し方の設定（設定 ▷）</h3>

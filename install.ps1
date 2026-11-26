@@ -17,7 +17,7 @@
 #      このパソコンに Python は要らない（ネット接続が要るのはこのときだけ）
 #   2. %LOCALAPPDATA%\TextToVoicevox に置く
 #      （上書き更新。設定・辞書・本文の自動保存・立ち絵はそのまま残る）
-#   3. デスクトップとスタートメニューにアイコンを作って、起動する
+#   3. デスクトップとスタートメニューにアイコンを作り、Windows の「設定 → アプリ」に載せて、起動する
 #
 #   Python 入りの版が無いとき（その版の Release に無い・T2V_REF / T2V_SRC を使うとき）は、
 #   前からの入れ方になる: Python を探し（無ければ、許可をもらって winget で入れる）、
@@ -29,8 +29,11 @@
 #   この1行なら印が付かないので、展開は数秒で終わる。
 #
 # やめたいとき（アンインストール）:
-#   %LOCALAPPDATA%\TextToVoicevox フォルダと、デスクトップ・スタートメニューの
-#   「TextToVoicevox」アイコンを消すだけ。ほかには何も残さない。
+#   Windows の「設定 → アプリ」で TextToVoicevox を「アンインストール」するか、次の1行を貼る
+#   （どちらも uninstall.ps1 が動く）:
+#     irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/uninstall.ps1 | iex
+#   消すのは %LOCALAPPDATA%\TextToVoicevox フォルダと、デスクトップ・スタートメニューの
+#   「TextToVoicevox」アイコンと、「設定 → アプリ」の登録だけ。ほかには何も残さない。
 #
 # 上級者・テスト用の環境変数:
 #   T2V_REF=ブランチ名   … 最新版の代わりに、そのブランチを入れる（前からの入れ方）
@@ -412,6 +415,58 @@
         $App.pyw = $vpyw
     }
 
+    function Register-Uninstall($ico) {
+        # Windows の「設定 → アプリ」に載せる（そこからアンインストールできるように）。自分の
+        # ユーザーの中（HKCU）だけなので、管理者権限は要らない。消すのは uninstall.ps1 なので、
+        # それが無い版（v1.26.2 まで。T2V_REF で古いブランチを入れたときなど）では載せない
+        $script = Join-Path $Dest 'uninstall.ps1'
+        if (-not (Test-Path -LiteralPath $script)) { return $false }
+        $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppName"
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        # uninstall.ps1 は irm | iex 用に BOM を付けていない。-File で開くと日本語が化けるので、
+        # UTF-8 として読んでから動かす。フォルダを手で消したあとでも登録を片付けられるよう、
+        # 台本が無ければネットの同じ物を使う（T2V_UNINSTALL_FROM: 終わっても窓をすぐ閉じない）
+        $lit = $script.Replace("'", "''")
+        $dir = $Dest.Replace("'", "''")
+        $url = "https://raw.githubusercontent.com/$Repo/main/uninstall.ps1"
+        $cmd = "`"$ps`" -NoProfile -Command `"`$env:T2V_UNINSTALL_FROM='settings'; `$env:T2V_DIR='$dir'; " +
+               "`$f='$lit'; `$s = if (Test-Path -LiteralPath `$f) { [IO.File]::ReadAllText(`$f, [Text.Encoding]::UTF8) } " +
+               "else { irm '$url' }; & ([ScriptBlock]::Create(`$s))`""
+        $version = ''
+        try {
+            $m = Select-String -LiteralPath (Join-Path $Dest 'core.py') -Pattern '^APP_VERSION\s*=\s*"([^"]+)"' |
+                Select-Object -First 1
+            if ($m) { $version = $m.Matches[0].Groups[1].Value }
+        } catch {}
+        $kb = 0
+        try {
+            $sum = (Get-ChildItem -LiteralPath $Dest -Recurse -File -Force -ErrorAction SilentlyContinue |
+                Measure-Object -Property Length -Sum).Sum
+            $kb = [int][Math]::Min([double]$sum / 1KB, [int]::MaxValue)
+        } catch {}
+        New-Item -Path $key -Force | Out-Null
+        $text = [ordered]@{
+            DisplayName = $AppName
+            DisplayVersion = $version
+            Publisher = 'RAKUYOU211'
+            InstallLocation = $Dest
+            InstallDate = (Get-Date -Format 'yyyyMMdd')
+            UninstallString = $cmd
+            URLInfoAbout = "https://github.com/$Repo"
+            HelpLink = 'https://rakuyou211-blip.github.io/TextToVoicevox/manual/'
+        }
+        if ($ico -and (Test-Path -LiteralPath $ico)) { $text['DisplayIcon'] = $ico }
+        foreach ($name in $text.Keys) {
+            New-ItemProperty -LiteralPath $key -Name $name -Value $text[$name] -PropertyType String -Force | Out-Null
+        }
+        $num = [ordered]@{ NoModify = 1; NoRepair = 1 }
+        if ($kb -gt 0) { $num['EstimatedSize'] = $kb }
+        foreach ($name in $num.Keys) {
+            New-ItemProperty -LiteralPath $key -Name $name -Value $num[$name] -PropertyType DWord -Force | Out-Null
+        }
+        return $true
+    }
+
     try {
         Write-Host ''
         Write-Host "  TextToVoicevox をこのパソコンに入れます" -ForegroundColor Green
@@ -481,6 +536,12 @@
             Say "    $Dest"
             try { Start-Process explorer.exe -ArgumentList ('"' + $Dest + '"') } catch {}
         }
+        $listed = $false
+        try {
+            $listed = Register-Uninstall $ico
+        } catch {
+            Say '  （Windows の「設定 → アプリ」には載せられませんでした。アプリは入っています）'
+        }
 
         # ---- VOICEVOX（声を作る無料ソフト）が入っているか ----
         # アプリと同じ探し方（core.find_voicevox）で確かめる
@@ -500,6 +561,9 @@
         Write-Host '  できました！' -ForegroundColor Green
         Say '  これからは、デスクトップ（またはスタートメニュー）の「TextToVoicevox」から起動できます。'
         Say '  新しい版にしたいときも、同じ1行をもう一度貼り付けるだけです（設定や辞書は残ります）。'
+        if ($listed) {
+            Say '  使わなくなったら、Windows の「設定 → アプリ」から TextToVoicevox をアンインストールできます。'
+        }
         if ($vvPath.Trim()) {
             Say "  VOICEVOX: 見つかりました（$($vvPath.Trim())）。アプリの「VOICEVOX起動」からつなげます。"
         } else {

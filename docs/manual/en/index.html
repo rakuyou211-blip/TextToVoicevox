@@ -1,0 +1,634 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TextToVoicevox Manual</title>
+<!-- This file is the source. The distributed "Manual (English).html" is built by tools/make_manual.py with the images embedded. -->
+<style>
+:root {
+  --bg: #f6f9fb; --paper: #ffffff; --ink: #1c2b36; --sub: #5a6b78; --line: #d8e2ea;
+  --accent: #c2410c; --accent-soft: #fdf0e8; --leaf: #2f784a; --leaf-soft: #e9f5ee;
+  --warn: #9a3412; --warn-soft: #fff4e5; --code: #0f2533; --code-ink: #e8f1f6;
+  --kbd: #eef3f7;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12181d; --paper: #1a2229; --ink: #e6edf2; --sub: #9fb0bd; --line: #2c3a45;
+    --accent: #f08a4b; --accent-soft: #2e2119; --leaf: #6cc28f; --leaf-soft: #17281f;
+    --warn: #f5a35c; --warn-soft: #2e2416; --code: #0b1419; --code-ink: #dbe7ee; --kbd: #24313b;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.7 "Segoe UI", system-ui, -apple-system, "Yu Gothic UI", "Hiragino Sans", Meiryo, sans-serif;
+}
+a { color: var(--accent); }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 16px; display: grid; grid-template-columns: 250px 1fr; gap: 36px; }
+nav.toc { position: sticky; top: 0; align-self: start; max-height: 100vh; overflow: auto; padding: 28px 0; font-size: 14px; }
+nav.toc b { display: block; margin-bottom: 8px; color: var(--sub); font-size: 13px; letter-spacing: .05em; }
+nav.toc a { display: block; color: var(--ink); text-decoration: none; padding: 4px 10px; border-left: 3px solid transparent; }
+nav.toc a:hover { border-left-color: var(--accent); background: var(--paper); }
+nav.toc a.sub { padding-left: 24px; color: var(--sub); font-size: 13px; }
+nav.toc a.lang { display: inline-block; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 999px; padding: 2px 12px; background: var(--paper); color: var(--accent); }
+main { padding: 28px 0 80px; min-width: 0; }
+header.cover { background: var(--paper); border: 1px solid var(--line); border-radius: 18px; padding: 34px 36px; margin-bottom: 28px; }
+header.cover h1 { margin: 0 0 6px; font-size: 34px; color: var(--leaf); }
+header.cover p.lead { margin: 0; font-size: 18px; }
+header.cover .meta { margin-top: 14px; color: var(--sub); font-size: 14px; }
+section { background: var(--paper); border: 1px solid var(--line); border-radius: 18px; padding: 26px 32px; margin-bottom: 26px; }
+h2 { margin: 0 0 14px; font-size: 25px; padding-bottom: 8px; border-bottom: 3px solid var(--accent); }
+h3 { margin: 28px 0 10px; font-size: 20px; color: var(--leaf); }
+h4 { margin: 20px 0 6px; font-size: 17px; }
+p { margin: 10px 0; }
+figure { margin: 16px 0; text-align: center; }
+figure img { max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 4px 16px rgba(0,0,0,.08); }
+figcaption { color: var(--sub); font-size: 14px; margin-top: 6px; }
+.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 22px; align-items: start; }
+.steps { counter-reset: s; list-style: none; padding: 0; margin: 12px 0; }
+.steps > li { counter-increment: s; position: relative; padding: 4px 0 14px 50px; }
+.steps > li::before {
+  content: counter(s); position: absolute; left: 0; top: 2px; width: 34px; height: 34px; border-radius: 50%;
+  background: var(--accent); color: #fff; font-weight: bold; display: flex; align-items: center; justify-content: center;
+}
+.note, .warn, .tip { border-radius: 12px; padding: 12px 16px; margin: 14px 0; }
+.note { background: var(--leaf-soft); border-left: 5px solid var(--leaf); }
+.warn { background: var(--warn-soft); border-left: 5px solid var(--warn); }
+.tip { background: var(--accent-soft); border-left: 5px solid var(--accent); }
+.note b:first-child, .warn b:first-child, .tip b:first-child { display: block; }
+/* One-line commands wrap so the end (| iex, | bash) stays visible. The copy button sits on the right */
+pre.cmd {
+  background: var(--code); color: var(--code-ink); border-radius: 10px; padding: 14px 104px 14px 16px;
+  font: 14px/1.6 Consolas, "SF Mono", Menlo, monospace; white-space: pre-wrap; word-break: break-all; margin: 10px 0;
+}
+code {
+  font-family: Consolas, "SF Mono", Menlo, monospace; font-size: .92em; background: var(--kbd);
+  border-radius: 4px; padding: 0 4px; overflow-wrap: anywhere;
+}
+td, th, li, p { overflow-wrap: anywhere; }
+.cmdbox { position: relative; }
+.cmdbox button {
+  position: absolute; top: 8px; right: 8px; border: 0; border-radius: 6px; padding: 4px 10px; cursor: pointer;
+  background: var(--accent); color: #fff; font-size: 13px;
+}
+kbd {
+  background: var(--kbd); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px;
+  padding: 0 6px; font: 13px/1.6 Consolas, monospace; white-space: nowrap;
+}
+.btn { display: inline-block; border: 1px solid var(--line); border-radius: 6px; padding: 0 8px; background: var(--kbd); font-size: 14px; white-space: nowrap; }
+.btn.main { background: var(--accent); color: #fff; border-color: var(--accent); }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 15px; }
+th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+th { background: var(--bg); }
+.flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 12px 0; }
+.flow span { background: var(--leaf-soft); border: 1px solid var(--line); border-radius: 999px; padding: 2px 12px; font-size: 14px; }
+.flow i { color: var(--sub); font-style: normal; }
+.mock { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: var(--bg); font-size: 14px; }
+.mock .title { font-weight: bold; margin-bottom: 6px; }
+.mock .fake { display: inline-block; margin-top: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 2px 12px; background: var(--paper); }
+.themes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+/* A to I on the screen map */
+ol.legend { list-style: none; padding: 0; margin: 12px 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 22px; }
+ol.legend li { display: flex; gap: 10px; align-items: baseline; }
+ol.legend b.tag {
+  flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 14px;
+}
+/* Get started */
+.quick { border: 2px solid var(--leaf); }
+.quick h2 { border-bottom-color: var(--leaf); }
+.os { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+.os > div { border: 1px solid var(--line); border-radius: 12px; padding: 4px 16px 10px; background: var(--bg); }
+.check li { list-style: none; position: relative; padding-left: 30px; }
+.check li::before { content: "✓"; position: absolute; left: 4px; color: var(--leaf); font-weight: bold; }
+.themes figure { margin: 0; }
+details { border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px; margin: 10px 0; background: var(--bg); }
+details summary { cursor: pointer; font-weight: bold; }
+.small { font-size: 14px; color: var(--sub); }
+footer { color: var(--sub); font-size: 13px; text-align: center; padding: 20px 0 40px; }
+@media (max-width: 900px) {
+  .wrap { display: block; }
+  nav.toc { position: static; max-height: none; background: var(--paper); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-top: 16px; }
+  .two, .themes, .os, ol.legend { grid-template-columns: 1fr; }
+  pre.cmd { padding-right: 16px; padding-top: 44px; }
+  section, header.cover { padding: 20px 18px; }
+}
+@media print {
+  body { background: #fff; color: #000; font-size: 11pt; }
+  .wrap { display: block; max-width: none; }
+  nav.toc, .cmdbox button { display: none; }
+  section, header.cover { border: 0; padding: 0; margin: 0 0 18px; break-inside: auto; }
+  h2 { break-before: page; }
+  header.cover + section h2 { break-before: auto; }
+  figure { break-inside: avoid; }
+  figure img { box-shadow: none; max-height: 120mm; }
+  pre.cmd { white-space: pre-wrap; word-break: break-all; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav class="toc">
+  <a class="lang" href="../" data-local="説明書.html" hreflang="ja" lang="ja">日本語の説明書 →</a>
+  <b>CONTENTS</b>
+  <a href="#quick">Get started in 3 minutes</a>
+  <a href="#about">1. What the app does</a>
+  <a href="#need">2. What you need</a>
+  <a href="#install">3. Installation</a>
+  <a class="sub" href="#voicevox">Install VOICEVOX</a>
+  <a class="sub" href="#win-oneline">Windows (recommended)</a>
+  <a class="sub" href="#win-zip">Windows (from the zip)</a>
+  <a class="sub" href="#mac-oneline">Mac (recommended)</a>
+  <a class="sub" href="#mac-zip">Mac (from the zip)</a>
+  <a class="sub" href="#check">Check that it works</a>
+  <a class="sub" href="#update">Update and uninstall</a>
+  <a href="#screen">4. The screen</a>
+  <a href="#basic">5. The basics</a>
+  <a href="#step1">6. ① Import</a>
+  <a href="#step2">7. ② Voice</a>
+  <a href="#text">8. The text and furigana</a>
+  <a href="#player">9. The player bar</a>
+  <a href="#step3">10. ③ Save</a>
+  <a href="#conn">11. Connection (VOICEVOX)</a>
+  <a href="#looks">12. Look and text size</a>
+  <a href="#keys">13. Keyboard shortcuts</a>
+  <a href="#trouble">14. Troubleshooting</a>
+  <a href="#rules">15. Rules for publishing</a>
+</nav>
+<main>
+
+<header class="cover">
+  <h1>TextToVoicevox Manual</h1>
+  <p class="lead">A free app that pulls the text out of PDFs, images and your screen, reads it aloud in VOICEVOX voices such as Zundamon, and saves it as audio files.</p>
+  <p class="meta">For v1.26 and later ／ Windows 10 and 11, macOS ／ By 落葉い (RAKUYOU211)<br>
+  To get a PDF of this manual, print this page from your browser (<kbd>Ctrl</kbd>+<kbd>P</kbd>) and choose “Save as PDF”.</p>
+  <div class="note"><b>The app’s screen is in Japanese</b>In this manual, buttons are written in Japanese exactly as they appear on screen, like <span class="btn" lang="ja">▶ 再生</span>, followed by what they mean in English. Other labels on screen are shown the same way: <b lang="ja">● 接続OK</b> (connected).</div>
+</header>
+
+<section id="quick" class="quick">
+  <h2>Get started in 3 minutes</h2>
+  <p>The details are in the chapters below. These three steps are all it takes.</p>
+  <ol class="steps">
+    <li><b>Install VOICEVOX</b> … download it from the <a href="https://voicevox.hiroshiba.jp/">official VOICEVOX site</a> and install it (it is the program that makes the voices; <a href="#voicevox">details</a>).</li>
+    <li><b>Install the app</b> … copy the line for your computer, paste it and run it.
+      <div class="os">
+        <div><h4>Windows</h4><p>Right-click the Start button → “Terminal”, paste, press <kbd>Enter</kbd></p>
+          <div class="cmdbox"><pre class="cmd">irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.ps1 | iex</pre><button type="button" data-copy>Copy</button></div></div>
+        <div><h4>Mac</h4><p>Launchpad → “Terminal”, paste, press <kbd>return</kbd></p>
+          <div class="cmdbox"><pre class="cmd">curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.sh | bash</pre><button type="button" data-copy>Copy</button></div></div>
+      </div>
+      <p class="small">When it finishes, the app opens. From then on, open “TextToVoicevox” on your desktop (on a Mac, in Launchpad). If you would rather not run a command, you can also <a href="#win-zip">install from the zip</a>.</p>
+    </li>
+    <li><b>Have it read</b> … drag a PDF or an image onto the app, and its text appears on the right. Click the line you want to hear and press <span class="btn main" lang="ja">▶ 再生</span> (play).</li>
+  </ol>
+</section>
+
+<section id="about">
+  <h2>1. What the app does</h2>
+  <figure><img src="../img/main.jpg" alt="The app window: the steps on the left, the text on the right"><figcaption>The app window. The left column holds the steps (① import → ② voice → ③ save); the right side holds the text and the player bar</figcaption></figure>
+  <ul>
+    <li><b>Pulls out text</b> … from PDFs, images (PNG, JPG and so on), text files, Word (.docx) and e-books (.epub). Text in scanned books and photos is read on your own computer, too (vertical Japanese text included).</li>
+    <li><b>Reads your screen</b> … draw a box around text on your screen, in an e-book reader or a browser, and it is read aloud.</li>
+    <li><b>Reads aloud</b> … in VOICEVOX voices (Zundamon, Shikoku Metan and others), from the line you pick to the end. It keeps a bookmark, so you can carry on where you stopped.</li>
+    <li><b>Finds misreadings first</b> … above the kanji you see the reading VOICEVOX will actually use (furigana). Readings that differ from the dictionary are colored, so you can fix them before you listen.</li>
+    <li><b>Makes audio files</b> … WAV, M4A, MP3 and M4B audiobooks with chapters, plus subtitles (.srt).</li>
+  </ul>
+  <div class="note"><b>Works offline</b>Reading text and making speech both happen on your own computer. Your text is never sent to the internet (the app goes online only to install, and to check whether a new version is out).</div>
+  <div class="warn"><b>Not official VOICEVOX software</b>This is an unofficial tool made by an individual. It is not related to the VOICEVOX developers or to the owners of the characters. VOICEVOX itself is not included in this app; install it separately.</div>
+</section>
+
+<section id="need">
+  <h2>2. What you need</h2>
+  <table>
+    <tr><th>What</th><th>Why</th><th>Where to get it</th></tr>
+    <tr><td><b>VOICEVOX</b> (free)</td><td>It makes the voices. Without it there is no sound (you can still pull out text).</td><td><a href="https://voicevox.hiroshiba.jp/">voicevox.hiroshiba.jp</a></td></tr>
+    <tr><td><b>Python</b> 3.9 or newer (free)</td><td>The app runs on Python. <b>With the recommended one-line install you don’t need to install it yourself</b> (on Windows you get a build with Python inside; on a Mac it is installed for you if missing).</td><td><a href="https://www.python.org/downloads/">python.org</a> (only for the zip)</td></tr>
+  </table>
+  <p class="small">You need an internet connection only for the first installation.</p>
+</section>
+
+<section id="install">
+  <h2>3. Installation</h2>
+  <div class="flow"><span>Install VOICEVOX</span><i>→</i><span>Install the app (one line or zip)</span><i>→</i><span>Start</span></div>
+  <p>There are two ways to install the app. <b>We recommend the one-line install.</b> Unlike a zip downloaded in a browser, it doesn’t trigger the “this file may be unsafe” warnings on Windows and macOS, and the same line also updates the app.</p>
+
+  <h3 id="voicevox">Install VOICEVOX (Windows and Mac)</h3>
+  <ol class="steps">
+    <li>Open the <a href="https://voicevox.hiroshiba.jp/">official VOICEVOX site</a> and download the version for your computer (Windows or Mac). If your computer has a GPU, the GPU version is recommended (it makes voices faster).</li>
+    <li>Open the installer you downloaded and follow the steps on screen.</li>
+    <li>Start VOICEVOX once and accept its terms of use. You can close it afterwards.</li>
+  </ol>
+  <div class="note"><b>You don’t need to open VOICEVOX yourself each time</b>When you open the app, it starts VOICEVOX’s speech engine (the part without a window) by itself, and closes it when you close the app.</div>
+
+  <h3 id="win-oneline">Windows: one-line install (recommended)</h3>
+  <ol class="steps">
+    <li><b>Right-click</b> the Start button and open “<b>Terminal</b>” (or “Windows PowerShell”). You don’t need to run it as administrator.</li>
+    <li>Copy the line below, paste it into the terminal (right-click or <kbd>Ctrl</kbd>+<kbd>V</kbd>) and press <kbd>Enter</kbd>.
+      <div class="cmdbox"><pre class="cmd">irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.ps1 | iex</pre><button type="button" data-copy>Copy</button></div>
+    </li>
+    <li>It downloads the build with Python inside (about 200 MB) and puts it in <code>%LOCALAPPDATA%\TextToVoicevox</code>. This can take a few minutes. When it finishes, the app opens, and <b>“TextToVoicevox” appears on your desktop and in the Start menu</b>.</li>
+    <li>From then on, just double-click “TextToVoicevox” on your desktop.</li>
+  </ol>
+  <div class="tip"><b>No need to install Python</b>This way you get a build with Python and every part inside. It doesn’t ask for an administrator password either.</div>
+  <details><summary>What does this line do? (if you want to know before pasting it)</summary>
+    <p><code>irm</code> fetches the install script (<a href="https://github.com/rakuyou211-blip/TextToVoicevox/blob/main/install.ps1">install.ps1</a>) from this app’s GitHub, and <code>iex</code> runs it. The script does only the following, and you can read it at that link any time.</p>
+    <ul>
+      <li>Downloads the latest “build with Python inside” from the download page</li>
+      <li>Puts it in a folder of your own user (<code>%LOCALAPPDATA%\TextToVoicevox</code>; no administrator rights)</li>
+      <li>Creates icons on the desktop and in the Start menu, lists the app in Windows Settings → Apps (so you can uninstall it there), and starts it</li>
+    </ul>
+    <p>A zip downloaded in a browser is marked as coming from the internet, and Windows stops it with a warning. Here PowerShell downloads the files itself, so they are not marked and no warning appears. If you would rather not paste a command from the internet, use the <a href="#win-zip">zip</a>.</p>
+  </details>
+
+  <h3 id="win-zip">Windows: install from the zip</h3>
+  <ol class="steps">
+    <li>Install Python (3.9 or newer) from <a href="https://www.python.org/downloads/">python.org</a>. <b>On the installer’s first screen, be sure to tick “Add python.exe to PATH”</b> before you continue (this is the most common stumbling point).
+      <div class="mock"><div class="title">The first screen of the Python installer (near the bottom)</div><b>☑ Add python.exe to PATH</b> ← tick this, then<br>press <span class="fake">Install Now</span></div>
+    </li>
+    <li>Download <code>TextToVoicevox_Windows.zip</code> from the <a href="https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest">download page</a>.</li>
+    <li><b>Right-click the zip → “Extract All”</b>. Starting the app from inside the zip without extracting it fails (Windows copies only that one file to a temporary folder).</li>
+    <li>Double-click <b lang="ja">起動.pyw</b> (start) in the extracted folder. The first time only, a black window runs the setup (needs an internet connection; a few minutes). Then the app opens.</li>
+    <li>After the first start, a “<b>TextToVoicevox</b>” shortcut with the app’s icon appears in the folder, and 起動.pyw moves into the app folder. From then on, open “TextToVoicevox”.</li>
+  </ol>
+  <div class="warn"><b>If you see “Windows protected your PC”</b>click the small “<b>More info</b>”, then “<b>Run anyway</b>”. The warning appears only because the author hasn’t paid for code signing; all of the code is public.
+    <div class="mock" style="margin-top:8px"><div class="title">Windows protected your PC</div>Microsoft Defender SmartScreen prevented an unrecognized app from starting.<br><u>More info</u> ← click this and <span class="fake">Run anyway</span> appears</div>
+  </div>
+  <div class="warn"><b>If 起動.pyw opens Notepad, or nothing happens</b>Python isn’t installed, or “Add python.exe to PATH” wasn’t ticked. Reinstall Python. If Python is installed and Notepad still opens, right-click 起動.pyw → “Open with” → “Python”.</div>
+
+  <h3 id="mac-oneline">Mac: one-line install (recommended)</h3>
+  <ol class="steps">
+    <li>Find and open “<b>Terminal</b>” in Launchpad (or press <kbd>⌘</kbd>+<kbd>Space</kbd> for Spotlight and type “Terminal”).</li>
+    <li>Copy the line below, paste it (<kbd>⌘</kbd>+<kbd>V</kbd>) and press <kbd>return</kbd>.
+      <div class="cmdbox"><pre class="cmd">curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.sh | bash</pre><button type="button" data-copy>Copy</button></div>
+    </li>
+    <li>If no Python is found, it asks (in Japanese) whether to install a Python 3.12 just for this app. Press <kbd>return</kbd> for yes. It is about 20 MB and goes into your own user folder, so no password is needed.</li>
+    <li>When it finishes, the app opens, and <b>“TextToVoicevox” appears in Launchpad and Spotlight</b>. Open it from there from then on.</li>
+  </ol>
+  <details><summary>What does this line do? (if you want to know before pasting it)</summary>
+    <p><code>curl</code> fetches the install script (<a href="https://github.com/rakuyou211-blip/TextToVoicevox/blob/main/install.sh">install.sh</a>) from this app’s GitHub, and <code>bash</code> runs it. The script does the following, and you can read it at that link any time.</p>
+    <ul>
+      <li>Looks for Python (if there is none, it asks before installing a Python of your own)</li>
+      <li>Puts the latest version in <code>~/Library/Application Support/TextToVoicevox</code> and installs the parts it needs</li>
+      <li>Creates “TextToVoicevox” in <code>~/Applications</code> and starts it</li>
+    </ul>
+    <p>Everything stays inside your own user and no administrator password is used. The script is built so that a half-downloaded copy never runs.</p>
+  </details>
+
+  <h3 id="mac-zip">Mac: install from the zip</h3>
+  <ol class="steps">
+    <li>Download <code>TextToVoicevox_Mac.zip</code> from the <a href="https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest">download page</a> and double-click it to extract it (the Mac’s built-in extraction is recommended; other tools can break the Japanese file names or the permission to run).</li>
+    <li><b>Don’t double-click 起動.command yet.</b> macOS blocks files downloaded in a browser. Instead, open Terminal, type <code>bash</code> and one space, drag <b>setup_mac.sh</b> from the folder onto the Terminal window, and press <kbd>return</kbd>.</li>
+    <li>The setup runs and then the app opens. From the second time on, double-click “起動.command” (start) to open it.</li>
+  </ol>
+  <details><summary>Using only the mouse (macOS 15 Sequoia and later)</summary>
+    <p>If macOS says 起動.command can’t be opened, don’t choose “Move to Trash”; close the message with “Done”. Then open <b>System Settings → Privacy &amp; Security</b>, scroll down, and next to the line saying 起動.command was blocked, click “<b>Open Anyway</b>”, then “Open”. On macOS 14 and earlier you can also right-click → “Open” → “Open”. Once the first file gets through, the mark on the other files is removed automatically.</p>
+  </details>
+
+  <h3 id="check">Check that it works</h3>
+  <p>When the app opens, check these three things.</p>
+  <ul class="check">
+    <li><b lang="ja">● 接続OK</b> (connected) appears at the bottom of the left column (the app is connected to VOICEVOX)</li>
+    <li>Type a sentence into the text on the right and press <span class="btn" lang="ja">▶ 試聴</span> (preview) in ②: you hear a voice</li>
+    <li>Small readings (furigana) appear above the kanji in the text</li>
+  </ul>
+  <p>If something doesn’t work, see <a href="#trouble">14. Troubleshooting</a>. The most common cause is that VOICEVOX isn’t installed yet, or has never been started.</p>
+
+  <h3 id="update">Update and uninstall</h3>
+  <h4>Update to a new version</h4>
+  <p>When a new version is out, the bar at the top of the app shows <b lang="ja">新しい版があります</b> (a new version is out). Click it to see how to update.</p>
+  <ul>
+    <li><b>One-line install</b> … paste the same line again. Your settings, dictionary and autosaved text are kept.</li>
+    <li><b>Zip</b> … extract the new zip over your current folder.</li>
+  </ul>
+  <h4 id="uninstall">Uninstall</h4>
+  <p><b>If you used the one-line install on Windows</b>, either of these removes the app (both do the same thing).</p>
+  <ul>
+    <li><b>From Settings</b> … Start → “<b>Settings</b>” → “<b>Apps</b>” → “<b>Installed apps</b>”, click <b>…</b> next to TextToVoicevox and choose “<b>Uninstall</b>”. A black window opens, shows what will be removed (in Japanese) and removes it.</li>
+    <li><b>With one line</b> … paste this line into the terminal and press <kbd>Enter</kbd>. When it asks 消しますか？ (remove it?), type <kbd>y</kbd> and press <kbd>Enter</kbd>.
+      <div class="cmdbox"><pre class="cmd">irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/uninstall.ps1 | iex</pre><button type="button" data-copy>Copy</button></div></li>
+  </ul>
+  <p class="small">It removes only the <code>%LOCALAPPDATA%\TextToVoicevox</code> folder (your settings and autosaved text are in it), the icons on the desktop and in the Start menu, and the entry in Settings → Apps. VOICEVOX (the reading dictionary lives in VOICEVOX too) and the audio files you made are kept. If you installed v1.26.2 or earlier, update once with the same install line and the app appears in Settings → Apps (the uninstall line works without updating).</p>
+  <table>
+    <tr><th>Installed with</th><th>How to remove it</th></tr>
+    <tr><td>Windows, one line</td><td>As above (Settings → Apps, or the uninstall line)</td></tr>
+    <tr><td>Mac, one line</td><td>Move the <code>~/Library/Application Support/TextToVoicevox</code> folder and <code>~/Applications/TextToVoicevox.app</code> to the Trash (if it also installed Python for you, you may delete <code>~/.local/python3.12</code> as well)</td></tr>
+    <tr><td>Zip</td><td>Just delete the extracted folder</td></tr>
+  </table>
+  <p class="small">On Windows, typing <code>%LOCALAPPDATA%</code> into File Explorer’s address bar opens that folder. In the Mac’s Finder, press <kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd> to type a location.</p>
+</section>
+
+<section id="screen">
+  <h2>4. The screen</h2>
+  <p>The window has two columns. The steps (① → ② → ③) run down the left column; the text and the player bar are on the right.</p>
+  <figure><img src="../img/screen_map.jpg" alt="The parts of the screen, marked A to I"><figcaption>The parts of the screen (A to I match the list below)</figcaption></figure>
+  <ol class="legend">
+    <li><b class="tag">A</b><span><b>Status</b> … what the app is doing now, and what to do next</span></li>
+    <li><b class="tag">B</b><span><b>Theme, <span lang="ja">使い方</span> (how to use), <span lang="ja">感想を送る</span> (send feedback)</b> … change the colors / open this manual / send feedback to the author (<a href="#looks">chapter 12</a>)</span></li>
+    <li><b class="tag">C</b><span><b><span lang="ja">① 取り込む</span> (import)</b> … add the files or screen you want read, and pull out the text (<a href="#step1">chapter 6</a>)</span></li>
+    <li><b class="tag">D</b><span><b><span lang="ja">② 声</span> (voice)</b> … pick the character, the voice style, the speed and so on, and preview it (<a href="#step2">chapter 7</a>)</span></li>
+    <li><b class="tag">E</b><span><b><span lang="ja">③ 保存</span> (save)</b> … make audio files and subtitles (<a href="#step3">chapter 10</a>)</span></li>
+    <li><b class="tag">F</b><span><b>Connection</b> … whether the app is connected to VOICEVOX (<a href="#conn">chapter 11</a>)</span></li>
+    <li><b class="tag">G</b><span><b>Text tools</b> … furigana, likely misreadings, next candidate, reading dictionary, replace, clear all (<a href="#text">chapter 8</a>)</span></li>
+    <li><b class="tag">H</b><span><b>The text</b> … the text that was pulled out. You can edit it; it is autosaved every 60 seconds. Furigana above the kanji (<a href="#text">chapter 8</a>)</span></li>
+    <li><b class="tag">I</b><span><b>Player bar</b> … play, pause, previous / next line, speed, time left (<a href="#player">chapter 9</a>)</span></li>
+  </ol>
+  <h4>What the button colors mean</h4>
+  <p><span class="btn main demo">Painted buttons</span> are the main actions (extract the text, make audio, play), <span class="btn demo">buttons with a face</span> are everyday actions, and buttons with only an outline are occasional actions. Text with a gear (such as <b lang="ja">⚙ 設定 ▷</b>, settings) opens settings. The red <span lang="ja">本文を全消去</span> (clear all text) erases the text (you can bring it back with <span lang="ja">復元</span>, restore).</p>
+</section>
+
+<section id="basic">
+  <h2>5. The basics</h2>
+  <p>The basics are four steps: <b>add → pull out the text → pick a voice → listen or save</b>.</p>
+  <ol class="steps">
+    <li><b>Add</b> … drag the PDF or image you want read onto the drop area in the left column (<span lang="ja">ここに画像・PDF・フォルダをドラッグ＆ドロップ</span>, drop images, PDFs or folders here). You can also pick files with <span class="btn" lang="ja">ファイル追加</span> (add files), or with <span class="btn" lang="ja">ファイルを選ぶ…</span> (choose a file) in the middle of the empty text.</li>
+    <li><b>Pull out the text</b> … once a file is added, its text is pulled out automatically and shown on the right. To do it again, press <span class="btn main" lang="ja">▶ テキスト抽出 実行</span> (extract text, <kbd>Ctrl</kbd>+<kbd>Enter</kbd>).</li>
+    <li><b>Pick a voice</b> … in ②, pick a character (such as Zundamon) and a style (such as <span lang="ja">ノーマル</span>, normal), and listen with <span class="btn" lang="ja">▶ 試聴</span> (preview).</li>
+    <li><b>Listen or save</b> … click the line you want to hear in the text, and press <span class="btn main" lang="ja">▶ 再生</span> (play) on the player bar. To make a file, press <span class="btn main" lang="ja">♪ 音声を生成</span> (make audio) in ③.</li>
+  </ol>
+  <figure><img src="../img/empty.jpg" alt="The screen before anything is added"><figcaption>The screen when you first open the app. While the text is empty, “ファイルを選ぶ…” (choose a file) appears in the middle</figcaption></figure>
+</section>
+
+<section id="step1">
+  <h2>6. ① Import</h2>
+  <div class="two">
+    <figure><img src="../img/step1.jpg" alt="① Import"><figcaption><span lang="ja">① 取り込む</span> (import)</figcaption></figure>
+    <div>
+      <ul>
+        <li><span class="btn" lang="ja">ファイル追加</span> (add files, <kbd>Ctrl</kbd>+<kbd>O</kbd>) … pick files to add. PDF, PNG/JPG/BMP/TIFF/WEBP/GIF, txt, docx and epub are supported.</li>
+        <li><span class="btn" lang="ja">フォルダ追加</span> (add a folder) … adds all the files in a folder.</li>
+        <li><span class="btn" lang="ja">スクリーンショット</span> (screenshot, <kbd>Ctrl</kbd>+<kbd>R</kbd>) … drag a box around the part of your screen you want read, and its text is read aloud.</li>
+        <li><span class="btn" lang="ja">コピーした画像を読む</span> (read a copied image) … reads the text in an image on the clipboard (a screen copy, for example).</li>
+        <li>Use <b>▲▼</b> on the right of the file list to change the order, and <b>×</b> to remove a file.</li>
+        <li><span class="btn main" lang="ja">▶ テキスト抽出 実行</span> (extract text, <kbd>Ctrl</kbd>+<kbd>Enter</kbd>) … pulls out the text again.</li>
+      </ul>
+    </div>
+  </div>
+  <h3>Reading text on your screen (screenshot)</h3>
+  <p>The app can read text that is on your screen as it is: in an e-book reader, a PDF viewer, a web page and so on.</p>
+  <ol class="steps">
+    <li>Press <span class="btn" lang="ja">スクリーンショット</span> (screenshot). The app hides for a moment and takes a picture of the screen (so that its own window isn’t in the picture).</li>
+    <li>Drag a box around the part you want read. As soon as you let go, the text is read and spoken.</li>
+    <li>After turning a page, press <span class="btn" lang="ja">同じ範囲を読む</span> (read the same area, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>) to read the same spot without drawing the box again. Tick <span lang="ja">めくったら自動で読む</span> (auto-read on page turn), and it reads each new page by itself.</li>
+  </ol>
+  <div class="note"><b>On a Mac</b>The first time only, macOS asks for “Screen Recording” permission in System Settings. When asked, allow TextToVoicevox (or Terminal).</div>
+  <h3>How text is pulled out (<span lang="ja">設定 ▷</span>, settings)</h3>
+  <div class="two">
+    <figure><img src="../img/opt.jpg" alt="Settings of ①"><figcaption><b lang="ja">⚙ 設定 ▷</b> (settings) in ①, opened</figcaption></figure>
+    <div>
+      <ul>
+        <li><b>Line breaks</b> (<span lang="ja">改行の扱い</span>) … <span lang="ja">文ごとに改行（VOICEVOX推奨）</span> (one sentence per line, recommended for VOICEVOX) or <span lang="ja">元の改行を保持</span> (keep the original line breaks).</li>
+        <li><b>PDF</b> … <span lang="ja">自動（文字の無いページは画像から読む）</span> (automatic: pages without text are read as images) or <span lang="ja">いつも画像から読む（スキャン・文字化け）</span> (always read as images: scans, garbled text). With the <b>page range</b> (<span lang="ja">ページ範囲</span>, for example <code>5-320</code>) you can skip the cover or the table of contents.</li>
+        <li><b>Cleanup</b> (<span lang="ja">文の整え方</span>, tick to turn on)
+          <ul>
+            <li><span lang="ja">画像を見やすくしてから読む</span> (make the image clearer before reading)</li>
+            <li><span lang="ja">空行を削除</span> (remove blank lines)</li>
+            <li><span lang="ja">PDF のページの見出しと番号を読まない</span> (don’t read page headers and numbers in PDFs, so the book title and page numbers aren’t read on every page)</li>
+            <li><span lang="ja">英数字間の空白を保持</span> (keep spaces between letters and digits)</li>
+            <li><span lang="ja">折り返し連結</span> (join wrapped lines; for single-column text)</li>
+            <li><span lang="ja">画面キャプチャのノイズを除去</span> (remove screen-capture noise, such as clocks and logos on news screens)</li>
+            <li><span lang="ja">読み取りの間違いを直す</span> (fix recognition mistakes, such as カ⇔力 and ー⇔一 mix-ups)</li>
+          </ul>
+        </li>
+      </ul>
+      <p class="small">You can check the lines that were removed (page numbers and so on) under <span lang="ja">直した所</span> (what was changed) above the text.</p>
+    </div>
+  </div>
+  <div class="tip"><b>Reading text in images (Windows)</b>The first setup installs a strong text-recognition part automatically. It can read text over games and photos, small text, sentences mixed with English, and vertical text (from the right-hand column). If it couldn’t be installed, the app uses the recognition built into Windows, and <span lang="ja">読み取りを強くする</span> (make recognition stronger) appears in the settings of ①. On a Mac, text is read with Apple Vision.</div>
+</section>
+
+<section id="step2">
+  <h2>7. ② Voice</h2>
+  <div class="two">
+    <figure><img src="../img/step2.jpg" alt="② Voice"><figcaption><span lang="ja">② 声</span> (voice)</figcaption></figure>
+    <div>
+      <ul>
+        <li>Pick the <b>character</b> (<span lang="ja">キャラ</span>) and the <b>style</b> (<span lang="ja">スタイル</span>: <span lang="ja">ノーマル</span> normal, <span lang="ja">あまあま</span> sweet and so on). Click the character’s face on the left to hear a sample of that voice.</li>
+        <li><b>Speed, pitch, intonation, volume</b> (<span lang="ja">速さ・高さ・抑揚・音量</span>) … 1.0 is the default.</li>
+        <li><span class="btn" lang="ja">♪ 声を聴く</span> (voice sample) … plays the official sample of the voice you picked.</li>
+        <li><span class="btn" lang="ja">▶ 試聴</span> (preview, <kbd>Ctrl</kbd>+<kbd>P</kbd>) … reads the line with the cursor using the current settings. It also shows the reading in kana, so you can spot misreadings.</li>
+      </ul>
+    </div>
+  </div>
+  <h3>Favorites and dialogue (<span lang="ja">お気に入り・セリフ ▷</span>)</h3>
+  <div class="two">
+    <figure><img src="../img/voice.jpg" alt="Favorites and dialogue"><figcaption><span lang="ja">お気に入り・セリフ ▷</span> (favorites and dialogue), opened</figcaption></figure>
+    <div>
+      <ul>
+        <li><b>Favorites</b> (<span lang="ja">お気に入り</span>) … give the current voice, speed and so on a name and press <span class="btn" lang="ja">保存</span> (save). Next time, just pick it to get them back.</li>
+        <li><b>Dialogue in another voice</b> (<span lang="ja">セリフ（「」で始まる行）は別の声</span>, lines starting with 「 in another voice) … tick it and only the lines of dialogue are read in a different voice. Handy for keeping narration and dialogue apart in a novel.</li>
+      </ul>
+    </div>
+  </div>
+  <h3>A different voice per line, and lines that aren’t read</h3>
+  <table>
+    <tr><th>Write this in the text</th><th>What it does</th></tr>
+    <tr><td><code lang="ja">@ずんだもん:こんにちは</code></td><td>Start a line with <code>@character name:</code> and only that line is read in that voice (for conversations). You can name the style too, like <code lang="ja">@四国めたん（あまあま）:</code> (without a style, the character’s first style is used). The names are the Japanese names shown in ②. If a name can’t be found, the app tells you before making audio.</td></tr>
+    <tr><td><code>#</code> memo</td><td>Lines starting with <code>#</code> aren’t read (for notes in a script). They aren’t in the saved audio either.</td></tr>
+  </table>
+  <p class="small">Right-click the text for shortcuts such as <span lang="ja">この行を試聴</span> (preview this line), <span lang="ja">選択語を辞書登録</span> (add the selected word to the dictionary), adding <code>@name:</code> to the line, or turning it into a <code>#</code> memo.</p>
+</section>
+
+<section id="text">
+  <h2>8. The text and furigana</h2>
+  <figure><img src="../img/text.jpg" alt="The text and furigana"><figcaption>The text. The small letters above the kanji are the reading VOICEVOX will actually use. 東雲駅 is shown in color as アズモエキ (correctly it is しののめえき, Shinonome Station)</figcaption></figure>
+  <h3>Furigana (checking the reading)</h3>
+  <ul>
+    <li>Above the kanji you see <b>the reading VOICEVOX will actually use</b>. Readings that match the dictionary are in hiragana; <b>readings that differ from the dictionary are colored katakana</b> (possible misreadings).</li>
+    <li><b>Click a colored reading</b> to open the reading dictionary (<span lang="ja">読み方辞書</span>) with that word filled in. Enter the correct reading and add it, and it’s fixed.</li>
+    <li>Tick <b lang="ja">誤読候補だけ</b> (likely misreadings only) to show only the colored ones.</li>
+    <li><span class="btn" lang="ja">次の候補 ▷</span> (next candidate, <kbd>F8</kbd>; back with <kbd>Shift</kbd>+<kbd>F8</kbd>) … jumps to the next possible misreading. Even in a long book you can go through just the candidates.</li>
+    <li>Furigana appear <b>only while the app is connected to VOICEVOX</b>. When it isn’t, a note says so just above the text; press <span class="btn" lang="ja">画面なしで起動</span> (start without a window) next to it.</li>
+  </ul>
+  <h3>Reading dictionary (<span lang="ja">読み方辞書</span>)</h3>
+  <figure><img src="../img/dict.jpg" alt="Reading dictionary"><figcaption>The reading dictionary (VOICEVOX’s user dictionary). Fill in <span lang="ja">単語</span> (word) and <span lang="ja">読み</span> (reading) at the bottom and press <span lang="ja">登録する</span> (add)</figcaption></figure>
+  <ul>
+    <li>Enter the <b>word</b> and its <b>reading</b> (hiragana is fine) and press <span class="btn" lang="ja">登録する</span> (add). Check it with <span class="btn" lang="ja">▶ 読みを試聴</span> (preview the reading).</li>
+    <li>Readings you add are used by all of VOICEVOX (the same dictionary works in the VOICEVOX editor).</li>
+    <li><b lang="ja">数字・日付・記号の読み方を直す</b> (fix how numbers, dates and symbols are read; recommended, on by default) … before reading, it rewrites forms VOICEVOX tends to misread into the way they are said in Japanese: <code>25℃</code> → <span lang="ja">25度</span> (degrees), <code>10:30</code> → <span lang="ja">10時30分</span>, <code>2026/11/13 18:07</code> → <span lang="ja">2026年11月13日 18時7分</span>, <code>1,234 KB</code> → <span lang="ja">キロバイト</span> (kilobytes) and so on (the text itself doesn’t change).</li>
+    <li>You can also select a word in the text and right-click → <span lang="ja">選択語を辞書登録</span> (add the selected word to the dictionary).</li>
+  </ul>
+  <h3>Replace (<span lang="ja">置き換え ▷</span>) and search</h3>
+  <figure><img src="../img/replace.jpg" alt="Replace"><figcaption><span lang="ja">置き換え ▷</span> (replace), opened</figcaption></figure>
+  <ul>
+    <li><b>Replace</b> (<span lang="ja">置き換え</span>) … replaces words throughout the text. Keep the ones you use often in <span lang="ja">登録した置き換え</span> (saved replacements); handy for fixing recognition mistakes that keep coming back.</li>
+    <li><b>Search</b> (<kbd>Ctrl</kbd>+<kbd>F</kbd>) … finds words in the text.</li>
+    <li><span class="btn" lang="ja">本文を全消去</span> (clear all text) … erases the text. Afterwards the same button becomes <span lang="ja">復元</span> (restore), which brings it back (<kbd>Ctrl</kbd>+<kbd>Z</kbd> works too).</li>
+  </ul>
+  <div class="note"><b>The text is saved automatically</b>It is saved every 60 seconds, so even after you close the app, the text is back the next time you open it.</div>
+</section>
+
+<section id="player">
+  <h2>9. The player bar</h2>
+  <figure><img src="../img/player.jpg" alt="The player bar"><figcaption>The player bar under the text</figcaption></figure>
+  <table>
+    <tr><th>Button</th><th>What it does</th></tr>
+    <tr><td><span class="btn main" lang="ja">▶ 再生</span> (play)</td><td>Reads from the line with the cursor to the end. The line being read is highlighted and kept about a third of the way down the text.</td></tr>
+    <tr><td><span class="btn" lang="ja">‖ 一時停止</span> (pause, <kbd>Space</kbd>)</td><td>Pauses; press again to carry on (on Windows from where it stopped, on a Mac from the start of the same line).</td></tr>
+    <tr><td><span class="btn" lang="ja">◁ 前の行</span> (previous line) · <span class="btn" lang="ja">次の行 ▷</span> (next line)</td><td>Go back or forward one line. While playing, it reads again from there.</td></tr>
+    <tr><td><span class="btn" lang="ja">■ 停止</span> (stop, <kbd>Esc</kbd>)</td><td>Stops. The next <span lang="ja">▶ 再生</span> carries on from the line where you stopped (bookmark).</td></tr>
+    <tr><td><span class="btn" lang="ja">« 最初から</span> (from the top)</td><td>Reads from the beginning of the text.</td></tr>
+    <tr><td><b>Speed and gap</b> (<span lang="ja">速さ・文の間</span>)</td><td>Change them on the spot (they are the same values as the speed in ② and the gap in ③).</td></tr>
+    <tr><td><b>Line number and time left</b></td><td>At the right end you see which line is being read and roughly how long until the end.</td></tr>
+    <tr><td><span class="btn" lang="ja">◁ 広げる</span> (widen, <kbd>F11</kbd>)</td><td>Folds the left column so the text fills the window (reading mode). <span class="btn" lang="ja">▷ 戻す</span> (back), or <kbd>Esc</kbd> while nothing is playing, brings it back.</td></tr>
+  </table>
+  <div class="two">
+    <figure><img src="../img/playing.jpg" alt="Playing"><figcaption>Playing. The line being read is highlighted</figcaption></figure>
+    <figure><img src="../img/reading.jpg" alt="Reading mode"><figcaption><span lang="ja">◁ 広げる</span> (widen) makes the text fill the window</figcaption></figure>
+  </div>
+  <p class="small">In a narrow window, the player bar buttons shrink to their symbols (◁ ▷ «) or wrap onto two or three rows. Hover over a button to see what it does.</p>
+</section>
+
+<section id="step3">
+  <h2>10. ③ Save</h2>
+  <div class="two">
+    <figure><img src="../img/step3.jpg" alt="③ Save"><figcaption><span lang="ja">③ 保存</span> (save)</figcaption></figure>
+    <div>
+      <ul>
+        <li><b>Audio format</b> (<span lang="ja">音声形式</span>) … WAV, M4A, MP3 or M4B (<span lang="ja">本</span>, book). See the table below.</li>
+        <li><b lang="ja">字幕(.srt)も保存</b> (also save subtitles) … also makes a subtitle file that matches the audio.</li>
+        <li><b>How to split</b> (<span lang="ja">まとめ方</span>) … <span lang="ja">全部を1つに</span> (all in one file; the default), <span lang="ja">1行=1ファイル</span> (one file per line), <span lang="ja">行数ごと</span> (every N lines) or <span lang="ja">段落ごと</span> (per paragraph). If it would make more than 300 files, the app asks first.</li>
+        <li><b>Gap</b> (<span lang="ja">文の間</span>) … the silence between sentences (seconds).</li>
+        <li><b>Longer gaps for paragraphs and chapters</b> (<span lang="ja">段落・章は長め</span>) … a paragraph break gets 2.5 times the gap, and a chapter heading such as 第一章 (chapter 1) gets 5 times (with 0.4 seconds: 1.0 and 2.0 seconds).</li>
+        <li><span class="btn main" lang="ja">♪ 音声を生成</span> (make audio, <kbd>Ctrl</kbd>+<kbd>G</kbd>) … choose where to save and it starts. Long texts are made in parallel, so they finish faster. You can stop with <kbd>Esc</kbd> along the way and keep what has been made so far.</li>
+      </ul>
+    </div>
+  </div>
+  <table>
+    <tr><th>Format</th><th>Good for</th><th>Anything else needed</th></tr>
+    <tr><td>WAV</td><td>The safest choice. Goes straight into video editors</td><td>No</td></tr>
+    <tr><td>M4A / MP3</td><td>Listening on a phone; smaller files</td><td>No (only MP3 on a Mac needs ffmpeg)</td></tr>
+    <tr><td>M4B (book)</td><td>Audiobooks with chapters (split automatically at 第◯章 chapter headings; plays in Apple Books and similar apps)</td><td>No</td></tr>
+    <tr><td>.srt</td><td>Subtitles that match the audio</td><td>No</td></tr>
+  </table>
+  <p>When it’s done, a completion window appears. <span class="btn" lang="ja">フォルダを開く</span> (open folder) opens where the files were saved, and <span class="btn" lang="ja">📋 クレジットをコピー</span> (copy credits) copies the credit line, such as <span lang="ja">VOICEVOX:ずんだもん</span>.</p>
+  <h3>Finish in VOICEVOX (<span lang="ja">VOICEVOXで仕上げる ▷</span>)</h3>
+  <div class="two">
+    <figure><img src="../img/finish.jpg" alt="Finish in VOICEVOX"><figcaption><span lang="ja">VOICEVOXで仕上げる ▷</span> (finish in VOICEVOX), opened</figcaption></figure>
+    <div>
+      <p>Use this when you want to fine-tune intonation and so on in the VOICEVOX editor.</p>
+      <ul>
+        <li><span class="btn" lang="ja">VOICEVOX用に保存(.txt)</span> (save for VOICEVOX) … a text file the VOICEVOX editor can load.</li>
+        <li><span class="btn" lang="ja">本文をコピー</span> (copy the text) … copies the text to the clipboard.</li>
+        <li><span class="btn" lang="ja">プロジェクト保存(.vvproj)</span> (save a project) … saves a VOICEVOX project (with <span lang="ja">調整値も入れる</span>, include adjustments, your speed and other settings go in too).</li>
+      </ul>
+    </div>
+  </div>
+  <h3>Voice cache (<span lang="ja">声の保管…</span>)</h3>
+  <figure><img src="../img/cache.jpg" alt="Voice cache"><figcaption><span lang="ja">声の保管…</span> (voice cache) at the top right of ③</figcaption></figure>
+  <p>Voices that were already made (the same line in the same voice) are kept here, which makes remaking files and continuous playback faster. It is safe to clear (they are made again when needed). If you make long books again and again, a bigger limit helps more.</p>
+</section>
+
+<section id="conn">
+  <h2>11. Connection (VOICEVOX)</h2>
+  <div class="two">
+    <figure><img src="../img/conn.jpg" alt="Connection settings"><figcaption><span lang="ja">接続設定…</span> (connection settings) at the bottom left, opened</figcaption></figure>
+    <div>
+      <ul>
+        <li>If <b lang="ja">● 接続OK</b> (connected) is shown, the app is connected to VOICEVOX.</li>
+        <li><span class="btn" lang="ja">VOICEVOX起動</span> (start VOICEVOX) … opens VOICEVOX with its editor window.</li>
+        <li><span class="btn" lang="ja">画面なしで起動</span> (start without a window) … starts only the speech part, without a window (lighter).</li>
+        <li><b>URL</b> … normally leave it at <code>http://127.0.0.1:50021</code>.</li>
+        <li><b lang="ja">アプリと一緒に VOICEVOX を起動</b> (start VOICEVOX with the app) … starts it automatically when you open the app (on by default).</li>
+        <li><b lang="ja">GPU があれば使う</b> (use the GPU if there is one) … with the GPU version of VOICEVOX, voices are made faster.</li>
+        <li><b lang="ja">新しい版が出たら知らせる</b> (tell me when a new version is out) … the app goes online only to check for a new version.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="looks">
+  <h2>12. Look and text size</h2>
+  <p>Pick the colors with the <b>theme</b> (<span lang="ja">テーマ</span>) at the top.</p>
+  <div class="themes">
+    <figure><img src="../img/theme_light.jpg" alt="Light"><figcaption><span lang="ja">ライト</span> (light)</figcaption></figure>
+    <figure><img src="../img/theme_dark.jpg" alt="Dark"><figcaption><span lang="ja">ダーク</span> (dark)</figcaption></figure>
+    <figure><img src="../img/theme_zunda.jpg" alt="Zunda"><figcaption><span lang="ja">ずんだ</span> (zunda green)</figcaption></figure>
+    <figure><img src="../img/theme_hc.jpg" alt="High contrast"><figcaption><span lang="ja">くっきり</span> (high contrast)</figcaption></figure>
+  </div>
+  <ul>
+    <li>The text gets bigger as you widen the window (it doesn’t shrink in a narrow window).</li>
+    <li>Set the size you like with <kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>-</kbd> (or <kbd>Ctrl</kbd>+mouse wheel), and go back with <kbd>Ctrl</kbd>+<kbd>0</kbd>.</li>
+    <li>Right-click the text → <span lang="ja">文字の大きさ</span> (text size) to choose whether the text grows with the window.</li>
+  </ul>
+</section>
+
+<section id="keys">
+  <h2>13. Keyboard shortcuts</h2>
+  <p class="small">On a Mac, use <kbd>⌘</kbd> instead of <kbd>Ctrl</kbd>.</p>
+  <table>
+    <tr><th>Keys</th><th>What it does</th></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>Add files</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td><td>Extract the text</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>Screenshot (read text on the screen)</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></td><td>Read the same area</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>Preview (the line with the cursor)</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>G</kbd></td><td>Make audio</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Save for VOICEVOX (.txt)</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Search the text</td></tr>
+    <tr><td><kbd>Space</kbd></td><td>While playing: pause and resume</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>Stop playing or processing / leave reading mode</td></tr>
+    <tr><td><kbd>F8</kbd> / <kbd>Shift</kbd>+<kbd>F8</kbd></td><td>Next / previous possible misreading</td></tr>
+    <tr><td><kbd>F11</kbd></td><td>Widen the text (reading mode) / back</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>-</kbd> / <kbd>0</kbd></td><td>Text bigger / smaller / back to normal</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd></td><td>Undo / redo an edit to the text</td></tr>
+  </table>
+</section>
+
+<section id="trouble">
+  <h2>14. Troubleshooting</h2>
+  <details open><summary>It says <span lang="ja">VOICEVOX: つながっていません</span> (not connected)</summary>
+    <p>VOICEVOX isn’t running. Normally it starts by itself when you open the app. If it doesn’t, press <span class="btn" lang="ja">VOICEVOX起動</span> (start VOICEVOX) or <span class="btn" lang="ja">画面なしで起動</span> (start without a window) at the bottom left. If this happens every time, check that <b lang="ja">アプリと一緒に VOICEVOX を起動</b> (start VOICEVOX with the app) is on in <span lang="ja">接続設定…</span> (connection settings) at the bottom left. If you haven’t installed VOICEVOX yet, start at <a href="#voicevox">Install VOICEVOX</a>.</p>
+  </details>
+  <details><summary>No furigana appear</summary>
+    <p>Furigana appear only while the app is connected to VOICEVOX, and they show up by themselves once it connects. In a narrow window, the <span lang="ja">ふりがな</span> (furigana) checkbox is below the text.</p>
+  </details>
+  <details><summary>Opening 起動.pyw does nothing, or opens Notepad (Windows, zip)</summary>
+    <p>Python isn’t installed, or “Add python.exe to PATH” wasn’t ticked. Reinstall Python, or use the <a href="#win-oneline">one-line install</a> (no Python needed). If Python is installed and Notepad still opens, right-click → “Open with” → “Python”.</p>
+  </details>
+  <details><summary>It says “Windows protected your PC”</summary>
+    <p>Click “More info” → “Run anyway”. With the <a href="#win-oneline">one-line install</a>, this warning doesn’t appear.</p>
+  </details>
+  <details><summary>On a Mac, it says 起動.command can’t be opened</summary>
+    <p>Don’t choose “Move to Trash”; close it with “Done”. Then use the way in <a href="#mac-zip">Mac: install from the zip</a> (setup_mac.sh in Terminal), or the <a href="#mac-oneline">one-line install</a>.</p>
+  </details>
+  <details><summary>Many words are misread</summary>
+    <p>Click a colored reading and add the correct reading to the reading dictionary. <span class="btn" lang="ja">次の候補 ▷</span> (next candidate, <kbd>F8</kbd>) takes you through the candidates one by one. For numbers and dates, check that <span lang="ja">数字・日付・記号の読み方を直す</span> (fix how numbers, dates and symbols are read) is on.</p>
+  </details>
+  <details><summary>Text in images isn’t read well</summary>
+    <p>Try <span lang="ja">画像を見やすくしてから読む</span> (make the image clearer before reading) and <span lang="ja">読み取りの間違いを直す</span> (fix recognition mistakes) in the settings of ①. On Windows, if <span lang="ja">読み取りを強くする</span> (make recognition stronger) is shown, press it to install the strong recognition part; it reads far more accurately. Add recognition mistakes that keep coming back to <span lang="ja">置き換え</span> (replace), and they are fixed automatically from then on.</p>
+  </details>
+  <details><summary>The app doesn’t open, or stops partway (to find the cause)</summary>
+    <p>Start it with <b lang="ja">デバッグ起動.pyw</b> (debug start; in the Windows zip it is inside the app folder; on a Mac, <span lang="ja">デバッグ起動.command</span>), and the error appears in a black window. Errors are also written to <span lang="ja">起動エラー.log</span> (when starting failed) and <span lang="ja">エラー.log</span> (when something failed after opening).</p>
+    <p>To reinstall the parts, on Windows delete the “venv” folder inside the app folder and start the app again (on a Mac, use <span lang="ja">setup.command</span>). If you used the one-line install, paste the same line again.</p>
+  </details>
+  <details><summary>Still stuck?</summary>
+    <p>Let us know through <a href="https://github.com/rakuyou211-blip/TextToVoicevox/issues">GitHub Issues</a>, <span lang="ja">感想を送る</span> (send feedback) at the top of the app, or on X (<a href="https://x.com/rakuyou211">@rakuyou211</a>). Every message is read.</p>
+  </details>
+</section>
+
+<section id="rules">
+  <h2>15. Rules for publishing</h2>
+  <ul>
+    <li>When you publish audio you made (in a video, for example), follow the <b>terms of VOICEVOX and of each character</b>, and add a credit such as “<b lang="ja">VOICEVOX:ずんだもん</b>”. <span class="btn" lang="ja">クレジットをコピー</span> (copy credits) in the completion window copies the credits for all the voices you used.</li>
+    <li>The rules differ from character to character (for example, whether commercial use is allowed). Before using a voice, check that character’s page on the <a href="https://voicevox.hiroshiba.jp/">official VOICEVOX site</a>.</li>
+    <li>Character illustrations (立ち絵) are not included in the app. To show them, put them in place yourself by following <code>assets/立ち絵/README.md</code> in the app folder (every feature works without them).</li>
+    <li>The app itself is under the MIT license. All of its source code is public on <a href="https://github.com/rakuyou211-blip/TextToVoicevox">GitHub</a>.</li>
+  </ul>
+</section>
+
+<footer>TextToVoicevox Manual ・ 落葉い 🍂 ・ <a href="https://github.com/rakuyou211-blip/TextToVoicevox">github.com/rakuyou211-blip/TextToVoicevox</a></footer>
+</main>
+</div>
+<script>
+document.querySelectorAll("[data-copy]").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var t = b.parentNode.querySelector("pre").innerText;
+    var done = function () { b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1600); };
+    if (navigator.clipboard) { navigator.clipboard.writeText(t).then(done, done); } else { done(); }
+  });
+});
+</script>
+</body>
+</html>

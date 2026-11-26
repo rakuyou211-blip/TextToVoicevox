@@ -105,6 +105,31 @@ jobs:
           if (-not (Select-String -LiteralPath (Join-Path $d 'settings.json') -Pattern 'keep' -Quiet)) { throw 'settings.json was lost' }
           Write-Host 'update kept settings.json'
 
+      # Windows の「設定 → アプリ」に載り、そこから消せる。登録されたコマンドを、Windows と同じく
+      # 1行のまま動かす（uninstall.ps1）。フォルダ・アイコン・登録が残らないことを確かめる
+      - name: Listed in Settings > Apps, and uninstalls from there
+        shell: powershell
+        env:
+          T2V_YES: "1"
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 't2v'
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\TextToVoicevox'
+          $e = Get-ItemProperty -LiteralPath $key
+          if ($e.InstallLocation -ne $d) { throw "bad InstallLocation: $($e.InstallLocation)" }
+          if ($e.DisplayName -ne 'TextToVoicevox' -or -not $e.DisplayVersion) { throw "bad name or version: $($e.DisplayName) $($e.DisplayVersion)" }
+          if (-not (Test-Path -LiteralPath $e.DisplayIcon)) { throw "icon missing: $($e.DisplayIcon)" }
+          Write-Host "listed: $($e.DisplayName) $($e.DisplayVersion), $($e.EstimatedSize) KB"
+          Write-Host "uninstall: $($e.UninstallString)"
+          if ($e.UninstallString -notmatch '^"([^"]+)"\s+(.*)$') { throw 'UninstallString is not "exe" args' }
+          $p = Start-Process -FilePath $Matches[1] -ArgumentList $Matches[2] -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode) { throw "uninstall failed ($($p.ExitCode))" }
+          if (Test-Path -LiteralPath $d) { throw 'the app folder is still there' }
+          if (Test-Path -LiteralPath $key) { throw 'still listed in Settings > Apps' }
+          foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+            if (Test-Path -LiteralPath (Join-Path $folder 'TextToVoicevox.lnk')) { throw "icon left in $folder" }
+          }
+          Write-Host 'uninstall ok'
+
       # 利用者と同じ道：GitHub の最新リリースを取ってきて入れる（T2V_SRC なし）。
       # そのリリースに Python 入りの版があればそれを、無ければ zip と venv で入れる。
       # zip の展開で日本語のファイル名（起動.pyw）が崩れないことも確かめる。
@@ -193,6 +218,23 @@ jobs:
           if (-not (Select-String -LiteralPath (Join-Path $d 'settings.json') -Pattern 'keep' -Quiet)) { throw 'settings.json was lost' }
           if (-not (Test-Path -LiteralPath (Join-Path $d 'runtime\pythonw.exe'))) { throw 'runtime missing after update' }
           Write-Host 'update kept settings.json'
+
+      # 消す1行（irm | iex で uninstall.ps1）。Python 入りの版も、フォルダ・アイコン・登録が残らない
+      - name: One-line uninstaller
+        shell: powershell
+        env:
+          T2V_DIR: ${{ runner.temp }}\t2v
+          T2V_YES: "1"
+        run: |
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\TextToVoicevox'
+          if (-not (Test-Path -LiteralPath $key)) { throw 'the installer did not list the app in Settings > Apps' }
+          irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/uninstall.ps1" | iex
+          if (Test-Path -LiteralPath $env:T2V_DIR) { throw 'the app folder is still there' }
+          if (Test-Path -LiteralPath $key) { throw 'still listed in Settings > Apps' }
+          foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+            if (Test-Path -LiteralPath (Join-Path $folder 'TextToVoicevox.lnk')) { throw "icon left in $folder" }
+          }
+          Write-Host 'one-line uninstall ok'
 
   # Mac の「1行でかんたん導入」を、この commit の install.sh で実際に流す。
   # 利用者と同じく raw.githubusercontent から curl | bash で読む。
