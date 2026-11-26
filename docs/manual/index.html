@@ -1,0 +1,624 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TextToVoicevox 説明書</title>
+<!-- このファイルは元原稿。配る「説明書.html」は tools/make_manual.py が画像を埋め込んで作る。 -->
+<style>
+:root {
+  --bg: #f6f9fb; --paper: #ffffff; --ink: #1c2b36; --sub: #5a6b78; --line: #d8e2ea;
+  --accent: #c2410c; --accent-soft: #fdf0e8; --leaf: #2f784a; --leaf-soft: #e9f5ee;
+  --warn: #9a3412; --warn-soft: #fff4e5; --code: #0f2533; --code-ink: #e8f1f6;
+  --kbd: #eef3f7;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12181d; --paper: #1a2229; --ink: #e6edf2; --sub: #9fb0bd; --line: #2c3a45;
+    --accent: #f08a4b; --accent-soft: #2e2119; --leaf: #6cc28f; --leaf-soft: #17281f;
+    --warn: #f5a35c; --warn-soft: #2e2416; --code: #0b1419; --code-ink: #dbe7ee; --kbd: #24313b;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.85 "Yu Gothic UI", "Hiragino Sans", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+}
+a { color: var(--accent); }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 16px; display: grid; grid-template-columns: 250px 1fr; gap: 36px; }
+nav.toc { position: sticky; top: 0; align-self: start; max-height: 100vh; overflow: auto; padding: 28px 0; font-size: 14px; }
+nav.toc b { display: block; margin-bottom: 8px; color: var(--sub); font-size: 13px; letter-spacing: .05em; }
+nav.toc a { display: block; color: var(--ink); text-decoration: none; padding: 4px 10px; border-left: 3px solid transparent; }
+nav.toc a:hover { border-left-color: var(--accent); background: var(--paper); }
+nav.toc a.sub { padding-left: 24px; color: var(--sub); font-size: 13px; }
+main { padding: 28px 0 80px; min-width: 0; }
+header.cover { background: var(--paper); border: 1px solid var(--line); border-radius: 18px; padding: 34px 36px; margin-bottom: 28px; }
+header.cover h1 { margin: 0 0 6px; font-size: 34px; color: var(--leaf); }
+header.cover p.lead { margin: 0; font-size: 18px; }
+header.cover .meta { margin-top: 14px; color: var(--sub); font-size: 14px; }
+section { background: var(--paper); border: 1px solid var(--line); border-radius: 18px; padding: 26px 32px; margin-bottom: 26px; }
+h2 { margin: 0 0 14px; font-size: 25px; padding-bottom: 8px; border-bottom: 3px solid var(--accent); }
+h3 { margin: 28px 0 10px; font-size: 20px; color: var(--leaf); }
+h4 { margin: 20px 0 6px; font-size: 17px; }
+p { margin: 10px 0; }
+figure { margin: 16px 0; text-align: center; }
+figure img { max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 4px 16px rgba(0,0,0,.08); }
+figcaption { color: var(--sub); font-size: 14px; margin-top: 6px; }
+.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 22px; align-items: start; }
+.steps { counter-reset: s; list-style: none; padding: 0; margin: 12px 0; }
+.steps > li { counter-increment: s; position: relative; padding: 4px 0 14px 50px; }
+.steps > li::before {
+  content: counter(s); position: absolute; left: 0; top: 2px; width: 34px; height: 34px; border-radius: 50%;
+  background: var(--accent); color: #fff; font-weight: bold; display: flex; align-items: center; justify-content: center;
+}
+.note, .warn, .tip { border-radius: 12px; padding: 12px 16px; margin: 14px 0; }
+.note { background: var(--leaf-soft); border-left: 5px solid var(--leaf); }
+.warn { background: var(--warn-soft); border-left: 5px solid var(--warn); }
+.tip { background: var(--accent-soft); border-left: 5px solid var(--accent); }
+.note b:first-child, .warn b:first-child, .tip b:first-child { display: block; }
+/* 1行コマンドは折り返して、最後（| iex・| bash）まで見えるように。右はコピーのボタンの場所 */
+pre.cmd {
+  background: var(--code); color: var(--code-ink); border-radius: 10px; padding: 14px 104px 14px 16px;
+  font: 14px/1.6 Consolas, "SF Mono", Menlo, monospace; white-space: pre-wrap; word-break: break-all; margin: 10px 0;
+}
+code {
+  font-family: Consolas, "SF Mono", Menlo, monospace; font-size: .92em; background: var(--kbd);
+  border-radius: 4px; padding: 0 4px; overflow-wrap: anywhere;
+}
+td, th, li, p { overflow-wrap: anywhere; }
+.cmdbox { position: relative; }
+.cmdbox button {
+  position: absolute; top: 8px; right: 8px; border: 0; border-radius: 6px; padding: 4px 10px; cursor: pointer;
+  background: var(--accent); color: #fff; font-size: 13px;
+}
+kbd {
+  background: var(--kbd); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px;
+  padding: 0 6px; font: 13px/1.6 Consolas, monospace; white-space: nowrap;
+}
+.btn { display: inline-block; border: 1px solid var(--line); border-radius: 6px; padding: 0 8px; background: var(--kbd); font-size: 14px; white-space: nowrap; }
+.btn.main { background: var(--accent); color: #fff; border-color: var(--accent); }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 15px; }
+th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+th { background: var(--bg); }
+.flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 12px 0; }
+.flow span { background: var(--leaf-soft); border: 1px solid var(--line); border-radius: 999px; padding: 2px 12px; font-size: 14px; }
+.flow i { color: var(--sub); font-style: normal; }
+.mock { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: var(--bg); font-size: 14px; }
+.mock .title { font-weight: bold; margin-bottom: 6px; }
+.mock .fake { display: inline-block; margin-top: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 2px 12px; background: var(--paper); }
+.themes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+/* 「画面の見かた」の図の A〜I */
+ol.legend { list-style: none; padding: 0; margin: 12px 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 22px; }
+ol.legend li { display: flex; gap: 10px; align-items: baseline; }
+ol.legend b.tag {
+  flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 14px;
+}
+/* まず3分で */
+.quick { border: 2px solid var(--leaf); }
+.quick h2 { border-bottom-color: var(--leaf); }
+.os { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+.os > div { border: 1px solid var(--line); border-radius: 12px; padding: 4px 16px 10px; background: var(--bg); }
+.check li { list-style: none; position: relative; padding-left: 30px; }
+.check li::before { content: "✓"; position: absolute; left: 4px; color: var(--leaf); font-weight: bold; }
+.themes figure { margin: 0; }
+details { border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px; margin: 10px 0; background: var(--bg); }
+details summary { cursor: pointer; font-weight: bold; }
+.small { font-size: 14px; color: var(--sub); }
+footer { color: var(--sub); font-size: 13px; text-align: center; padding: 20px 0 40px; }
+@media (max-width: 900px) {
+  .wrap { display: block; }
+  nav.toc { position: static; max-height: none; background: var(--paper); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-top: 16px; }
+  .two, .themes, .os, ol.legend { grid-template-columns: 1fr; }
+  pre.cmd { padding-right: 16px; padding-top: 44px; }
+  section, header.cover { padding: 20px 18px; }
+}
+@media print {
+  body { background: #fff; color: #000; font-size: 11pt; }
+  .wrap { display: block; max-width: none; }
+  nav.toc, .cmdbox button { display: none; }
+  section, header.cover { border: 0; padding: 0; margin: 0 0 18px; break-inside: auto; }
+  h2 { break-before: page; }
+  header.cover + section h2 { break-before: auto; }
+  figure { break-inside: avoid; }
+  figure img { box-shadow: none; max-height: 120mm; }
+  pre.cmd { white-space: pre-wrap; word-break: break-all; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav class="toc">
+  <b>もくじ</b>
+  <a href="#quick">まず3分で使い始める</a>
+  <a href="#about">1. このアプリでできること</a>
+  <a href="#need">2. 用意するもの</a>
+  <a href="#install">3. インストール</a>
+  <a class="sub" href="#voicevox">VOICEVOX を入れる</a>
+  <a class="sub" href="#win-oneline">Windows（おすすめ）</a>
+  <a class="sub" href="#win-zip">Windows（zip から）</a>
+  <a class="sub" href="#mac-oneline">Mac（おすすめ）</a>
+  <a class="sub" href="#mac-zip">Mac（zip から）</a>
+  <a class="sub" href="#check">動いたか確かめる</a>
+  <a class="sub" href="#update">更新・アンインストール</a>
+  <a href="#screen">4. 画面の見かた</a>
+  <a href="#basic">5. 基本の使い方</a>
+  <a href="#step1">6. ① 取り込む</a>
+  <a href="#step2">7. ② 声</a>
+  <a href="#text">8. 本文とふりがな</a>
+  <a href="#player">9. 再生バー</a>
+  <a href="#step3">10. ③ 保存</a>
+  <a href="#conn">11. 接続（VOICEVOX）</a>
+  <a href="#looks">12. 見た目と文字の大きさ</a>
+  <a href="#keys">13. ショートカットキー</a>
+  <a href="#trouble">14. 困ったとき</a>
+  <a href="#rules">15. 公開するときの決まり</a>
+</nav>
+<main>
+
+<header class="cover">
+  <h1>TextToVoicevox 説明書</h1>
+  <p class="lead">PDF・画像・画面の文字を取り出して、ずんだもんなど VOICEVOX の声で読み上げ、音声ファイルにする無料アプリです。</p>
+  <p class="meta">対象: v1.26 以降 ／ Windows 10・11、macOS ／ 作者: 落葉い（RAKUYOU211）<br>
+  このページは、ブラウザの印刷（<kbd>Ctrl</kbd>+<kbd>P</kbd>）で「PDF に保存」を選ぶと、PDF の説明書になります。</p>
+</header>
+
+<section id="quick" class="quick">
+  <h2>まず3分で使い始める</h2>
+  <p>くわしい説明は後ろの章にあります。まずはこの3つだけで動きます。</p>
+  <ol class="steps">
+    <li><b>VOICEVOX を入れる</b> … <a href="https://voicevox.hiroshiba.jp/">VOICEVOX 公式サイト</a>から落として入れます（声を作る本体です。くわしくは<a href="#voicevox">こちら</a>）。</li>
+    <li><b>アプリを入れる</b> … 自分のパソコンの方の1行をコピーして、貼り付けて実行します。
+      <div class="os">
+        <div><h4>Windows</h4><p>スタートボタンを右クリック →「ターミナル」に貼って <kbd>Enter</kbd></p>
+          <div class="cmdbox"><pre class="cmd">irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.ps1 | iex</pre><button type="button" data-copy>コピー</button></div></div>
+        <div><h4>Mac</h4><p>Launchpad →「ターミナル」に貼って <kbd>return</kbd></p>
+          <div class="cmdbox"><pre class="cmd">curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.sh | bash</pre><button type="button" data-copy>コピー</button></div></div>
+      </div>
+      <p class="small">終わるとアプリが開きます。次からは、デスクトップ（Mac は Launchpad）の「TextToVoicevox」から開きます。コマンドを使いたくないときは <a href="#win-zip">zip から入れる方法</a>もあります。</p>
+    </li>
+    <li><b>読ませる</b> … PDF や画像をアプリにドラッグ＆ドロップすると、文字が右に出ます。聞きたい行をクリックして <span class="btn main">▶ 再生</span>。</li>
+  </ol>
+</section>
+
+<section id="about">
+  <h2>1. このアプリでできること</h2>
+  <figure><img src="img/main.jpg" alt="アプリの画面。左に手順、右に本文"><figcaption>アプリの画面。左の列が手順（① 取り込む → ② 声 → ③ 保存）、右が本文と再生バー</figcaption></figure>
+  <ul>
+    <li><b>文字を取り出す</b> … PDF・画像（PNG/JPG など）・テキスト・Word（.docx）・電子書籍（.epub）から。スキャンした本や写真の文字も、パソコンの中だけで読み取ります（縦書きも読めます）。</li>
+    <li><b>画面の文字を読む</b> … 電子書籍やブラウザなど、画面に出ている文字を囲むだけで読み上げます。</li>
+    <li><b>読み上げる</b> … VOICEVOX の声（ずんだもん、四国めたん など）で、選んだ行から最後まで続けて読みます。しおり付きで、止めた所から続きを聴けます。</li>
+    <li><b>読み間違いを先に見つける</b> … 漢字の上に、VOICEVOX が実際に読む読み（ふりがな）が出ます。辞書と違う読みには色が付くので、聴く前に直せます。</li>
+    <li><b>音声ファイルにする</b> … WAV・M4A・MP3・章付きオーディオブック（M4B）と、字幕（.srt）を作れます。</li>
+  </ul>
+  <div class="note"><b>オフラインで動きます</b>文字の読み取りも音声づくりも、すべて自分のパソコンの中で行います。本文をインターネットに送ることはありません（ネットを使うのは、最初のインストールと、新しい版のお知らせを確かめるときだけです）。</div>
+  <div class="warn"><b>VOICEVOX 公式のソフトではありません</b>個人が作った非公式のツールです。VOICEVOX の開発元や各キャラクターの権利者とは関係ありません。VOICEVOX 本体はこのアプリに入っていないので、別に入れて使います。</div>
+</section>
+
+<section id="need">
+  <h2>2. 用意するもの</h2>
+  <table>
+    <tr><th>もの</th><th>なぜ要るか</th><th>どこで手に入るか</th></tr>
+    <tr><td><b>VOICEVOX</b>（無料）</td><td>声を作っている本体です。これが無いと声は出ません（文字を取り出すだけなら無くても使えます）。</td><td><a href="https://voicevox.hiroshiba.jp/">voicevox.hiroshiba.jp</a></td></tr>
+    <tr><td><b>Python</b> 3.9 以降（無料）</td><td>このアプリは Python で動いています。<b>おすすめの「1行で入れる」方法なら、自分で入れる必要はありません</b>（Windows は Python 入りの版が入り、Mac は無ければ自動で入れます）。</td><td><a href="https://www.python.org/downloads/">python.org</a>（zip から使うときだけ）</td></tr>
+  </table>
+  <p class="small">インターネット接続は、最初のインストールのときだけ要ります。</p>
+</section>
+
+<section id="install">
+  <h2>3. インストール</h2>
+  <div class="flow"><span>VOICEVOX を入れる</span><i>→</i><span>アプリを入れる（1行 または zip）</span><i>→</i><span>起動</span></div>
+  <p>アプリの入れ方は2通りあります。<b>おすすめは「1行で入れる」方法</b>です。ブラウザで落とした zip とちがって、Windows や Mac の「このファイルは危ないかも」という警告が出ず、更新も同じ1行でできます。</p>
+
+  <h3 id="voicevox">VOICEVOX を入れる（Windows・Mac 共通）</h3>
+  <ol class="steps">
+    <li><a href="https://voicevox.hiroshiba.jp/">VOICEVOX 公式サイト</a>を開き、自分のパソコン（Windows / Mac）用をダウンロードします。GPU のあるパソコンなら GPU 版がおすすめです（声を作るのが速くなります）。</li>
+    <li>落としたインストーラを開いて、画面の案内どおりに入れます。</li>
+    <li>一度 VOICEVOX を起動して、利用規約に同意しておきます。あとは閉じてかまいません。</li>
+  </ol>
+  <div class="note"><b>VOICEVOX を毎回自分で開く必要はありません</b>アプリを開くと、VOICEVOX の「読み上げの部分」（画面の無いエンジン）を自動で立ち上げ、アプリを閉じると一緒に終わります。</div>
+
+  <h3 id="win-oneline">Windows：1行で入れる（おすすめ）</h3>
+  <ol class="steps">
+    <li>スタートボタンを<b>右クリック</b>して「<b>ターミナル</b>」（または「Windows PowerShell」）を開きます。管理者として開く必要はありません。</li>
+    <li>次の1行をコピーして、ターミナルに貼り付け（右クリック または <kbd>Ctrl</kbd>+<kbd>V</kbd>）、<kbd>Enter</kbd> を押します。
+      <div class="cmdbox"><pre class="cmd">irm https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.ps1 | iex</pre><button type="button" data-copy>コピー</button></div>
+    </li>
+    <li>Python 入りの版（約 200MB）を落として、<code>%LOCALAPPDATA%\TextToVoicevox</code> に置きます。数分かかることがあります。終わるとアプリが開き、<b>デスクトップとスタートメニューに「TextToVoicevox」</b>ができます。</li>
+    <li>次からは、デスクトップの「TextToVoicevox」をダブルクリックするだけです。</li>
+  </ol>
+  <div class="tip"><b>Python を入れる必要はありません</b>この方法では Python も部品も全部入りの版が入ります。管理者のパスワードも使いません。</div>
+  <details><summary>この1行は何をしているの？（貼る前に知りたい人へ）</summary>
+    <p><code>irm</code> がこのアプリの GitHub から導入用の台本（<a href="https://github.com/rakuyou211-blip/TextToVoicevox/blob/main/install.ps1">install.ps1</a>）を取ってきて、<code>iex</code> がそれを実行します。台本がすることは次の3つだけです。中身はリンク先でいつでも読めます。</p>
+    <ul>
+      <li>配布ページから、最新版の「Python 入りの版」を落とす</li>
+      <li>自分のユーザーのフォルダ（<code>%LOCALAPPDATA%\TextToVoicevox</code>）に置く（管理者の権限は使いません）</li>
+      <li>デスクトップとスタートメニューにアイコンを作って、起動する</li>
+    </ul>
+    <p>ブラウザで落とした zip にはインターネットから来た印が付き、Windows が警告で止めます。この方法は PowerShell 自身がファイルを取ってくるので印が付かず、警告が出ません。ネットからのコマンドを貼るのが不安なときは、<a href="#win-zip">zip から入れる方法</a>を使ってください。</p>
+  </details>
+
+  <h3 id="win-zip">Windows：zip から入れる</h3>
+  <ol class="steps">
+    <li><a href="https://www.python.org/downloads/">python.org</a> から Python（3.9 以降）を入れます。<b>インストーラの最初の画面で「Add python.exe to PATH」に必ずチェック</b>を入れてから進めてください（ここが一番のつまずきどころです）。
+      <div class="mock"><div class="title">Python のインストーラの最初の画面（下のほう）</div><b>☑ Add python.exe to PATH</b> ← ここにチェックしてから<br><span class="fake">Install Now</span> を押す</div>
+    </li>
+    <li><a href="https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest">配布ページ</a>から <code>TextToVoicevox_Windows.zip</code> を落とします。</li>
+    <li>zip を<b>右クリック →「すべて展開」</b>します。zip を開いた中身のまま起動すると失敗します（Windows がファイルを1つだけ一時フォルダに取り出してしまうためです）。</li>
+    <li>展開してできたフォルダの <b>起動.pyw</b> をダブルクリックします。初回だけ黒い窓でセットアップが進みます（ネット接続が必要・数分）。終わるとそのままアプリが開きます。</li>
+    <li>1回開くと、フォルダに「<b>TextToVoicevox</b>」（アプリの絵のアイコン）ができ、起動.pyw は app フォルダの中にしまわれます。次からは「TextToVoicevox」を開きます。</li>
+  </ol>
+  <div class="warn"><b>「Windows によって PC が保護されました」と出たら</b>小さな「<b>詳細情報</b>」をクリック →「<b>実行</b>」を押します。作者が有料のコード署名をしていないだけで、中身はすべて公開しています。
+    <div class="mock" style="margin-top:8px"><div class="title">Windows によって PC が保護されました</div>Microsoft Defender SmartScreen は認識されないアプリの起動を停止しました。<br><u>詳細情報</u> ← ここを押すと <span class="fake">実行</span> が出ます</div>
+  </div>
+  <div class="warn"><b>起動.pyw を開くとメモ帳などが開く／何も起きないとき</b>Python が入っていないか、「Add python.exe to PATH」を忘れています。Python を入れ直してください。Python が入っているのにメモ帳が開くときは、起動.pyw を右クリック →「プログラムから開く」→「Python」を選びます。</div>
+
+  <h3 id="mac-oneline">Mac：1行で入れる（おすすめ）</h3>
+  <ol class="steps">
+    <li>Launchpad で「<b>ターミナル</b>」を探して開きます（Spotlight で <kbd>⌘</kbd>+<kbd>スペース</kbd> →「ターミナル」でも開けます）。</li>
+    <li>次の1行をコピーして貼り付け（<kbd>⌘</kbd>+<kbd>V</kbd>）、<kbd>return</kbd> を押します。
+      <div class="cmdbox"><pre class="cmd">curl -fsSL https://raw.githubusercontent.com/rakuyou211-blip/TextToVoicevox/main/install.sh | bash</pre><button type="button" data-copy>コピー</button></div>
+    </li>
+    <li>Python が見つからないときは「このアプリ専用の Python 3.12 を入れますか？」と聞かれるので、<kbd>return</kbd>（はい）で答えます。約20MB で、自分のユーザーの中だけに入れるので、パスワードは要りません。</li>
+    <li>終わるとアプリが開き、<b>Launchpad と Spotlight に「TextToVoicevox」</b>ができます。次からはそこから開きます。</li>
+  </ol>
+  <details><summary>この1行は何をしているの？（貼る前に知りたい人へ）</summary>
+    <p><code>curl</code> がこのアプリの GitHub から導入用の台本（<a href="https://github.com/rakuyou211-blip/TextToVoicevox/blob/main/install.sh">install.sh</a>）を取ってきて、<code>bash</code> がそれを実行します。台本がすることは次のとおりで、中身はリンク先でいつでも読めます。</p>
+    <ul>
+      <li>Python を探す（無ければ、聞いてから自分用の Python を入れる）</li>
+      <li>最新版を <code>~/Library/Application Support/TextToVoicevox</code> に置き、必要な部品を入れる</li>
+      <li><code>~/Applications</code> に「TextToVoicevox」を作って、起動する</li>
+    </ul>
+    <p>すべて自分のユーザーの中だけで行い、管理者のパスワードは使いません。ダウンロードが途中で切れても、書きかけの台本が動かないように作ってあります。</p>
+  </details>
+
+  <h3 id="mac-zip">Mac：zip から入れる</h3>
+  <ol class="steps">
+    <li><a href="https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest">配布ページ</a>から <code>TextToVoicevox_Mac.zip</code> を落とし、ダブルクリックで展開します（Mac に最初から入っている展開がおすすめです。ほかのツールは日本語のファイル名や実行の許可を壊すことがあります）。</li>
+    <li><b>起動.command はまだダブルクリックしません。</b>ブラウザで落としたファイルは、Mac が「開けません」で止めるためです。代わりに、ターミナルを開いて <code>bash</code> と打ち、半角スペースを1つ入れてから、フォルダの中の <b>setup_mac.sh</b> をターミナルの画面へドラッグして <kbd>return</kbd> を押します。</li>
+    <li>セットアップが進み、そのままアプリが開きます。2回目からは「起動.command」のダブルクリックで開けます。</li>
+  </ol>
+  <details><summary>マウスだけで通したいとき（macOS 15 Sequoia 以降）</summary>
+    <p>「"起動.command"は開いていません」が出たら、「ゴミ箱に入れる」は押さずに「完了」で閉じます。次に <b>システム設定 → プライバシーとセキュリティ</b> を下へスクロールし、「"起動.command"はブロックされました」の隣の「<b>このまま開く</b>」→「開く」を押します。macOS 14 以前は、右クリック →「開く」→「開く」でも通せます。最初の1回が通れば、残りのファイルの印は自動で外れます。</p>
+  </details>
+
+  <h3 id="check">動いたか確かめる</h3>
+  <p>アプリが開いたら、次の3つを確かめます。</p>
+  <ul class="check">
+    <li>左の列のいちばん下に <b>● 接続OK</b> と出ている（VOICEVOX とつながっています）</li>
+    <li>右の本文に何か文を打って、② の <span class="btn">▶ 試聴</span> を押すと声が鳴る</li>
+    <li>本文の漢字の上に、小さな読み（ふりがな）が出ている</li>
+  </ul>
+  <p>どれかがうまくいかないときは、<a href="#trouble">14. 困ったとき</a>を見てください。いちばん多いのは、VOICEVOX をまだ入れていない・一度も起動していない、です。</p>
+
+  <h3 id="update">更新とアンインストール</h3>
+  <h4>新しい版に更新する</h4>
+  <p>新しい版が出ると、アプリの上の帯に「<b>新しい版があります</b>」と出ます。押すと入れ替え方が出ます。</p>
+  <ul>
+    <li><b>1行で入れた人</b> … 同じ1行をもう一度貼るだけです。設定・辞書・本文の自動保存はそのまま残ります。</li>
+    <li><b>zip で入れた人</b> … 新しい zip を、今のフォルダの上に上書きで展開します。</li>
+  </ul>
+  <h4>アンインストール（消す）</h4>
+  <table>
+    <tr><th>入れ方</th><th>消すもの</th></tr>
+    <tr><td>Windows・1行</td><td><code>%LOCALAPPDATA%\TextToVoicevox</code> フォルダと、デスクトップ・スタートメニューの「TextToVoicevox」アイコン（ほかには何も残しません）</td></tr>
+    <tr><td>Mac・1行</td><td><code>~/Library/Application Support/TextToVoicevox</code> フォルダと <code>~/Applications/TextToVoicevox.app</code>（Python も入れてもらった場合は <code>~/.local/python3.12</code> も消してかまいません）</td></tr>
+    <tr><td>zip</td><td>展開したフォルダごと消すだけです</td></tr>
+  </table>
+  <p class="small">エクスプローラーのアドレス欄に <code>%LOCALAPPDATA%</code> と打つと、Windows のそのフォルダが開きます。Mac の Finder では <kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd> で場所を打てます。</p>
+</section>
+
+<section id="screen">
+  <h2>4. 画面の見かた</h2>
+  <p>画面は2列です。左の列に手順（① → ② → ③）が上から並び、右に本文と再生バーがあります。</p>
+  <figure><img src="img/screen_map.jpg" alt="画面の各部分に A から I の印を付けた図"><figcaption>画面の各部分（A〜I は下の一覧と同じ）</figcaption></figure>
+  <ol class="legend">
+    <li><b class="tag">A</b><span><b>お知らせ</b> … いま何をしているか、次に何をすればいいかが出ます</span></li>
+    <li><b class="tag">B</b><span><b>テーマ・使い方・感想を送る</b> … 色を変える／この説明書を開く／作者に感想を送る（<a href="#looks">12章</a>）</span></li>
+    <li><b class="tag">C</b><span><b>① 取り込む</b> … 読ませたいファイルや画面を入れて、文字を取り出す（<a href="#step1">6章</a>）</span></li>
+    <li><b class="tag">D</b><span><b>② 声</b> … キャラと声の種類、速さなどを選んで試聴する（<a href="#step2">7章</a>）</span></li>
+    <li><b class="tag">E</b><span><b>③ 保存</b> … 音声ファイルや字幕を作る（<a href="#step3">10章</a>）</span></li>
+    <li><b class="tag">F</b><span><b>接続</b> … VOICEVOX とつながっているか（<a href="#conn">11章</a>）</span></li>
+    <li><b class="tag">G</b><span><b>本文の道具</b> … ふりがな・誤読候補・次の候補・読み方辞書・置き換え・全消去（<a href="#text">8章</a>）</span></li>
+    <li><b class="tag">H</b><span><b>本文</b> … 取り出した文字。手で書き直せて、60秒ごとに自動で保存。漢字の上にふりがな（<a href="#text">8章</a>）</span></li>
+    <li><b class="tag">I</b><span><b>再生バー</b> … 再生・一時停止・前の行／次の行・速さ・あと何分（<a href="#player">9章</a>）</span></li>
+  </ol>
+  <h4>ボタンの色の意味</h4>
+  <p><span class="btn main">塗ったボタン</span> は大事な操作（テキスト抽出 実行・音声を生成・再生）、<span class="btn">面のあるボタン</span> はよく使う操作、枠だけのボタンはときどき使う操作です。歯車の付いた文字（<b>⚙ 設定 ▷</b> など）は、設定を開きます。赤い文字の「本文を全消去」は本文を消すボタンです（消しても「復元」で戻せます）。</p>
+</section>
+
+<section id="basic">
+  <h2>5. 基本の使い方</h2>
+  <p>基本は、<b>入れる → 取り出す → 声を選ぶ → 聞く／保存する</b> の4つです。</p>
+  <ol class="steps">
+    <li><b>入れる</b> … 読ませたい PDF や画像を、左の列の「ここに画像・PDF・フォルダをドラッグ＆ドロップ」へドラッグします（<span class="btn">ファイル追加</span> でも選べます）。空の本文に出る <span class="btn">ファイルを選ぶ…</span> からでも入れられます。</li>
+    <li><b>取り出す</b> … ファイルを入れると、自動で文字を取り出して右の本文に出します。取り出し直すときは <span class="btn main">▶ テキスト抽出 実行</span>（<kbd>Ctrl</kbd>+<kbd>Enter</kbd>）。</li>
+    <li><b>声を選ぶ</b> … ② でキャラ（ずんだもん など）と声の種類（ノーマル など）を選び、<span class="btn">▶ 試聴</span> で聞いて確かめます。</li>
+    <li><b>聞く／保存する</b> … 本文の聞きたい行をクリックして、再生バーの <span class="btn main">▶ 再生</span>。ファイルにしたいときは ③ の <span class="btn main">♪ 音声を生成</span>。</li>
+  </ol>
+  <figure><img src="img/empty.jpg" alt="まだ何も入っていない画面"><figcaption>はじめて開いたときの画面。本文が空のときは、真ん中に「ファイルを選ぶ…」が出ます</figcaption></figure>
+</section>
+
+<section id="step1">
+  <h2>6. ① 取り込む</h2>
+  <div class="two">
+    <figure><img src="img/step1.jpg" alt="① 取り込む"><figcaption>① 取り込む</figcaption></figure>
+    <div>
+      <ul>
+        <li><span class="btn">ファイル追加</span>（<kbd>Ctrl</kbd>+<kbd>O</kbd>）… ファイルを選んで入れます。PDF・PNG/JPG/BMP/TIFF/WEBP/GIF・txt・docx・epub に対応。</li>
+        <li><span class="btn">フォルダ追加</span> … フォルダの中のファイルをまとめて入れます。</li>
+        <li><span class="btn">スクリーンショット</span>（<kbd>Ctrl</kbd>+<kbd>R</kbd>）… 画面の読みたい所をドラッグで囲むと、その文字を読み上げます。</li>
+        <li><span class="btn">コピーした画像を読む</span> … クリップボードの画像（画面のコピーなど）の文字を読みます。</li>
+        <li>ファイルの一覧の右の <b>▲▼</b> で順番を変え、<b>×</b> で外します。</li>
+        <li><span class="btn main">▶ テキスト抽出 実行</span>（<kbd>Ctrl</kbd>+<kbd>Enter</kbd>）… 文字を取り出し直します。</li>
+      </ul>
+    </div>
+  </div>
+  <h3>画面の文字を読む（スクリーンショット）</h3>
+  <p>電子書籍・PDF ビューア・Web ページなど、画面に出ている文字をそのまま読ませられます。</p>
+  <ol class="steps">
+    <li><span class="btn">スクリーンショット</span> を押すと、アプリが一度隠れて、画面を撮ります（自分の窓が写り込まないように）。</li>
+    <li>読みたい所をドラッグで囲みます。囲み終わるとすぐ文字を読み取って、読み上げます。</li>
+    <li>ページをめくったら、<span class="btn">↻ 同じ範囲を読む</span>（<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>）で、囲み直さずに同じ所を読めます。「めくったら自動で読む」にチェックすると、ページが変わるたびに自動で読みます。</li>
+  </ol>
+  <div class="note"><b>Mac の人</b>最初の1回だけ、システム設定で「画面収録」の許可が要ります。案内が出たら、TextToVoicevox（またはターミナル）を許可してください。</div>
+  <h3>取り出し方の設定（設定 ▷）</h3>
+  <div class="two">
+    <figure><img src="img/opt.jpg" alt="① の設定"><figcaption>① の <b>⚙ 設定 ▷</b> を開いたところ</figcaption></figure>
+    <div>
+      <ul>
+        <li><b>改行の扱い</b> … 「文ごとに改行（VOICEVOX推奨）」か「元の改行を保持」。</li>
+        <li><b>PDF</b> … 「自動（文字の無いページは画像から読む）」か「いつも画像から読む（スキャン・文字化け）」。<b>ページ範囲</b>（例: <code>5-320</code>）で表紙や目次を飛ばせます。</li>
+        <li><b>文の整え方</b>（チェックで切り替え）
+          <ul>
+            <li>画像を見やすくしてから読む</li>
+            <li>空行を削除</li>
+            <li>PDF のページの見出しと番号を読まない（本の名前やページ番号が毎ページ読まれないように）</li>
+            <li>英数字間の空白を保持</li>
+            <li>折り返し連結（1段組みの本文向け）</li>
+            <li>画面キャプチャのノイズを除去（ニュース画面の時計やロゴなど）</li>
+            <li>読み取りの間違いを直す（カ⇔力、ー⇔一 などの見まちがい）</li>
+          </ul>
+        </li>
+      </ul>
+      <p class="small">取り除いた行（ページ番号など）は、本文の上の「直した所」で確かめられます。</p>
+    </div>
+  </div>
+  <div class="tip"><b>画像の文字の読み取り（Windows）</b>最初のセットアップで、強い読み取りの部品が自動で入ります。ゲームや写真の上の文字、小さな文字、英語まじりの文、縦書き（右の列から）も読めます。入らなかったときは Windows に最初から入っている読み取りを使い、① の設定に「読み取りを強くする」が出ます。Mac は Apple Vision で読み取ります。</div>
+</section>
+
+<section id="step2">
+  <h2>7. ② 声</h2>
+  <div class="two">
+    <figure><img src="img/step2.jpg" alt="② 声"><figcaption>② 声</figcaption></figure>
+    <div>
+      <ul>
+        <li><b>キャラ</b>と<b>スタイル</b>（ノーマル・あまあま など）を選びます。左のキャラの顔を押すと、その声のサンプルが鳴ります。</li>
+        <li><b>速さ・高さ・抑揚・音量</b> … 1.0 が標準です。</li>
+        <li><span class="btn">♪ 声を聴く</span> … 選んだ声の公式サンプルを聞きます。</li>
+        <li><span class="btn">▶ 試聴</span>（<kbd>Ctrl</kbd>+<kbd>P</kbd>）… カーソルのある行を、今の設定で読ませます。読みのカナも出るので、読み間違いに気づけます。</li>
+      </ul>
+    </div>
+  </div>
+  <h3>お気に入り・セリフ ▷</h3>
+  <div class="two">
+    <figure><img src="img/voice.jpg" alt="お気に入り・セリフ"><figcaption>「お気に入り・セリフ ▷」を開いたところ</figcaption></figure>
+    <div>
+      <ul>
+        <li><b>お気に入り</b> … 今の声と速さなどに名前を付けて <span class="btn">保存</span>。次から選ぶだけで戻せます。</li>
+        <li><b>セリフ（「」で始まる行）は別の声</b> … チェックすると、会話の行だけ別の声で読みます。小説の地の文とセリフを分けたいときに。</li>
+      </ul>
+    </div>
+  </div>
+  <h3>行ごとに声を変える・読まない行を作る</h3>
+  <table>
+    <tr><th>本文での書き方</th><th>はたらき</th></tr>
+    <tr><td><code>@ずんだもん:こんにちは</code></td><td>行の頭に <code>@キャラ名:</code> と書くと、その行だけその声で読みます（掛け合いに）。<code>@四国めたん（あまあま）:</code> のようにスタイルも指定できます（スタイルを省くと、そのキャラの最初のスタイル）。名前が見つからない行があると、音声を作る前に知らせます。</td></tr>
+    <tr><td><code># メモ</code></td><td>行の頭に <code>#</code> を付けた行は読みません（台本のメモ用）。保存する音声にも入りません。</td></tr>
+  </table>
+  <p class="small">本文を右クリックすると、「この行を試聴」「選択語を辞書登録」、その行に <code>@名前:</code> を付ける、<code>#</code> でメモにする、などの近道が出ます。</p>
+</section>
+
+<section id="text">
+  <h2>8. 本文とふりがな</h2>
+  <figure><img src="img/text.jpg" alt="本文とふりがな"><figcaption>本文。漢字の上の小さな文字が、VOICEVOX が実際に読む読み。「東雲駅」が「アズモエキ」と色付きで出ている（正しくは「しののめえき」）</figcaption></figure>
+  <h3>ふりがな（読みの確認）</h3>
+  <ul>
+    <li>漢字の上に、<b>VOICEVOX が実際に読む読み</b>が出ます。辞書どおりの読みはひらがな、<b>辞書と違う読みは色付きのカタカナ</b>（読み間違いかもしれない所）です。</li>
+    <li><b>色付きのふりがなを押す</b>と、その言葉が入った状態で「読み方辞書」が開きます。正しい読みを入れて登録すれば直ります。</li>
+    <li><b>誤読候補だけ</b> にチェックすると、色付きの所だけを出します。</li>
+    <li><span class="btn">次の候補 ▷</span>（<kbd>F8</kbd>。前へは <kbd>Shift</kbd>+<kbd>F8</kbd>）… 次の「読み間違いかも」の所へ移ります。長い本でも候補だけを順に見られます。</li>
+    <li>ふりがなは <b>VOICEVOX につながっているときだけ</b>出ます。つながっていないときは本文のすぐ上にそう出るので、となりの <span class="btn">画面なしで起動</span> を押します。</li>
+  </ul>
+  <h3>読み方辞書</h3>
+  <figure><img src="img/dict.jpg" alt="読み方辞書"><figcaption>読み方辞書（VOICEVOX のユーザー辞書）。下の「単語」「読み」を入れて「登録する」</figcaption></figure>
+  <ul>
+    <li><b>単語</b>と<b>読み</b>（ひらがなでも OK）を入れて <span class="btn">登録する</span>。<span class="btn">▶ 読みを試聴</span> で確かめられます。</li>
+    <li>登録した読みは VOICEVOX 全体で使われます（VOICEVOX のエディタでも同じ辞書が効きます）。</li>
+    <li><b>数字・日付・記号の読み方を直す</b>（おすすめ・最初からオン）… <code>25℃</code> → 25度、<code>10:30</code> → 10時30分、<code>2026/11/13 18:07</code> → 2026年11月13日 18時7分、<code>1,234 KB</code> → キロバイト のように、VOICEVOX が読み間違えやすい形を、読む前に直します（本文の字は変わりません）。</li>
+    <li>本文の言葉を選んで右クリック →「選択語を辞書登録」でも登録できます。</li>
+  </ul>
+  <h3>置き換え ▷・検索</h3>
+  <figure><img src="img/replace.jpg" alt="置き換え"><figcaption>置き換え ▷ を開いたところ</figcaption></figure>
+  <ul>
+    <li><b>置き換え</b> … 本文の言葉をまとめて置き換えます。よく使う置き換えは「登録した置き換え」に入れておけます（読み取りの決まった間違いを直すのに便利）。</li>
+    <li><b>検索</b>（<kbd>Ctrl</kbd>+<kbd>F</kbd>）… 本文の中の言葉を探します。</li>
+    <li><span class="btn">本文を全消去</span> … 本文を消します。消したあとは同じ所が「復元」になり、押すと戻せます（<kbd>Ctrl</kbd>+<kbd>Z</kbd> でも戻せます）。</li>
+  </ul>
+  <div class="note"><b>本文は自動で保存されます</b>60秒ごとに保存しているので、アプリを閉じても、次に開いたときに本文が戻ります。</div>
+</section>
+
+<section id="player">
+  <h2>9. 再生バー</h2>
+  <figure><img src="img/player.jpg" alt="再生バー"><figcaption>本文の下の再生バー</figcaption></figure>
+  <table>
+    <tr><th>ボタン</th><th>はたらき</th></tr>
+    <tr><td><span class="btn main">▶ 再生</span></td><td>カーソルのある行から最後まで続けて読みます。読んでいる行は色が付き、本文の上から3分の1あたりに保たれます。</td></tr>
+    <tr><td><span class="btn">‖ 一時停止</span>（<kbd>Space</kbd>）</td><td>止めて、もう一度押すと続きから読みます（Windows は止めた所から、Mac は同じ行の頭から）。</td></tr>
+    <tr><td><span class="btn">◁ 前の行</span>・<span class="btn">次の行 ▷</span></td><td>1行ずつ戻る・進む。再生中なら、そこから読み直します。</td></tr>
+    <tr><td><span class="btn">■ 停止</span>（<kbd>Esc</kbd>）</td><td>止めます。次に ▶ 再生 を押すと、止めた行から続けられます（しおり）。</td></tr>
+    <tr><td><span class="btn">« 最初から</span></td><td>本文の最初から読みます。</td></tr>
+    <tr><td><b>速さ・文の間</b></td><td>その場で変えられます（② の速さ、③ の文の間と同じ値です）。</td></tr>
+    <tr><td><b>何行目・あと約◯分</b></td><td>右端に、いま何行目かと、終わるまでのおよその時間が出ます。</td></tr>
+    <tr><td><span class="btn">◁ 広げる</span>（<kbd>F11</kbd>）</td><td>左の列を畳んで、本文を窓いっぱいに広げます（読書モード）。<span class="btn">▷ 戻す</span>、または何も鳴っていないときの <kbd>Esc</kbd> で戻ります。</td></tr>
+  </table>
+  <div class="two">
+    <figure><img src="img/playing.jpg" alt="再生中"><figcaption>再生中。読んでいる行に色が付く</figcaption></figure>
+    <figure><img src="img/reading.jpg" alt="読書モード"><figcaption>◁ 広げる で、本文を窓いっぱいに</figcaption></figure>
+  </div>
+  <p class="small">窓が狭いときは、再生バーのボタンが記号だけ（◁ ▷ «）になったり、2行・3行に分かれたりします。ボタンに矢印を合わせると説明が出ます。</p>
+</section>
+
+<section id="step3">
+  <h2>10. ③ 保存</h2>
+  <div class="two">
+    <figure><img src="img/step3.jpg" alt="③ 保存"><figcaption>③ 保存</figcaption></figure>
+    <div>
+      <ul>
+        <li><b>音声形式</b> … WAV・M4A・MP3・M4B(本) から選びます（下の表）。</li>
+        <li><b>字幕(.srt)も保存</b> … 音声に合わせた字幕ファイルも作ります。</li>
+        <li><b>まとめ方</b> … 「全部を1つに」（最初の設定）・「1行=1ファイル」・「行数ごと」・「段落ごと」。300個を超えるファイルになるときは、作る前に聞きます。</li>
+        <li><b>文の間</b> … 文と文のあいだの無音（秒）。</li>
+        <li><b>段落・章は長め</b> … 段落の変わり目は文の間の2.5倍、「第一章」などの章の前は5倍あけます（0.4秒なら 1.0秒・2.0秒）。</li>
+        <li><span class="btn main">♪ 音声を生成</span>（<kbd>Ctrl</kbd>+<kbd>G</kbd>）… 保存する場所を選ぶと作り始めます。長い文は並べて作るので速く終わります。途中で <kbd>Esc</kbd> で止めて、そこまでの分を保存することもできます。</li>
+      </ul>
+    </div>
+  </div>
+  <table>
+    <tr><th>形式</th><th>向いている使い方</th><th>ほかに要るもの</th></tr>
+    <tr><td>WAV</td><td>いちばん確実。動画編集にそのまま使える</td><td>なし</td></tr>
+    <tr><td>M4A / MP3</td><td>スマホで聞く・容量を小さくしたい</td><td>なし（Mac の MP3 だけ ffmpeg が要ります）</td></tr>
+    <tr><td>M4B(本)</td><td>章つきのオーディオブック（「第◯章」で自動で区切る。Apple Books などで聞ける）</td><td>なし</td></tr>
+    <tr><td>.srt</td><td>音声に合わせた字幕</td><td>なし</td></tr>
+  </table>
+  <p>作り終わると完了の画面が出ます。<span class="btn">フォルダを開く</span> で保存先を開き、<span class="btn">📋 クレジットをコピー</span> で「VOICEVOX:ずんだもん」のような表記をコピーできます。</p>
+  <h3>VOICEVOX で仕上げる ▷</h3>
+  <div class="two">
+    <figure><img src="img/finish.jpg" alt="VOICEVOX で仕上げる"><figcaption>「VOICEVOXで仕上げる ▷」を開いたところ</figcaption></figure>
+    <div>
+      <p>VOICEVOX のエディタで、抑揚などを細かく直したいときに使います。</p>
+      <ul>
+        <li><span class="btn">VOICEVOX用に保存(.txt)</span> … VOICEVOX のエディタに読み込めるテキスト。</li>
+        <li><span class="btn">本文をコピー</span> … 本文をクリップボードへ。</li>
+        <li><span class="btn">プロジェクト保存(.vvproj)</span> … VOICEVOX のプロジェクトとして保存します（「調整値も入れる」で、速さなどの設定も一緒に）。</li>
+      </ul>
+    </div>
+  </div>
+  <h3>声の保管…</h3>
+  <figure><img src="img/cache.jpg" alt="声の保管"><figcaption>③ の右上の「声の保管…」</figcaption></figure>
+  <p>一度作った声（同じ行・同じ声）をしまっておき、作り直しや連続再生を速くしています。消しても大丈夫です（要るときにまた作られます）。長い本を何度も作るなら、上限を大きくすると効き目が上がります。</p>
+</section>
+
+<section id="conn">
+  <h2>11. 接続（VOICEVOX）</h2>
+  <div class="two">
+    <figure><img src="img/conn.jpg" alt="接続設定"><figcaption>左下の「接続設定…」を開いたところ</figcaption></figure>
+    <div>
+      <ul>
+        <li><b>● 接続OK</b> と出ていれば、VOICEVOX とつながっています。</li>
+        <li><span class="btn">VOICEVOX起動</span> … VOICEVOX をエディタの画面ごと開きます。</li>
+        <li><span class="btn">画面なしで起動</span> … 読み上げの部分だけを、画面を出さずに起動します（軽い）。</li>
+        <li><b>URL</b> … ふつうは <code>http://127.0.0.1:50021</code> のままで大丈夫です。</li>
+        <li><b>アプリと一緒に VOICEVOX を起動</b> … アプリを開くと自動で立ち上げます（最初からオン）。</li>
+        <li><b>GPU があれば使う</b> … GPU 版の VOICEVOX なら、声を速く作れます。</li>
+        <li><b>新しい版が出たら知らせる</b> … 新しい版を確かめるときだけネットを使います。</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="looks">
+  <h2>12. 見た目と文字の大きさ</h2>
+  <p>上の帯の <b>テーマ</b> で、色を選べます。</p>
+  <div class="themes">
+    <figure><img src="img/theme_light.jpg" alt="ライト"><figcaption>ライト</figcaption></figure>
+    <figure><img src="img/theme_dark.jpg" alt="ダーク"><figcaption>ダーク</figcaption></figure>
+    <figure><img src="img/theme_zunda.jpg" alt="ずんだ"><figcaption>ずんだ</figcaption></figure>
+    <figure><img src="img/theme_hc.jpg" alt="くっきり"><figcaption>くっきり（見やすさ重視）</figcaption></figure>
+  </div>
+  <ul>
+    <li>本文の文字は、窓を広げると大きくなります（狭い窓では小さくしません）。</li>
+    <li>好みの大きさは <kbd>Ctrl</kbd>+<kbd>＋</kbd>／<kbd>－</kbd>（<kbd>Ctrl</kbd>+ホイールでも）、元に戻すのは <kbd>Ctrl</kbd>+<kbd>0</kbd>。</li>
+    <li>本文の右クリック →「文字の大きさ」で、窓に合わせて大きくするかを切り替えられます。</li>
+  </ul>
+</section>
+
+<section id="keys">
+  <h2>13. ショートカットキー</h2>
+  <p class="small">Mac は <kbd>Ctrl</kbd> の代わりに <kbd>⌘</kbd> を使います。</p>
+  <table>
+    <tr><th>キー</th><th>はたらき</th></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>ファイル追加</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td><td>テキスト抽出 実行</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>スクリーンショット（画面の文字を読む）</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></td><td>同じ範囲を読む</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>試聴（カーソルのある行）</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>G</kbd></td><td>音声を生成</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>VOICEVOX 用に保存（.txt）</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>本文を検索</td></tr>
+    <tr><td><kbd>Space</kbd></td><td>再生中：一時停止・再開</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>再生や処理を止める／読書モードを戻す</td></tr>
+    <tr><td><kbd>F8</kbd>／<kbd>Shift</kbd>+<kbd>F8</kbd></td><td>次の／前の 読み間違いの候補へ</td></tr>
+    <tr><td><kbd>F11</kbd></td><td>本文を広げる（読書モード）／戻す</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>＋</kbd>／<kbd>－</kbd>／<kbd>0</kbd></td><td>本文の文字を大きく／小さく／元に</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd>／<kbd>Ctrl</kbd>+<kbd>Y</kbd></td><td>本文の編集を戻す／やり直す</td></tr>
+  </table>
+</section>
+
+<section id="trouble">
+  <h2>14. 困ったとき</h2>
+  <details open><summary>「VOICEVOX: つながっていません」と出る</summary>
+    <p>VOICEVOX が動いていません。ふつうはアプリを開くと自動で立ち上がります。立ち上がらないときは、左下の <span class="btn">VOICEVOX起動</span> か <span class="btn">画面なしで起動</span> を押します。毎回そうなるときは、左下の「接続設定…」の <b>アプリと一緒に VOICEVOX を起動</b> がオンか確かめてください。VOICEVOX をまだ入れていないときは、<a href="#voicevox">VOICEVOX を入れる</a> から。</p>
+  </details>
+  <details><summary>ふりがなが出ない</summary>
+    <p>ふりがなは VOICEVOX につながっているときだけ出ます。つながると自動で出ます。窓が狭いときは、「ふりがな」のチェックが本文の下にあります。</p>
+  </details>
+  <details><summary>起動.pyw を開いても何も起きない／メモ帳が開く（Windows・zip）</summary>
+    <p>Python が入っていないか、「Add python.exe to PATH」のチェックを忘れています。Python を入れ直すか、<a href="#win-oneline">1行で入れる方法</a>を使ってください（Python が要りません）。Python があるのにメモ帳が開くときは、右クリック →「プログラムから開く」→「Python」。</p>
+  </details>
+  <details><summary>「Windows によって PC が保護されました」と出る</summary>
+    <p>「詳細情報」→「実行」で開けます。<a href="#win-oneline">1行で入れる方法</a>なら、この警告は出ません。</p>
+  </details>
+  <details><summary>Mac で「"起動.command"は開いていません」と出る</summary>
+    <p>「ゴミ箱に入れる」は押さずに「完了」で閉じ、<a href="#mac-zip">Mac：zip から入れる</a> の方法（ターミナルで setup_mac.sh）か、<a href="#mac-oneline">1行で入れる方法</a>を使ってください。</p>
+  </details>
+  <details><summary>読み間違いが多い</summary>
+    <p>色付きのふりがなを押して、読み方辞書に正しい読みを登録します。<span class="btn">次の候補 ▷</span>（<kbd>F8</kbd>）で候補を順に見られます。数字や日付は「数字・日付・記号の読み方を直す」がオンか確かめてください。</p>
+  </details>
+  <details><summary>画像の文字がうまく読めない</summary>
+    <p>① の設定の「画像を見やすくしてから読む」「読み取りの間違いを直す」を試してください。Windows で「読み取りを強くする」が出ているときは、押して強い読み取りの部品を入れると、ずっと正しく読めるようになります。読み取りの決まった間違いは「置き換え」に登録しておくと、次から自動で直ります。</p>
+  </details>
+  <details><summary>アプリが開かない・途中で止まる（原因を調べたい）</summary>
+    <p><b>デバッグ起動.pyw</b>（Windows の zip では app フォルダの中。Mac は「デバッグ起動.command」）で起動すると、黒い画面にエラーの内容が出ます。記録は「起動エラー.log」（起動に失敗したとき）と「エラー.log」（開いたあとに失敗したとき）に残ります。</p>
+    <p>部品を入れ直したいときは、Windows は app フォルダの中の「venv」フォルダを消してから起動します（Mac は「setup.command」）。1行で入れた人は、同じ1行をもう一度貼ります。</p>
+  </details>
+  <details><summary>それでも困ったら</summary>
+    <p><a href="https://github.com/rakuyou211-blip/TextToVoicevox/issues">GitHub の Issues</a> か、アプリの上の「感想を送る」、X（<a href="https://x.com/rakuyou211">@rakuyou211</a>）で教えてください。ちゃんと読みます。</p>
+  </details>
+</section>
+
+<section id="rules">
+  <h2>15. 公開するときの決まり</h2>
+  <ul>
+    <li>作った音声を動画などで公開するときは、<b>VOICEVOX と各キャラクターの利用規約</b>に従い、「<b>VOICEVOX:ずんだもん</b>」のようなクレジットを付けてください。完了の画面の <span class="btn">クレジットをコピー</span> で、使った声のぶんをまとめてコピーできます。</li>
+    <li>キャラクターごとに決まりが違います（商用の可否など）。使う前に、<a href="https://voicevox.hiroshiba.jp/">VOICEVOX 公式サイト</a>の各キャラクターのページを確かめてください。</li>
+    <li>立ち絵（キャラのイラスト）はアプリに入っていません。表示したいときは、app フォルダの <code>assets/立ち絵/README.md</code> の案内に従って、自分で置きます（無くても全部の機能が使えます）。</li>
+    <li>このアプリ自体は MIT ライセンスです。ソースはすべて <a href="https://github.com/rakuyou211-blip/TextToVoicevox">GitHub</a> で公開しています。</li>
+  </ul>
+</section>
+
+<footer>TextToVoicevox 説明書 ・ 落葉い 🍂 ・ <a href="https://github.com/rakuyou211-blip/TextToVoicevox">github.com/rakuyou211-blip/TextToVoicevox</a></footer>
+</main>
+</div>
+<script>
+document.querySelectorAll("[data-copy]").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var t = b.parentNode.querySelector("pre").innerText;
+    var done = function () { b.textContent = "コピーしました"; setTimeout(function () { b.textContent = "コピー"; }, 1600); };
+    if (navigator.clipboard) { navigator.clipboard.writeText(t).then(done, done); } else { done(); }
+  });
+});
+</script>
+</body>
+</html>

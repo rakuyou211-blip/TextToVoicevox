@@ -29,7 +29,8 @@ import winlaunch  # noqa: E402  （app フォルダの名前と、いちばん�
 NAMES = {"windows": "TextToVoicevox_Windows.zip", "mac": "TextToVoicevox_Mac.zip"}
 
 # どちらにも入れないもの
-_SKIP_DIRS = ("tests/", "tools/", ".github/", ".claude/", "launcher/")
+# docs/manual/ は説明書の元原稿と画像（配る 説明書.html に埋め込み済み）
+_SKIP_DIRS = ("tests/", "tools/", ".github/", ".claude/", "launcher/", "docs/manual/")
 _SKIP_FILES = {".gitattributes", ".gitignore", "install.ps1", "install.sh"}
 
 
