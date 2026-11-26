@@ -338,6 +338,16 @@ jobs:
           pip install pillow
           powershell -NoProfile -ExecutionPolicy Bypass -File launcher\build.ps1 -Out "$env:RUNNER_TEMP\TextToVoicevox.exe"
 
+      # SignPath checks the product name and version in the file's properties when it signs
+      - name: The exe names its product and version
+        shell: powershell
+        run: |
+          $v = (Get-Item (Join-Path $env:RUNNER_TEMP 'TextToVoicevox.exe')).VersionInfo
+          $app = (Select-String -LiteralPath core.py -Pattern '^APP_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          Write-Host "$($v.ProductName) $($v.ProductVersion) (file $($v.FileVersion))"
+          if ($v.ProductName -ne 'TextToVoicevox') { throw "ProductName: $($v.ProductName)" }
+          if ($v.ProductVersion -ne $app) { throw "ProductVersion $($v.ProductVersion) is not APP_VERSION $app" }
+
       - name: The exe removes the download mark and runs the launcher .bat
         shell: powershell
         run: |
