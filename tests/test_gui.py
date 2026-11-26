@@ -2471,16 +2471,19 @@ def test_dark_title_bar_waits_for_the_frame_window(app):
         win.destroy()
 
 
-def test_conn_text_wraps_as_if_side_scrollbar_were_hidden(app):
+def test_conn_text_wraps_as_if_side_scrollbar_were_hidden(app, monkeypatch):
     """接続の状態の文は、左の列のスクロールバーの分を引いた幅で折り返す。スクロール
     バーで列が広がった分だけ折り返しが減ると、接続欄が低くなってスクロールバーが消え、
-    また出る…を繰り返し、窓の高さによっては画面が並び直し続けて固まった。"""
+    また出る…を繰り返し、窓の高さによっては画面が並び直し続けて固まった。
+    スクロールバーはアプリ自身が窓の高さに合わせて出し入れする（Mac では、隠した直後に
+    並び直しが走って、また出ることがあった）ので、出ている・いないはここで決めて確かめる。"""
     import types
     sb, lbl = app._steps_sb, app.engine_lbl
-    sb.pack_forget()
+    monkeypatch.setattr(sb, "winfo_manager", lambda: "")
     app._wrap_engine_lbl(types.SimpleNamespace(width=300))
     alone = lbl.winfo_pixels(lbl.cget("wraplength"))
-    sb.pack(side="right", fill="y", before=app._steps_view)
+    assert alone == 300
+    monkeypatch.setattr(sb, "winfo_manager", lambda: "pack")
     app._wrap_engine_lbl(types.SimpleNamespace(width=300 + sb.winfo_reqwidth()))
     assert lbl.winfo_pixels(lbl.cget("wraplength")) == alone
 
