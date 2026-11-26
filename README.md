@@ -7,6 +7,8 @@
 
 🌐 **[English README](README.en.md)** ｜ 日本語（このページ） ｜ **[繁體中文](README.zh-TW.md)** ｜ **[简体中文](README.zh-CN.md)**
 
+📖 **[説明書（入れ方・画面の見かた・困ったとき。画像つき）](https://rakuyou211-blip.github.io/TextToVoicevox/manual/)** ・ [PDF 版](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Manual_ja.pdf)（zip の中の「説明書.html」と同じ内容です）
+
 📝 記事にも書きました
 - 制作の背景・仕組み → [本を、耳で読めるようにしたかった（Zenn）](https://zenn.dev/izumimakoto/articles/d5e86968b7bdc3)
 - 「スクリーンショット」で読む仕組み（以前の名前は「画面から読む」） → [Python＋macOSのVisionで「画面の囲んだ所」をオフラインOCRして、VOICEVOXで読み上げる（Qiita）](https://qiita.com/rakuyou211/items/1648fa61d0cef975e260)
@@ -62,7 +64,7 @@ Python が無ければ入れるかを聞き（パスワード不要）、アプ�
 - **Mac の人は、zip ではなく、上の「Mac の人」のターミナルの1行を使ってください**（警告が出ません）。
   zip が欲しい人は → [Mac 用 zip](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip)（`TextToVoicevox_Mac.zip`）。ただし、ブラウザで落とした zip の中身を**ダブルクリックすると、Mac が必ず「開いていません」と止めます**（Apple の有料の審査を受けていないアプリには、どれも出ます）。zip で入れるときは、下の「zip で入れる」の Mac の手順どおり、ダブルクリックではなくターミナルから始めてください。そうすれば出ません
 
-どちらも最新版（いまは **v1.26.1**・約1MB）です。自分の OS の方だけ落とせば大丈夫です（v1.22.0 から分けました。ほかの版は [Releases](https://github.com/rakuyou211-blip/TextToVoicevox/releases) から）。
+どちらも最新版（いまは **v1.26.2**・約1MB）です。自分の OS の方だけ落とせば大丈夫です（v1.22.0 から分けました。ほかの版は [Releases](https://github.com/rakuyou211-blip/TextToVoicevox/releases) から）。
 zip の中身は Python のスクリプト一式です。EXE（ダブルクリックですぐ動く形）はまだありません。下の手順のとおり、Python を入れてから使ってください（Windows で Python を入れたくない人は、上の1行を使ってください。Python 入りの版が入ります）。
 Windows の zip で最初にダブルクリックするのは **`起動.pyw` の1つだけ**です。v1.23 までは `起動.bat` も並んでいて、拡張子を隠す Windows ではどちらも「起動」に見え、`.bat` の方を開くと止められていました。いまは `.bat` を無くしたので、迷う所がありません（下の「はじめての人へ」参照）。1回開くと、同じフォルダにアプリの絵のショートカット「TextToVoicevox」ができます。`起動.pyw` の絵は Windows がファイルの種類で決めるので、Python の絵のまま変えられず、分かりにくいためです。中身は `起動.pyw` を開くのと同じで、フォルダごと動かしても開けます。そのとき `起動.pyw` は `app` フォルダの中へしまうので、いちばん上には「TextToVoicevox」と説明だけが残ります（ショートカットを消してしまったときは、`app` の中の `起動.pyw` を開けば作り直します）。
 

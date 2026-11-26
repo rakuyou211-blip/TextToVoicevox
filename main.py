@@ -79,7 +79,7 @@ class _EitherEvent:
 
 # 開いたときに見えるいちばん上にある物（winlaunch.TOP_FILES とショートカット）。起動.pyw は
 # 1回開いたあと app の中にしまうので、ほかの物でも見分ける
-_TOP_MARKERS = ("起動.pyw", "TextToVoicevox.lnk", "はじめにお読みください.txt",
+_TOP_MARKERS = ("起動.pyw", "TextToVoicevox.lnk", "はじめにお読みください.txt", "説明書.html",
                 "How to use (日本語).html", "How to use (English).html")
 
 
@@ -1037,12 +1037,13 @@ class App(tk.Tk):
         fb.bind("<Button-1>", lambda e: self._open_feedback())
         _Tooltip(fb, "使ってみた一言を送れます（ブラウザで感想フォームが開きます"
                      + ("。アカウントは要りません）。" if FEEDBACK_FORM_URL else "）。"))
-        # 使い方の案内（How to use）。パソコンの表示言語に合わせた版を開く（_open_guide）
+        # 説明書（日本語）か使い方の案内（How to use）。パソコンの表示言語で選ぶ（_open_guide）
         guide = ttk.Label(head, text="使い方", style="GroundLink.TLabel", cursor="hand2")
         guide.pack(side="right", padx=(_px(14), 0))
         guide.bind("<Button-1>", lambda e: self._open_guide())
-        _Tooltip(guide, "使い方の案内（How to use）をブラウザで開きます。\n"
-                        "ページの上で、日本語・English・繁體中文・简体中文を切り替えられます。")
+        _Tooltip(guide, "説明書をブラウザで開きます（入れ方・画面の見かた・困ったとき）。\n"
+                        "日本語以外のパソコンでは、使い方の案内（How to use）を開きます\n"
+                        "（English・繁體中文・简体中文）。")
         self._guide_lbl = guide
         # 新しい版のお知らせ（出ているときだけ、使い方の左に見せる。_show_update）
         self._update_lbl = ttk.Label(head, text="新しい版があります", style="GroundLink.TLabel",
@@ -3013,6 +3014,8 @@ class App(tk.Tk):
     # 使い方の案内（アプリのフォルダにある How to use の4つ）
     _GUIDES = {"ja": "How to use (日本語).html", "en": "How to use (English).html",
                "zh-TW": "How to use (繁體中文).html", "zh-CN": "How to use (简体中文).html"}
+    # 説明書（画面の画像入りの、くわしい版。今は日本語だけ）。日本語なら、案内よりこちらを開く
+    _MANUALS = {"ja": "説明書.html"}
     _GUIDE_FALLBACK = "https://github.com/rakuyou211-blip/TextToVoicevox#readme"
 
     @staticmethod
@@ -3051,21 +3054,29 @@ class App(tk.Tk):
         return self._guide_code(tag)
 
     def _open_guide(self):
-        """使い方の案内（How to use）をブラウザで開く。パソコンの言語の版が無ければ
-        日本語の版、それも無ければ GitHub の説明（README）を開く。"""
+        """説明書か使い方の案内（How to use）をブラウザで開く。パソコンの言語の説明書が
+        あればそれ、無ければその言語の案内、それも無ければ日本語の説明書・案内、
+        どれも無ければ GitHub の説明（README）を開く。"""
         import webbrowser
         from pathlib import Path
         target = self._GUIDE_FALLBACK
-        # 案内は 起動.pyw の隣（zip の並びでは app の1つ上）にある。前の版の並びも見る
-        places = [os.path.join(folder, self._GUIDES[code])
-                  for code in (self._guide_lang(), "ja") for folder in (_top_dir(), APP_DIR)]
-        for p in places:
+        is_manual = False
+        # 説明書と案内は 起動.pyw の隣（zip の並びでは app の1つ上）にある。前の版の並びも見る
+        names = []
+        for code in (self._guide_lang(), "ja"):
+            names += [(self._MANUALS[code], True)] if code in self._MANUALS else []
+            names.append((self._GUIDES[code], False))
+        places = [(os.path.join(folder, name), manual)
+                  for name, manual in names for folder in (_top_dir(), APP_DIR)]
+        for p, manual in places:
             if os.path.exists(p):
-                target = Path(p).as_uri()
+                target, is_manual = Path(p).as_uri(), manual
                 break
         try:
             webbrowser.open(target)
-            self.status_var.set("使い方の案内をブラウザで開いたよ"
+            self.status_var.set("説明書をブラウザで開いたよ（左の目次から読みたい所へ飛べます）"
+                                if is_manual else
+                                "使い方の案内をブラウザで開いたよ"
                                 "（ページの上で言語を切り替えられます）")
         except Exception:
             self.status_var.set("ブラウザを開けませんでした：" + target)

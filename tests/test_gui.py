@@ -2375,6 +2375,26 @@ def test_open_guide_picks_language_then_falls_back(app, monkeypatch, tmp_path):
     assert "English" in opened[-1]
 
 
+def test_open_guide_prefers_the_manual_in_japanese(app, monkeypatch, tmp_path):
+    """日本語のパソコンでは、画像入りの説明書（説明書.html）を案内より先に開く。
+    英語のパソコンでは、英語の案内があればそちら（日本語の説明書は開かない）。"""
+    import webbrowser
+    import main as main_mod
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", lambda url, *a, **k: opened.append(url))
+    monkeypatch.setattr(main_mod, "APP_DIR", str(tmp_path))
+    for name in ("How to use (日本語).html", "How to use (English).html", "説明書.html"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    monkeypatch.setattr(app, "_guide_lang", lambda: "ja")
+    app._open_guide()
+    assert opened[-1].startswith("file:") and "%E8%AA%AC%E6%98%8E%E6%9B%B8" in opened[-1]   # 説明書
+    assert "説明書" in app.status_var.get()
+    monkeypatch.setattr(app, "_guide_lang", lambda: "en")
+    app._open_guide()
+    assert "English" in opened[-1]
+    assert "案内" in app.status_var.get()
+
+
 def test_open_guide_finds_it_above_the_app_folder(app, monkeypatch, tmp_path):
     """Windows の zip では、案内は 起動.pyw の隣（app フォルダの1つ上）にある。
     エラーの記録などの言い方も「app の中の」になる。"""
