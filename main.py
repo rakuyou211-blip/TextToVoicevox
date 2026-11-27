@@ -4054,8 +4054,13 @@ class App(tk.Tk):
         return 0
 
     def _enable_drop(self, widget):
-        """ウィジェットをファイルのドロップ先として登録する（tkinterdnd2が無ければ無視）。"""
+        """ウィジェットをファイルのドロップ先として登録する（tkinterdnd2が無ければ無視）。
+        メニュー（右クリックの一覧など）は登録しない。Tk ではメニューもそれ自体が窓で、
+        macOS ではドロップ先に登録しただけで、中身の無い黒い窓（題名「!menu」）として
+        画面に出てしまう（v1.26 で登録を窓が出たあとに回してから、起動のたびに出ていた）"""
         if not (_HAS_DND and self._dnd_ready):
+            return
+        if widget.winfo_class() == "Menu":
             return
         try:
             widget.drop_target_register(DND_FILES)

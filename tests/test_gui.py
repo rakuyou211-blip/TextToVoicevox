@@ -2513,6 +2513,29 @@ def test_drop_targets_are_set_up_after_the_window_shows(app, monkeypatch):
     assert "ファイル追加" in app._list_hint.cget("text")
 
 
+def test_menus_are_not_drop_targets(app):
+    """メニュー（右クリックの一覧など）はドロップ先にしない。Tk ではメニューもそれ自体が
+    窓で、macOS ではドロップ先に登録しただけで、起動のたびに中身の無い黒い窓
+    （題名「!menu」）が画面に出ていた。"""
+    import main
+    if not main._HAS_DND:
+        pytest.skip("tkinterdnd2 が無い")
+    app.after_cancel(app._drop_after)
+    app._register_drop_tree_later()
+    if not app._dnd_ready:
+        pytest.skip("D&D の部品を読み込めない環境")
+
+    def walk(w):
+        for c in w.winfo_children():
+            yield c
+            yield from walk(c)
+    menus = [w for w in walk(app) if w.winfo_class() == "Menu"]
+    assert menus                                   # 本文の右クリックなど、起動時からある
+    assert all(not m.bind("<<Drop>>") for m in menus)
+    assert all(not m.winfo_ismapped() for m in menus)
+    assert app.text.bind("<<Drop>>")               # ほかの部品には、これまでどおり落とせる
+
+
 def test_guides_ship_with_the_app_and_stay_offline():
     """使い方の案内（4つの言語）がアプリと一緒にあり、ネットから何も読み込まない
     （このアプリは、入れたあとはネットにつながない）。"""
